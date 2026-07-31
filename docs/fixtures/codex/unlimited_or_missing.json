@@ -1,0 +1,44 @@
+{
+  "_description": "Redacted fixture: unlimited credits and null secondary window. Tests the unlimited=true path and not-reported (null) values.",
+  "_source": "codex app-server --listen stdio:// | method: account/rateLimits/read",
+  "_capturedAt": "2026-07-31T00:00:00Z",
+  "id": "rl1",
+  "result": {
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 10,
+        "windowDurationMins": 10080,
+        "resetsAt": 1786036566
+      },
+      "secondary": null,
+      "credits": {
+        "hasCredits": true,
+        "unlimited": true,
+        "balance": null
+      },
+      "planType": "enterprise",
+      "rateLimitReachedType": null
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": {
+          "usedPercent": 10,
+          "windowDurationMins": 10080,
+          "resetsAt": 1786036566
+        },
+        "secondary": null,
+        "credits": {
+          "hasCredits": true,
+          "unlimited": true,
+          "balance": null
+        },
+        "planType": "enterprise",
+        "rateLimitReachedType": null
+      }
+    }
+  }
+}

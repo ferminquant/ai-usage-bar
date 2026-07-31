@@ -1,0 +1,10 @@
+{
+  "_description": "Redacted fixture: auth failure. The account/read response shows requiresOpenaiAuth=false, meaning no live session. The adapter returns freshness=not_configured.",
+  "_source": "codex app-server --listen stdio:// | method: account/read",
+  "_capturedAt": "2026-07-31T00:00:00Z",
+  "id": "acc1",
+  "result": {
+    "account": null,
+    "requiresOpenaiAuth": false
+  }
+}
