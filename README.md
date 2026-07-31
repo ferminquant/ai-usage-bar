@@ -58,6 +58,8 @@ are agreed.
 - [Quality engineering](docs/quality-engineering.md) — measurable gates,
   evidence artifacts, and the “constraints around agent-generated code”
   approach.
+- [Initial quality baseline](docs/generated/quality-baseline-20260731.md) —
+  the honest docs-only starting point for future ratchets.
 - [Testing strategy](docs/testing-strategy.md) — unit, contract, invariant,
   integration, UI, packaging, security, and mutation-test plans.
 - [Runner strategy](docs/runner-strategy.md) — whether the existing Budget

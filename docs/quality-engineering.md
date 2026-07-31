@@ -74,3 +74,6 @@ The first implementation issue must record:
 
 Future baselines compare against that record. Missing evidence is reported as
 unknown; it is not silently treated as passing.
+
+The starting point is recorded in
+[docs/generated/quality-baseline-20260731.md](generated/quality-baseline-20260731.md).
