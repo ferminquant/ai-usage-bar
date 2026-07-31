@@ -1,0 +1,77 @@
+# Product brief
+
+## Working name
+
+AI Usage Bar
+
+## Problem
+
+AI tools expose usage limits in different places and with different
+semantics. Codex, Kimi, Grok, and Ollama may use rolling windows, weekly
+pools, credits, spend, or local runtime counters. The user has to open several
+apps or dashboards to understand what is available.
+
+The goal is a calm, glanceable surface that reports the evidence each provider
+actually exposes without inventing a common unit.
+
+## Target user
+
+A developer who actively uses multiple AI subscriptions and local model
+runtimes and wants a small desktop indicator instead of several open
+dashboards.
+
+## User stories
+
+- As a user, I can see whether each provider is healthy, stale, unavailable,
+  or not configured.
+- As a user, I can see the active Codex/Kimi/Grok quota window and reset time
+  without opening a browser.
+- As a user, I can see local Ollama activity without confusing it with a
+  hosted subscription quota.
+- As a user, I can click the compact bar to inspect the source, timestamp,
+  window semantics, and any error.
+- As a user, I can disable a provider or hide a sensitive metric.
+- As a maintainer, I can add a provider without changing the shell or
+  normalization policy.
+
+## Goals
+
+### Near term
+
+- Windows-first compact taskbar/tray experience.
+- Local daemon with cached snapshots.
+- Provider adapter boundary for Codex, Kimi, Ollama, and Grok.
+- Explicit freshness, confidence, and source labels.
+- Offline fixture tests before live provider calls.
+
+### Later
+
+- macOS menu bar and Linux status-bar shells.
+- Additional providers through the same adapter contract.
+- Optional browser bridge for user-authorized dashboard-only metrics.
+- Notifications for a user-configured threshold or reset event.
+
+## Non-goals
+
+- Automating prompts or provider usage.
+- Circumventing rate limits, paywalls, or anti-bot controls.
+- Uploading credentials or raw provider responses to a central service.
+- Claiming exact quota data where the provider only exposes an estimate.
+- A billing or invoice reconciliation product.
+
+## Product decisions to validate
+
+1. Is a Windows tray icon plus a lightweight popup sufficient, or is a true
+   taskbar-integrated pill required?
+2. Which Codex and Kimi surfaces can be accessed through stable,
+   user-authorized interfaces?
+3. Should Grok consumer usage be a browser bridge in the first release, or be
+   deferred until a supported API exists?
+4. Which Ollama cloud metrics are available programmatically, and which must
+   remain dashboard-only?
+
+## Success signals
+
+The first release is useful when a user can understand provider state in under
+five seconds, can tell when a value is stale or unavailable, and can add or
+remove a provider without reinstalling the shell.
