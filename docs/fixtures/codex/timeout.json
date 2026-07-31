@@ -1,0 +1,11 @@
+{
+  "_description": "Redacted fixture: timeout. No JSON-RPC response received within the adapter deadline. The adapter returns freshness=unavailable with error.code=timeout. No raw payload.",
+  "_source": "codex app-server --listen stdio:// | method: account/rateLimits/read (no response)",
+  "_capturedAt": "2026-07-31T00:00:00Z",
+  "id": "rl1",
+  "result": null,
+  "_error": {
+    "code": "timeout",
+    "message": "No response from app-server within 5000ms."
+  }
+}

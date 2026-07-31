@@ -15,10 +15,10 @@ authoritative.
 
 ## Status
 
-Draft. Field names and value semantics are frozen enough to unblock the
-provider evidence spikes (#2-#5) and the daemon (#6). They are expected to
-be revised once when the first real provider response (Codex) is captured,
-and only then. Adapter implementation must not start before that revision.
+Revised after the Codex evidence spike (#2). The Codex-specific mapping is
+now backed by a real response. Field names and value semantics are frozen
+for adapter work. The other providers (Kimi, Ollama, Grok) remain planning
+notes until their spikes (#3-#5) complete.
 
 ## Guiding rules
 
@@ -200,9 +200,16 @@ renders each independently. Examples:
 These are planning notes, not fixtures. Real field semantics are recorded by
 the evidence spikes (#2-#5) and then folded back here.
 
-- **Codex**: plan-dependent shared agentic pool. Expect multiple windows
-  with reset times. `metric_kind=quota`, `source=cli` or `source=api`.
-  Reset times are required for a live snapshot.
+- **Codex**: plan-dependent shared agentic pool. The verified source is
+  the Codex CLI app-server (`codex app-server --listen stdio://`), JSON-RPC
+  method `account/rateLimits/read`. It exposes `usedPercent` (0-100), not
+  raw counts, so the adapter stores `used=<percent>`, `limit=100`,
+  `unit="percent"`. Multiple windows (`primary`, `secondary`) become
+  separate snapshots with distinct `window_label`. `resetsAt` is Unix
+  epoch seconds and must be converted to ISO 8601. `windowDurationMins`
+  (10080=weekly, 1440=daily) is used to derive `window_kind`. Credits are
+  a separate snapshot with `metric_kind=credits`. See
+  [codex-spike.md](spikes/codex-spike.md) for the full evidence.
 - **Kimi**: rolling 5-hour and weekly limits plus membership/credit cycle.
   Expect `metric_kind=quota` and `metric_kind=credits` snapshots. The
   evidence spike (#3) must confirm which surface exposes each.
@@ -300,9 +307,10 @@ This draft is the first step on #1, not the close. #1 closes when:
       (done above as a required list; actual fixtures come from #2-#5).
 - [ ] Unit, property-based, and invariant test cases are listed before
       implementation (done above).
-- [ ] The contract is revised once after the Codex evidence spike (#2)
+- [x] The contract is revised once after the Codex evidence spike (#2)
       captures the first real response, then frozen for adapter work.
 
-The final checkbox is intentionally not checked. The contract is expected
-to change once when real Codex data lands, and only then.
+The Codex revision is complete. The contract is now frozen for Codex
+adapter work. Kimi, Ollama, and Grok notes remain planning until their
+spikes (#3-#5) complete.
 ~~~

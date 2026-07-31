@@ -1,0 +1,52 @@
+{
+  "_description": "Redacted fixture: response with both primary and secondary windows. Secondary window has a shorter duration (daily). Email and account_id redacted.",
+  "_source": "codex app-server --listen stdio:// | method: account/rateLimits/read",
+  "_capturedAt": "2026-07-31T00:00:00Z",
+  "id": "rl1",
+  "result": {
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 65,
+        "windowDurationMins": 10080,
+        "resetsAt": 1786036566
+      },
+      "secondary": {
+        "usedPercent": 80,
+        "windowDurationMins": 1440,
+        "resetsAt": 1785974400
+      },
+      "credits": {
+        "hasCredits": false,
+        "unlimited": false,
+        "balance": "0"
+      },
+      "planType": "pro",
+      "rateLimitReachedType": null
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": {
+          "usedPercent": 65,
+          "windowDurationMins": 10080,
+          "resetsAt": 1786036566
+        },
+        "secondary": {
+          "usedPercent": 80,
+          "windowDurationMins": 1440,
+          "resetsAt": 1785974400
+        },
+        "credits": {
+          "hasCredits": false,
+          "unlimited": false,
+          "balance": "0"
+        },
+        "planType": "pro",
+        "rateLimitReachedType": null
+      }
+    }
+  }
+}

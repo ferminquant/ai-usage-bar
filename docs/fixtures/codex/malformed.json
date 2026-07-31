@@ -1,0 +1,19 @@
+{
+  "_description": "Redacted fixture: schema drift. The response does not match the expected RateLimitSnapshot shape (missing required usedPercent, unexpected field types). The adapter returns freshness=unavailable with error.code=schema_drift.",
+  "_source": "codex app-server --listen stdio:// | method: account/rateLimits/read (malformed)",
+  "_capturedAt": "2026-07-31T00:00:00Z",
+  "id": "rl1",
+  "result": {
+    "rateLimits": {
+      "limitId": "codex",
+      "primary": {
+        "windowDurationMins": "not-a-number",
+        "resetsAt": "next-tuesday"
+      }
+    }
+  },
+  "_error": {
+    "code": "schema_drift",
+    "message": "Response failed schema validation: usedPercent is required; windowDurationMins must be integer; resetsAt must be integer or null."
+  }
+}
