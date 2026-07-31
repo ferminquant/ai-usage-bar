@@ -80,3 +80,19 @@ The initial GitHub issues are intentionally grouped into:
 Dependencies are written in issue bodies so the backlog can be worked in
 vertical slices instead of completing an entire layer before demonstrating
 value.
+
+## Initial GitHub backlog
+
+The first backlog is live in the private repository:
+
+| Slice | Issues |
+| --- | --- |
+| Contract and evidence | [#1](https://github.com/ferminquant/ai-usage-bar/issues/1), [#2](https://github.com/ferminquant/ai-usage-bar/issues/2), [#3](https://github.com/ferminquant/ai-usage-bar/issues/3), [#4](https://github.com/ferminquant/ai-usage-bar/issues/4), [#5](https://github.com/ferminquant/ai-usage-bar/issues/5) |
+| Vertical slice | [#6](https://github.com/ferminquant/ai-usage-bar/issues/6), [#7](https://github.com/ferminquant/ai-usage-bar/issues/7), [#8](https://github.com/ferminquant/ai-usage-bar/issues/8) |
+| Provider expansion | [#9](https://github.com/ferminquant/ai-usage-bar/issues/9), [#10](https://github.com/ferminquant/ai-usage-bar/issues/10), [#17](https://github.com/ferminquant/ai-usage-bar/issues/17), [#18](https://github.com/ferminquant/ai-usage-bar/issues/18) |
+| Quality and safety | [#11](https://github.com/ferminquant/ai-usage-bar/issues/11), [#12](https://github.com/ferminquant/ai-usage-bar/issues/12), [#13](https://github.com/ferminquant/ai-usage-bar/issues/13), [#14](https://github.com/ferminquant/ai-usage-bar/issues/14), [#15](https://github.com/ferminquant/ai-usage-bar/issues/15) |
+| Release | [#16](https://github.com/ferminquant/ai-usage-bar/issues/16) |
+
+The first recommended slice is #1, then the four provider evidence spikes
+can run in parallel. Implementation should not begin for a provider until
+its spike records a supported source and redacted fixture.

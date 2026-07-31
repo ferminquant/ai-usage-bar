@@ -99,7 +99,7 @@ constraints include:
 There is no source-code coverage baseline yet because the repository is still
 documentation-only. The thresholds and artifacts are defined in
 [Quality engineering](docs/quality-engineering.md), and implementation work
-is tracked in GitHub Issues.
+is tracked in the [GitHub issue backlog](https://github.com/ferminquant/ai-usage-bar/issues).
 
 ## Development principles
 
