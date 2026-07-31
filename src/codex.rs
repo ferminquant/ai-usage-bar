@@ -284,6 +284,163 @@ pub fn error_snapshot(
     }
 }
 
+// ---------------------------------------------------------------------------
+// IO layer: spawn `codex app-server`, send JSON-RPC over stdio, parse responses.
+// ---------------------------------------------------------------------------
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+struct JsonRpcRequest {
+    id: &'static str,
+    method: &'static str,
+    params: serde_json::Value,
+}
+
+impl JsonRpcRequest {
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.id,
+            "method": self.method,
+            "params": self.params,
+        })
+        .to_string()
+    }
+}
+
+fn find_codex_binary() -> Result<String, CodexAdapterError> {
+    let candidates = [
+        std::env::var("CODEX_BIN").ok(),
+        std::env::var("LOCALAPPDATA").ok().map(|d| {
+            format!("{d}\\OpenAI\\Codex\\bin\\codex.exe")
+        }),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if std::path::Path::new(&candidate).exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(CodexAdapterError::Io(
+        "codex binary not found; set CODEX_BIN or install Codex CLI".to_string(),
+    ))
+}
+
+fn send_jsonrpc(
+    child_stdin: &mut std::process::ChildStdin,
+    line: &str,
+) -> Result<(), CodexAdapterError> {
+    child_stdin
+        .write_all(line.as_bytes())
+        .and_then(|_| child_stdin.write_all(b"\n"))
+        .map_err(|e| CodexAdapterError::Io(e.to_string()))
+}
+
+fn read_response(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    expected_id: &str,
+    deadline: std::time::Instant,
+) -> Result<serde_json::Value, CodexAdapterError> {
+    let mut buf = String::new();
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err(CodexAdapterError::Timeout);
+        }
+        buf.clear();
+        let n = reader
+            .read_line(&mut buf)
+            .map_err(|e| CodexAdapterError::Io(e.to_string()))?;
+        if n == 0 {
+            return Err(CodexAdapterError::Io("app-server closed stdout".to_string()));
+        }
+        let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let msg: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if msg.get("id").and_then(|i| i.as_str()) == Some(expected_id) {
+            if let Some(err) = msg.get("error") {
+                return Err(CodexAdapterError::SchemaDrift(
+                    err.to_string(),
+                ));
+            }
+            return Ok(msg.get("result").cloned().unwrap_or(serde_json::Value::Null));
+        }
+    }
+}
+
+pub fn fetch_codex_snapshots() -> Result<Vec<UsageSnapshot>, CodexAdapterError> {
+    let codex_bin = find_codex_binary()?;
+    let mut child = Command::new(&codex_bin)
+        .arg("app-server")
+        .arg("--listen")
+        .arg("stdio://")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| CodexAdapterError::Io(format!("failed to spawn codex: {e}")))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| CodexAdapterError::Io("no stdin".into()))?;
+    let mut stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| CodexAdapterError::Io("no stdout".into()))?,
+    );
+
+    let init_req = JsonRpcRequest {
+        id: "init",
+        method: "initialize",
+        params: serde_json::json!({
+            "clientInfo": { "name": "ai-usage-bar", "version": "0.1.0" }
+        }),
+    };
+    send_jsonrpc(&mut stdin, &init_req.to_json())?;
+    let deadline = std::time::Instant::now() + DEFAULT_TIMEOUT;
+    let _init_resp = read_response(&mut stdout, "init", deadline)?;
+
+    let account_req = JsonRpcRequest {
+        id: "acc1",
+        method: "account/read",
+        params: serde_json::json!({}),
+    };
+    send_jsonrpc(&mut stdin, &account_req.to_json())?;
+    let deadline = std::time::Instant::now() + DEFAULT_TIMEOUT;
+    let account_msg = read_response(&mut stdout, "acc1", deadline)?;
+    let account_info = parse_account_response(&account_msg)?;
+    let account_id = account_id_from_email(account_info.email.as_deref());
+
+    let limits_req = JsonRpcRequest {
+        id: "rl1",
+        method: "account/rateLimits/read",
+        params: serde_json::json!({}),
+    };
+    send_jsonrpc(&mut stdin, &limits_req.to_json())?;
+    let deadline = std::time::Instant::now() + DEFAULT_TIMEOUT;
+    let limits_msg = read_response(&mut stdout, "rl1", deadline)?;
+    let observed_at = Utc::now();
+    let snaps = parse_rate_limits_response(&limits_msg, observed_at, &account_id)?;
+
+    let _ = stdin.write_all(b"\n");
+    let _ = stdin.flush();
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    Ok(snaps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
