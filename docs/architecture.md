@@ -42,6 +42,12 @@ provider percentages should be combined.
 
 ### Usage snapshot
 
+The authoritative contract is
+[snapshot-contract.md](snapshot-contract.md), which refines the sketch
+below with explicit state/value semantics, per-provider notes, fixture
+requirements, and the unit/property/invariant test cases. Where the two
+disagree, the contract file is authoritative.
+
 The proposed snapshot shape is conceptually:
 
 ~~~text
@@ -56,12 +62,12 @@ unit
 resets_at
 observed_at
 source: api | cli | local_api | browser | fixture
-freshness: live | cached | stale | unavailable
+freshness: live | cached | stale | unavailable | not_configured | not_applicable
 confidence: exact | reported_estimate | inferred | unknown
-error_code (optional, redacted)
+error (optional, redacted, object with code and message)
 ~~~
 
-Values may be absent. “Not reported” is different from zero, unlimited, and
+Values may be absent. "Not reported" is different from zero, unlimited, and
 unavailable.
 
 ### Cache

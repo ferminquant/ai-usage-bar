@@ -51,6 +51,10 @@ are agreed.
   non-goals.
 - [Architecture](docs/architecture.md) — local daemon, adapters, cache, and
   desktop shell boundaries.
+- [Snapshot contract](docs/snapshot-contract.md) — the provider-neutral
+  usage snapshot model, state/value semantics, fixture requirements, and the
+  unit/property/invariant test cases that adapters and the cache must
+  satisfy.
 - [Provider matrix](docs/provider-matrix.md) — what is known, what is
   uncertain, and the proposed evidence path for each provider.
 - [Agile plan](docs/agile-plan.md) — increments, definition of ready/done,
