@@ -16,6 +16,7 @@ mod windows_shell {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Controls::*;
     use windows::Win32::UI::HiDpi::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     const WIDGET_W: i32 = 210;
@@ -25,7 +26,7 @@ mod windows_shell {
     const REFRESH_CENTER_X: i32 = 174;
     const PROVIDER_CENTER_X: i32 = 201;
     const SCREEN_MARGIN: i32 = 12;
-    const TASKBAR_GAP: i32 = 2;
+    const TASKBAR_GAP: i32 = 4;
     const REFRESH_INTERVAL_MS: u32 = 60_000;
     const REFRESH_TIMER_ID: usize = 1;
 
@@ -358,6 +359,18 @@ mod windows_shell {
         }
     }
 
+    fn taskbar_rects() -> Option<(RECT, RECT)> {
+        unsafe {
+            let taskbar = FindWindowW(w!("Shell_TrayWnd"), None).ok()?;
+            let tray = FindWindowExW(Some(taskbar), None, w!("TrayNotifyWnd"), None).ok()?;
+            let mut taskbar_rect = RECT::default();
+            let mut tray_rect = RECT::default();
+            GetWindowRect(taskbar, &mut taskbar_rect).ok()?;
+            GetWindowRect(tray, &mut tray_rect).ok()?;
+            Some((taskbar_rect, tray_rect))
+        }
+    }
+
     fn clamp_to_monitor(x: i32, y: i32, monitor: RECT) -> (i32, i32) {
         let max_x = (monitor.right - WIDGET_W).max(monitor.left);
         let max_y = (monitor.bottom - WIDGET_H).max(monitor.top);
@@ -365,6 +378,30 @@ mod windows_shell {
     }
 
     fn compute_widget_pos() -> (i32, i32) {
+        if let Some((taskbar, tray)) = taskbar_rects() {
+            let taskbar_width = taskbar.right - taskbar.left;
+            let taskbar_height = taskbar.bottom - taskbar.top;
+            let (x, y) = if taskbar_width >= taskbar_height {
+                (
+                    tray.left - WIDGET_W - TASKBAR_GAP,
+                    taskbar.top + ((taskbar_height - WIDGET_H) / 2).max(0),
+                )
+            } else {
+                let x = taskbar.left + ((taskbar_width - WIDGET_W) / 2).max(0);
+                let y = if tray.top > taskbar.top {
+                    tray.top - WIDGET_H - TASKBAR_GAP
+                } else {
+                    tray.bottom + TASKBAR_GAP
+                };
+                (x, y)
+            };
+
+            if let Some((monitor, _)) = monitor_work_area() {
+                return clamp_to_monitor(x, y, monitor);
+            }
+            return (x, y);
+        }
+
         let Some((monitor, work)) = monitor_work_area() else {
             return (0, 0);
         };
@@ -419,11 +456,42 @@ mod windows_shell {
     fn make_tool_info(hwnd: HWND, text: &mut [u16]) -> TTTOOLINFOW {
         TTTOOLINFOW {
             cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
-            uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+            uFlags: TTF_IDISHWND,
             hwnd,
             uId: hwnd.0 as usize,
             lpszText: PWSTR(text.as_mut_ptr()),
             ..Default::default()
+        }
+    }
+
+    fn relay_tooltip_event(
+        hwnd: HWND,
+        state: &AppState,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) {
+        let Some(tooltip_hwnd) = state.tooltip_hwnd else {
+            return;
+        };
+
+        unsafe {
+            let mut point = POINT::default();
+            let _ = GetCursorPos(&mut point);
+            let mut event = MSG {
+                hwnd,
+                message,
+                wParam: wparam,
+                lParam: lparam,
+                pt: point,
+                ..Default::default()
+            };
+            let _ = SendMessageW(
+                tooltip_hwnd,
+                TTM_RELAYEVENT,
+                None,
+                Some(LPARAM(&mut event as *mut MSG as isize)),
+            );
         }
     }
 
@@ -462,6 +530,7 @@ mod windows_shell {
                 Some(hinst),
                 None,
             ) else {
+                eprintln!("failed to create tooltip window");
                 return;
             };
 
@@ -475,6 +544,7 @@ mod windows_shell {
                 Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
             );
             if added.0 == 0 {
+                eprintln!("failed to add tooltip tool");
                 let _ = DestroyWindow(tooltip_hwnd);
                 state.tooltip_hwnd = None;
                 return;
@@ -649,6 +719,32 @@ mod windows_shell {
             WM_ERASEBKGND => LRESULT(1),
             WM_NCHITTEST => LRESULT(HTCLIENT as isize),
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_SETCURSOR => {
+                if let Ok(cursor) = LoadCursorW(None, IDC_ARROW) {
+                    SetCursor(Some(cursor));
+                    return LRESULT(1);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_MOUSEMOVE => {
+                if let Some(state) = app_state_ref(hwnd) {
+                    relay_tooltip_event(hwnd, state, msg, wparam, lparam);
+                }
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    ..Default::default()
+                };
+                let _ = TrackMouseEvent(&mut tracking);
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                if let Some(state) = app_state_ref(hwnd) {
+                    relay_tooltip_event(hwnd, state, msg, wparam, lparam);
+                }
+                LRESULT(0)
+            }
             WM_LBUTTONUP => {
                 let click_x = (lparam.0 as i16) as i32;
                 if (REFRESH_CENTER_X - 10..=REFRESH_CENTER_X + 10).contains(&click_x) {
