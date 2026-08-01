@@ -18,8 +18,12 @@ mod windows_shell {
     use windows::Win32::UI::HiDpi::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    const WIDGET_W: i32 = 80;
-    const WIDGET_H: i32 = 10;
+    const WIDGET_W: i32 = 210;
+    const WIDGET_H: i32 = 44;
+    const CARD_W: i32 = 158;
+    const CARD_H: i32 = 40;
+    const REFRESH_CENTER_X: i32 = 174;
+    const PROVIDER_CENTER_X: i32 = 201;
     const SCREEN_MARGIN: i32 = 12;
     const TASKBAR_GAP: i32 = 2;
     const REFRESH_INTERVAL_MS: u32 = 60_000;
@@ -32,11 +36,16 @@ mod windows_shell {
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
 
     const COLOR_BACKGROUND: COLORREF = COLORREF(0x002a2a2a);
+    const COLOR_OUTER: COLORREF = COLORREF(0x00141414);
     const COLOR_BORDER: COLORREF = COLORREF(0x00555555);
+    const COLOR_CARD_BORDER: COLORREF = COLORREF(0x006a6a6a);
     const COLOR_NEUTRAL: COLORREF = COLORREF(0x009e9e9e);
     const COLOR_GREEN: COLORREF = COLORREF(0x0050af4c);
     const COLOR_YELLOW: COLORREF = COLORREF(0x0007c1ff);
     const COLOR_RED: COLORREF = COLORREF(0x003643f4);
+    const COLOR_TEXT: COLORREF = COLORREF(0x00f5f5f5);
+    const COLOR_MUTED: COLORREF = COLORREF(0x00c0c0c0);
+    const COLOR_ACCENT: COLORREF = COLORREF(0x00a8e6c0);
 
     struct AppState {
         snapshots: Vec<UsageSnapshot>,
@@ -113,7 +122,110 @@ mod windows_shell {
         }
     }
 
-    fn paint_bar(hwnd: HWND, used_percent: Option<f64>) {
+    fn fill_round_rect(hdc: HDC, rect: RECT, radius: i32, color: COLORREF) {
+        unsafe {
+            let brush = CreateSolidBrush(color);
+            let pen = CreatePen(PS_SOLID, 1, color);
+            let old_brush = SelectObject(hdc, brush.into());
+            let old_pen = SelectObject(hdc, pen.into());
+            let _ = RoundRect(
+                hdc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                radius,
+                radius,
+            );
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(brush.into());
+            let _ = DeleteObject(pen.into());
+        }
+    }
+
+    fn stroke_round_rect(hdc: HDC, rect: RECT, radius: i32, color: COLORREF) {
+        unsafe {
+            let pen = CreatePen(PS_SOLID, 1, color);
+            let old_pen = SelectObject(hdc, pen.into());
+            let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            let _ = RoundRect(
+                hdc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                radius,
+                radius,
+            );
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen.into());
+        }
+    }
+
+    fn draw_text(
+        hdc: HDC,
+        rect: RECT,
+        text: &str,
+        height: i32,
+        weight: FONT_WEIGHT,
+        color: COLORREF,
+        format: DRAW_TEXT_FORMAT,
+    ) {
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        if wide.is_empty() {
+            return;
+        }
+
+        unsafe {
+            let font = CreateFontW(
+                -height,
+                0,
+                0,
+                0,
+                weight.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+                w!("Segoe UI"),
+            );
+            let old_font = SelectObject(hdc, font.into());
+            let old_color = SetTextColor(hdc, color);
+            let old_background = SetBkMode(hdc, TRANSPARENT);
+            let mut draw_rect = rect;
+            let _ = DrawTextW(hdc, &mut wide, &mut draw_rect, format);
+            let _ = SetBkMode(hdc, BACKGROUND_MODE(old_background as u32));
+            let _ = SetTextColor(hdc, old_color);
+            SelectObject(hdc, old_font);
+            let _ = DeleteObject(font.into());
+        }
+    }
+
+    fn draw_circle(hdc: HDC, center_x: i32, center_y: i32, radius: i32, color: COLORREF) {
+        unsafe {
+            let pen = CreatePen(PS_SOLID, 1, color);
+            let old_pen = SelectObject(hdc, pen.into());
+            let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            let _ = Ellipse(
+                hdc,
+                center_x - radius,
+                center_y - radius,
+                center_x + radius,
+                center_y + radius,
+            );
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen.into());
+        }
+    }
+
+    fn paint_widget(hwnd: HWND, used_percent: Option<f64>) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
@@ -123,30 +235,108 @@ mod windows_shell {
                 right: WIDGET_W,
                 bottom: WIDGET_H,
             };
-            fill_rect(hdc, client, COLOR_BORDER);
+            fill_rect(hdc, client, COLOR_OUTER);
 
-            let inner = RECT {
-                left: 1,
-                top: 1,
-                right: WIDGET_W - 1,
-                bottom: WIDGET_H - 1,
+            let card = RECT {
+                left: 0,
+                top: 0,
+                right: CARD_W,
+                bottom: CARD_H,
             };
-            fill_rect(hdc, inner, COLOR_BACKGROUND);
+            fill_round_rect(hdc, card, 18, COLOR_BACKGROUND);
+            stroke_round_rect(hdc, card, 18, COLOR_CARD_BORDER);
 
-            let (percent, color) = percent_and_color(used_percent);
-            if let Some(percent) = percent {
-                let inner_width = inner.right - inner.left;
-                let fill_width = ((inner_width as f64 * percent) / 100.0).floor() as i32;
+            let (used, color) = percent_and_color(used_percent);
+            let remaining = used.map(|value| (100.0 - value).clamp(0.0, 100.0));
+            let remaining_label = remaining
+                .map(|value| format!("{value:.0}%"))
+                .unwrap_or_else(|| "—".to_string());
+            draw_text(
+                hdc,
+                RECT {
+                    left: 14,
+                    top: 2,
+                    right: 82,
+                    bottom: 29,
+                },
+                &remaining_label,
+                21,
+                FW_BOLD,
+                COLOR_TEXT,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+            draw_text(
+                hdc,
+                RECT {
+                    left: 88,
+                    top: 4,
+                    right: CARD_W - 8,
+                    bottom: 27,
+                },
+                "Codex left",
+                11,
+                FW_NORMAL,
+                COLOR_MUTED,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+
+            let track = RECT {
+                left: 17,
+                top: 33,
+                right: CARD_W - 16,
+                bottom: 36,
+            };
+            fill_round_rect(hdc, track, 3, COLOR_BORDER);
+            if let Some(remaining) = remaining {
+                let fill_width = (((track.right - track.left) as f64 * remaining) / 100.0)
+                    .round()
+                    .clamp(0.0, (track.right - track.left) as f64)
+                    as i32;
                 if fill_width > 0 {
-                    let fill = RECT {
-                        left: inner.left,
-                        top: inner.top,
-                        right: inner.left + fill_width,
-                        bottom: inner.bottom,
-                    };
-                    fill_rect(hdc, fill, color);
+                    fill_round_rect(
+                        hdc,
+                        RECT {
+                            left: track.left,
+                            top: track.top,
+                            right: track.left + fill_width,
+                            bottom: track.bottom,
+                        },
+                        3,
+                        color,
+                    );
                 }
             }
+
+            draw_circle(hdc, REFRESH_CENTER_X, 19, 7, COLOR_BORDER);
+            draw_text(
+                hdc,
+                RECT {
+                    left: REFRESH_CENTER_X - 8,
+                    top: 10,
+                    right: REFRESH_CENTER_X + 8,
+                    bottom: 28,
+                },
+                "↻",
+                13,
+                FW_NORMAL,
+                COLOR_ACCENT,
+                DT_SINGLELINE | DT_VCENTER | DT_CENTER,
+            );
+            draw_circle(hdc, PROVIDER_CENTER_X, 19, 8, COLOR_BORDER);
+            draw_text(
+                hdc,
+                RECT {
+                    left: PROVIDER_CENTER_X - 8,
+                    top: 10,
+                    right: PROVIDER_CENTER_X + 8,
+                    bottom: 28,
+                },
+                "✦",
+                12,
+                FW_NORMAL,
+                COLOR_TEXT,
+                DT_SINGLELINE | DT_VCENTER | DT_CENTER,
+            );
             let _ = EndPaint(hwnd, &paint);
         }
     }
@@ -453,14 +643,19 @@ mod windows_shell {
         match msg {
             WM_PAINT => {
                 let used_percent = app_state_ref(hwnd).and_then(|state| state.used_percent);
-                paint_bar(hwnd, used_percent);
+                paint_widget(hwnd, used_percent);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_NCHITTEST => LRESULT(HTCLIENT as isize),
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_LBUTTONUP => {
-                print_details(hwnd);
+                let click_x = (lparam.0 as i16) as i32;
+                if (REFRESH_CENTER_X - 10..=REFRESH_CENTER_X + 10).contains(&click_x) {
+                    begin_refresh(hwnd);
+                } else {
+                    print_details(hwnd);
+                }
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
