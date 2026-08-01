@@ -1,184 +1,592 @@
-use ai_usage_bar::{build_tray_view, fetch_codex_snapshots, ProviderCard, UsageSnapshot};
-use std::sync::{Arc, Mutex};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{TrayIconBuilder, TrayIconEvent};
-
-#[derive(Debug, Clone)]
-enum AppEvent {
-    Refresh,
-    RefreshDone,
-    Quit,
-    ShowDetails,
-}
-
-fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
-    let cards = ProviderCard::from_snapshots(snapshots);
-    let mut lines = Vec::new();
-    for card in cards {
-        lines.push(format!("=== {} ({}) ===", card.provider, card.account_id));
-        for m in &card.metrics {
-            let used = m.used.as_deref().unwrap_or("?");
-            let limit = m.limit.as_deref().unwrap_or("?");
-            let unit = &m.unit;
-            let resets = m.resets_at.as_deref().unwrap_or("?");
-            lines.push(format!(
-                "  [{}] {:?} {} — {}/{} {}, resets {}",
-                m.label, m.metric_kind, m.window_kind, used, limit, unit, resets
-            ));
-            lines.push(format!("    observed: {}", m.observed_at));
-            lines.push(format!("    source: {}, confidence: {}", m.source, m.confidence));
-            if m.unlimited {
-                lines.push("    unlimited: true".to_string());
-            }
-            if let Some(err) = &m.error {
-                lines.push(format!("    error: {err}"));
-            }
-        }
-        lines.push(String::new());
-    }
-    lines.join("\n")
-}
-
-fn build_icon(_emoji: &str, used_percent: Option<f64>) -> Option<tray_icon::Icon> {
-    let rgba = render_progress_icon(_emoji, used_percent);
-    tray_icon::Icon::from_rgba(rgba, 64, 64).ok()
-}
-
-fn render_progress_icon(_emoji: &str, used_percent: Option<f64>) -> Vec<u8> {
-    let mut buf = vec![0u8; 64 * 64 * 4];
-    let bg = [0x33, 0x33, 0x33, 0xff];
-    let border = [0x88, 0x88, 0x88, 0xff];
-
-    let pct = used_percent.unwrap_or(0.0).clamp(0.0, 100.0);
-    let fill_color = if pct >= 90.0 {
-        [0xf4, 0x43, 0x36, 0xff]
-    } else if pct >= 70.0 {
-        [0xff, 0xc1, 0x07, 0xff]
-    } else {
-        [0x4c, 0xaf, 0x50, 0xff]
-    };
-
-    let x0 = 8i32;
-    let x1 = 56i32;
-    let y0 = 8i32;
-    let y1 = 56i32;
-    let fill_w = ((x1 - x0) as f64 * pct / 100.0) as i32;
-    let fill_x1 = (x0 + fill_w).min(x1);
-
-    for y in 0..64i32 {
-        for x in 0..64i32 {
-            let idx = ((y * 64 + x) * 4) as usize;
-            if x < x0 || x >= x1 || y < y0 || y >= y1 {
-                continue;
-            }
-            let is_border = x == x0 || x == x1 - 1 || y == y0 || y == y1 - 1;
-            if is_border {
-                buf[idx..idx + 4].copy_from_slice(&border);
-            } else if x < fill_x1 {
-                buf[idx..idx + 4].copy_from_slice(&fill_color);
-            } else {
-                buf[idx..idx + 4].copy_from_slice(&bg);
-            }
-        }
-    }
-    buf
-}
-
+#[cfg(not(windows))]
 fn main() {
-    let snapshots: Arc<Mutex<Vec<UsageSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
+    eprintln!("ai-usage-bar-shell is only available on Windows");
+}
 
-    let mut event_loop_builder = EventLoopBuilder::<AppEvent>::with_user_event();
-    let event_loop = event_loop_builder.build();
-    let proxy = event_loop.create_proxy();
+#[cfg(windows)]
+mod windows_shell {
+    use ai_usage_bar::{build_tray_view, fetch_codex_snapshots, ProviderCard, UsageSnapshot};
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use std::thread;
 
-    let menu = Menu::new();
-    let refresh_item = MenuItem::new("Refresh", true, None);
-    let detail_item = MenuItem::new("Print details to console", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-    menu.append(&refresh_item).unwrap();
-    menu.append(&detail_item).unwrap();
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-    menu.append(&quit_item).unwrap();
+    use windows::core::*;
+    use windows::Win32::Foundation::*;
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::Controls::*;
+    use windows::Win32::UI::HiDpi::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
 
-    let refresh_id = refresh_item.id().clone();
-    let detail_id = detail_item.id().clone();
-    let quit_id = quit_item.id().clone();
+    const WIDGET_W: i32 = 80;
+    const WIDGET_H: i32 = 10;
+    const SCREEN_MARGIN: i32 = 12;
+    const TASKBAR_GAP: i32 = 2;
+    const REFRESH_INTERVAL_MS: u32 = 60_000;
+    const REFRESH_TIMER_ID: usize = 1;
 
-    let tray = TrayIconBuilder::new()
-        .with_tooltip("AI Usage Bar — loading...")
-        .with_menu(Box::new(menu))
-        .with_title("AI Usage Bar")
-        .build()
-        .expect("failed to build tray icon");
+    const MENU_REFRESH: usize = 1001;
+    const MENU_DETAILS: usize = 1002;
+    const MENU_QUIT: usize = 1003;
 
-    if let Some(icon) = build_icon("\u{2014}", None) {
-        let _ = tray.set_icon(Some(icon));
+    const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
+
+    const COLOR_BACKGROUND: COLORREF = COLORREF(0x002a2a2a);
+    const COLOR_BORDER: COLORREF = COLORREF(0x00555555);
+    const COLOR_NEUTRAL: COLORREF = COLORREF(0x009e9e9e);
+    const COLOR_GREEN: COLORREF = COLORREF(0x0050af4c);
+    const COLOR_YELLOW: COLORREF = COLORREF(0x0007c1ff);
+    const COLOR_RED: COLORREF = COLORREF(0x003643f4);
+
+    struct AppState {
+        snapshots: Vec<UsageSnapshot>,
+        used_percent: Option<f64>,
+        tooltip: String,
+        tooltip_hwnd: Option<HWND>,
+        tooltip_text: Vec<u16>,
+        refresh_in_flight: bool,
     }
 
-    let proxy_for_tray = proxy.clone();
-    TrayIconEvent::set_event_handler(Some(move |_| {
-        if let Ok(TrayIconEvent::Click { button, .. }) = TrayIconEvent::receiver().try_recv() {
-            if button == tray_icon::MouseButton::Left {
-                let _ = proxy_for_tray.send_event(AppEvent::ShowDetails);
+    struct RefreshPayload {
+        result: std::result::Result<Vec<UsageSnapshot>, String>,
+    }
+
+    impl AppState {
+        fn loading() -> Self {
+            Self {
+                snapshots: Vec::new(),
+                used_percent: None,
+                tooltip: "AI Usage Bar — loading…".to_string(),
+                tooltip_hwnd: None,
+                tooltip_text: Vec::new(),
+                refresh_in_flight: false,
             }
         }
-    }));
+    }
 
-    let proxy_for_menu = proxy.clone();
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == refresh_id {
-            let _ = proxy_for_menu.send_event(AppEvent::Refresh);
-        } else if event.id == detail_id {
-            let _ = proxy_for_menu.send_event(AppEvent::ShowDetails);
-        } else if event.id == quit_id {
-            let _ = proxy_for_menu.send_event(AppEvent::Quit);
+    fn to_wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn app_state(hwnd: HWND) -> Option<&'static mut AppState> {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut AppState;
+        if ptr.is_null() {
+            None
+        } else {
+            // The pointer is owned by the window and lives until WM_NCDESTROY.
+            Some(unsafe { &mut *ptr })
         }
-    }));
+    }
 
-    let _ = proxy.send_event(AppEvent::Refresh);
+    fn app_state_ref(hwnd: HWND) -> Option<&'static AppState> {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const AppState;
+        if ptr.is_null() {
+            None
+        } else {
+            // The pointer is owned by the window and lives until WM_NCDESTROY.
+            Some(unsafe { &*ptr })
+        }
+    }
 
-    let snaps_arc = Arc::clone(&snapshots);
-    let proxy_arc = event_loop.create_proxy();
+    fn percent_and_color(used_percent: Option<f64>) -> (Option<f64>, COLORREF) {
+        match used_percent.filter(|value| value.is_finite()) {
+            None => (None, COLOR_NEUTRAL),
+            Some(value) => {
+                let percent = value.clamp(0.0, 100.0);
+                let color = if percent >= 90.0 {
+                    COLOR_RED
+                } else if percent >= 70.0 {
+                    COLOR_YELLOW
+                } else {
+                    COLOR_GREEN
+                };
+                (Some(percent), color)
+            }
+        }
+    }
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+    fn fill_rect(hdc: HDC, rect: RECT, color: COLORREF) {
+        unsafe {
+            let brush = CreateSolidBrush(color);
+            let _ = FillRect(hdc, &rect, brush);
+            let _ = DeleteObject(brush.into());
+        }
+    }
 
-        if let tao::event::Event::UserEvent(ev) = event {
-            match ev {
-                AppEvent::Refresh => {
-                    let snaps = Arc::clone(&snaps_arc);
-                    let proxy = proxy_arc.clone();
-                    std::thread::spawn(move || {
-                        let result = fetch_codex_snapshots();
-                        let mut snaps_guard = snaps.lock().unwrap();
-                        match result {
-                            Ok(s) => *snaps_guard = s,
-                            Err(e) => {
-                                eprintln!("refresh error: {e}");
-                                *snaps_guard = Vec::new();
-                            }
-                        }
-                        let _ = proxy.send_event(AppEvent::RefreshDone);
-                    });
+    fn paint_bar(hwnd: HWND, used_percent: Option<f64>) {
+        unsafe {
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut paint);
+            let client = RECT {
+                left: 0,
+                top: 0,
+                right: WIDGET_W,
+                bottom: WIDGET_H,
+            };
+            fill_rect(hdc, client, COLOR_BORDER);
+
+            let inner = RECT {
+                left: 1,
+                top: 1,
+                right: WIDGET_W - 1,
+                bottom: WIDGET_H - 1,
+            };
+            fill_rect(hdc, inner, COLOR_BACKGROUND);
+
+            let (percent, color) = percent_and_color(used_percent);
+            if let Some(percent) = percent {
+                let inner_width = inner.right - inner.left;
+                let fill_width = ((inner_width as f64 * percent) / 100.0).floor() as i32;
+                if fill_width > 0 {
+                    let fill = RECT {
+                        left: inner.left,
+                        top: inner.top,
+                        right: inner.left + fill_width,
+                        bottom: inner.bottom,
+                    };
+                    fill_rect(hdc, fill, color);
                 }
-                AppEvent::RefreshDone => {
-                    let snaps = snaps_arc.lock().unwrap();
-                    let vm = build_tray_view(&snaps);
-                    let _ = tray.set_tooltip(Some(&vm.tooltip));
-                    if let Some(icon) = build_icon(&vm.icon_text, vm.used_percent) {
-                        let _ = tray.set_icon(Some(icon));
+            }
+            let _ = EndPaint(hwnd, &paint);
+        }
+    }
+
+    fn monitor_work_area() -> Option<(RECT, RECT)> {
+        unsafe {
+            let monitor = MonitorFromWindow(HWND(null_mut()), MONITOR_DEFAULTTOPRIMARY);
+            if monitor.0.is_null() {
+                return None;
+            }
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return None;
+            }
+            Some((info.rcMonitor, info.rcWork))
+        }
+    }
+
+    fn clamp_to_monitor(x: i32, y: i32, monitor: RECT) -> (i32, i32) {
+        let max_x = (monitor.right - WIDGET_W).max(monitor.left);
+        let max_y = (monitor.bottom - WIDGET_H).max(monitor.top);
+        (x.clamp(monitor.left, max_x), y.clamp(monitor.top, max_y))
+    }
+
+    fn compute_widget_pos() -> (i32, i32) {
+        let Some((monitor, work)) = monitor_work_area() else {
+            return (0, 0);
+        };
+
+        // rcWork excludes the taskbar. Infer which edge it occupies instead of
+        // trusting ABM_GETTASKBARPOS, whose coordinates can be virtualized by DPI.
+        let (x, y) = if work.bottom < monitor.bottom && work.top == monitor.top {
+            (
+                work.right - WIDGET_W - SCREEN_MARGIN,
+                work.bottom - WIDGET_H - TASKBAR_GAP,
+            )
+        } else if work.top > monitor.top && work.bottom == monitor.bottom {
+            (
+                work.right - WIDGET_W - SCREEN_MARGIN,
+                work.top + TASKBAR_GAP,
+            )
+        } else if work.right < monitor.right && work.left == monitor.left {
+            (
+                work.right + TASKBAR_GAP,
+                work.bottom - WIDGET_H - SCREEN_MARGIN,
+            )
+        } else if work.left > monitor.left && work.right == monitor.right {
+            (
+                work.left - WIDGET_W - TASKBAR_GAP,
+                work.bottom - WIDGET_H - SCREEN_MARGIN,
+            )
+        } else {
+            (
+                work.right - WIDGET_W - SCREEN_MARGIN,
+                work.bottom - WIDGET_H - SCREEN_MARGIN,
+            )
+        };
+
+        clamp_to_monitor(x, y, monitor)
+    }
+
+    fn relocate_widget(hwnd: HWND) {
+        let (x, y) = compute_widget_pos();
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                WIDGET_W,
+                WIDGET_H,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    fn make_tool_info(hwnd: HWND, text: &mut [u16]) -> TTTOOLINFOW {
+        TTTOOLINFOW {
+            cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+            hwnd,
+            uId: hwnd.0 as usize,
+            lpszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        }
+    }
+
+    fn update_tooltip(hwnd: HWND, state: &mut AppState) {
+        state.tooltip_text = to_wide(&state.tooltip);
+        let Some(tooltip_hwnd) = state.tooltip_hwnd else {
+            return;
+        };
+
+        let mut tool = make_tool_info(hwnd, &mut state.tooltip_text);
+        unsafe {
+            let _ = SendMessageW(
+                tooltip_hwnd,
+                TTM_UPDATETIPTEXTW,
+                None,
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+            );
+            let _ = SendMessageW(tooltip_hwnd, TTM_UPDATE, None, None);
+        }
+    }
+
+    fn create_tooltip(hwnd: HWND, hinst: HINSTANCE, state: &mut AppState) {
+        unsafe {
+            InitCommonControls();
+            let Ok(tooltip_hwnd) = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                TOOLTIPS_CLASSW,
+                w!(""),
+                WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX),
+                0,
+                0,
+                0,
+                0,
+                Some(hwnd),
+                None,
+                Some(hinst),
+                None,
+            ) else {
+                return;
+            };
+
+            state.tooltip_hwnd = Some(tooltip_hwnd);
+            state.tooltip_text = to_wide(&state.tooltip);
+            let mut tool = make_tool_info(hwnd, &mut state.tooltip_text);
+            let added = SendMessageW(
+                tooltip_hwnd,
+                TTM_ADDTOOLW,
+                None,
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+            );
+            if added.0 == 0 {
+                let _ = DestroyWindow(tooltip_hwnd);
+                state.tooltip_hwnd = None;
+                return;
+            }
+
+            // Keep longer provider details readable instead of forcing one line.
+            let _ = SendMessageW(tooltip_hwnd, TTM_SETMAXTIPWIDTH, None, Some(LPARAM(360)));
+        }
+    }
+
+    fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
+        let cards = ProviderCard::from_snapshots(snapshots);
+        if cards.is_empty() {
+            return "No provider data".to_string();
+        }
+
+        let mut lines = Vec::new();
+        for card in cards {
+            lines.push(format!("=== {} ({}) ===", card.provider, card.account_id));
+            for metric in &card.metrics {
+                let unit_display = if metric.unit == "percent" {
+                    "%"
+                } else {
+                    metric.unit.as_str()
+                };
+                let used = metric.used.as_deref().unwrap_or("?");
+                let resets = metric.resets_at.as_deref().unwrap_or("?");
+                lines.push(format!(
+                    "  [{}] {:?} {} — {}{}, resets {}",
+                    metric.label,
+                    metric.metric_kind,
+                    metric.window_kind,
+                    used,
+                    unit_display,
+                    resets
+                ));
+                lines.push(format!("    observed: {}", metric.observed_at));
+                lines.push(format!(
+                    "    source: {}, confidence: {}",
+                    metric.source, metric.confidence
+                ));
+                if metric.unlimited {
+                    lines.push("    unlimited: true".to_string());
+                }
+                if let Some(error) = &metric.error {
+                    lines.push(format!("    error: {error}"));
+                }
+            }
+            lines.push(String::new());
+        }
+        lines.join("\n")
+    }
+
+    fn print_details(hwnd: HWND) {
+        if let Some(state) = app_state_ref(hwnd) {
+            println!("{}", render_detail_text(&state.snapshots));
+        }
+    }
+
+    fn begin_refresh(hwnd: HWND) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        if state.refresh_in_flight {
+            return;
+        }
+        state.refresh_in_flight = true;
+
+        let hwnd_raw = hwnd.0 as usize;
+        thread::spawn(move || {
+            let result = fetch_codex_snapshots().map_err(|error| error.to_string());
+            let payload = Box::new(RefreshPayload { result });
+            let payload_ptr = Box::into_raw(payload);
+            let target = HWND(hwnd_raw as *mut c_void);
+            unsafe {
+                if PostMessageW(
+                    Some(target),
+                    WM_APP_REFRESH_DONE,
+                    WPARAM(payload_ptr as usize),
+                    LPARAM(0),
+                )
+                .is_err()
+                {
+                    drop(Box::from_raw(payload_ptr));
+                }
+            }
+        });
+    }
+
+    fn apply_refresh(hwnd: HWND, payload: RefreshPayload) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        state.refresh_in_flight = false;
+
+        match payload.result {
+            Ok(snapshots) => {
+                let view = build_tray_view(&snapshots);
+                state.snapshots = snapshots;
+                state.used_percent = view.used_percent;
+                state.tooltip = view.tooltip;
+            }
+            Err(error) => {
+                let view = build_tray_view(&state.snapshots);
+                state.tooltip = if state.snapshots.is_empty() {
+                    format!("AI Usage Bar — refresh failed: {error}")
+                } else {
+                    format!("{}\nRefresh failed: {error}", view.tooltip)
+                };
+                eprintln!("refresh error: {error}");
+            }
+        }
+
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+
+    fn show_context_menu(hwnd: HWND) {
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                return;
+            };
+            let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("Refresh"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                MENU_DETAILS,
+                w!("Print details to console"),
+            );
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
+
+            let mut point = POINT::default();
+            let _ = GetCursorPos(&mut point);
+            let command = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                Some(0),
+                hwnd,
+                None,
+            )
+            .0 as usize;
+            let _ = DestroyMenu(menu);
+
+            match command {
+                MENU_REFRESH => begin_refresh(hwnd),
+                MENU_DETAILS => print_details(hwnd),
+                MENU_QUIT => {
+                    let _ = DestroyWindow(hwnd);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                let used_percent = app_state_ref(hwnd).and_then(|state| state.used_percent);
+                paint_bar(hwnd, used_percent);
+                LRESULT(0)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_LBUTTONUP => {
+                print_details(hwnd);
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                show_context_menu(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == REFRESH_TIMER_ID => {
+                begin_refresh(hwnd);
+                LRESULT(0)
+            }
+            WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_DPICHANGED => {
+                relocate_widget(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, true);
+                LRESULT(0)
+            }
+            WM_APP_REFRESH_DONE => {
+                if wparam.0 == 0 {
+                    if let Some(state) = app_state(hwnd) {
+                        state.refresh_in_flight = false;
+                    }
+                } else {
+                    let payload = Box::from_raw(wparam.0 as *mut RefreshPayload);
+                    apply_refresh(hwnd, *payload);
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let _ = KillTimer(Some(hwnd), REFRESH_TIMER_ID);
+                if let Some(state) = app_state_ref(hwnd) {
+                    if let Some(tooltip_hwnd) = state.tooltip_hwnd {
+                        let _ = DestroyWindow(tooltip_hwnd);
                     }
                 }
-                AppEvent::ShowDetails => {
-                    let snaps = snaps_arc.lock().unwrap();
-                    let detail = render_detail_text(&snaps);
-                    println!("{detail}");
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            WM_NCDESTROY => {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
+                if !state_ptr.is_null() {
+                    drop(Box::from_raw(state_ptr));
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
-                AppEvent::Quit => {
-                    *control_flow = ControlFlow::Exit;
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    fn set_dpi_awareness() {
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+
+    pub fn run() {
+        unsafe {
+            set_dpi_awareness();
+
+            let hinst = match GetModuleHandleW(None) {
+                Ok(module) => HINSTANCE(module.0),
+                Err(error) => {
+                    eprintln!("failed to get module handle: {error}");
+                    return;
                 }
+            };
+            let class_name = w!("AIUsageBarWidget");
+            let window_class = WNDCLASSW {
+                lpfnWndProc: Some(wnd_proc),
+                hInstance: hinst,
+                lpszClassName: class_name,
+                style: CS_HREDRAW | CS_VREDRAW,
+                ..Default::default()
+            };
+            if RegisterClassW(&window_class) == 0 {
+                eprintln!("failed to register AI Usage Bar window class");
+                return;
+            }
+
+            let (x, y) = compute_widget_pos();
+            let hwnd = match CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class_name,
+                w!("AI Usage Bar"),
+                WS_POPUP,
+                x,
+                y,
+                WIDGET_W,
+                WIDGET_H,
+                None,
+                None,
+                Some(hinst),
+                None,
+            ) {
+                Ok(window) => window,
+                Err(error) => {
+                    eprintln!("failed to create AI Usage Bar window: {error}");
+                    return;
+                }
+            };
+
+            let state_ptr = Box::into_raw(Box::new(AppState::loading()));
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
+            create_tooltip(hwnd, hinst, &mut *state_ptr);
+
+            if SetTimer(Some(hwnd), REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, None) == 0 {
+                eprintln!("failed to start usage refresh timer");
+            }
+            relocate_widget(hwnd);
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = UpdateWindow(hwnd);
+            begin_refresh(hwnd);
+
+            let mut message = MSG::default();
+            loop {
+                let result = GetMessageW(&mut message, None, 0, 0);
+                if result.0 == -1 || result.0 == 0 {
+                    break;
+                }
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
         }
-    });
+    }
+}
+
+#[cfg(windows)]
+fn main() {
+    windows_shell::run();
 }

@@ -130,7 +130,6 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
         for m in &card.metrics {
             let unit_display = if m.unit == "percent" { "%" } else { m.unit.as_str() };
             let used_str = m.used.as_deref().unwrap_or("?");
-            let limit_str = m.limit.as_deref().unwrap_or("?");
             let label = &m.label;
             let win = &m.window_kind;
 
