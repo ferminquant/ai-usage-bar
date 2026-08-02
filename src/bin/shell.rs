@@ -514,10 +514,17 @@ mod windows_shell {
         unsafe {
             let state_changed = state.tooltip_visible != visible;
             if visible {
-                let mut point = POINT::default();
-                let _ = GetCursorPos(&mut point);
-                let tooltip_x = point.x.saturating_sub(40);
-                let tooltip_y = point.y.saturating_sub(60);
+                // Keep the tooltip above the pill instead of placing it on the
+                // cursor. This leaves both halves of the widget clickable while
+                // the native tooltip remains visible.
+                let mut widget_rect = RECT::default();
+                let (tooltip_x, tooltip_y) = if GetWindowRect(hwnd, &mut widget_rect).is_ok() {
+                    (widget_rect.left, widget_rect.top.saturating_sub(72))
+                } else {
+                    let mut point = POINT::default();
+                    let _ = GetCursorPos(&mut point);
+                    (point.x.saturating_sub(40), point.y.saturating_sub(90))
+                };
                 let packed_point =
                     ((tooltip_y as u32 & 0xffff) << 16) | (tooltip_x as u32 & 0xffff);
                 let _ = SendMessageW(

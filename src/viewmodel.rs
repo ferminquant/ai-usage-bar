@@ -80,6 +80,34 @@ impl ProviderCard {
     }
 }
 
+fn remaining_percent(metric: &MetricCard) -> Option<f64> {
+    metric
+        .remaining
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+        .or_else(|| {
+            metric
+                .used
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(|used| 100.0 - used)
+        })
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 100.0))
+}
+
+fn tooltip_metric_value(metric: &MetricCard) -> String {
+    if metric.unit == "percent" {
+        return remaining_percent(metric)
+            .map(|remaining| format!("{remaining:.0}% left"))
+            .unwrap_or_else(|| "?% left".to_string());
+    }
+
+    let unit_display = metric.unit.as_str();
+    let value = metric.used.as_deref().unwrap_or("?");
+    format!("{value}{unit_display}")
+}
+
 pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
     if snapshots.is_empty() {
         return TrayViewModel {
@@ -129,7 +157,6 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
         lines.push(format!("{}{}", card.provider, status));
         for m in &card.metrics {
             let unit_display = if m.unit == "percent" { "%" } else { m.unit.as_str() };
-            let used_str = m.used.as_deref().unwrap_or("?");
             let label = &m.label;
             let win = &m.window_kind;
 
@@ -150,7 +177,8 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
                 lines.push(format!("  {label}: {bal} {unit_display}{unlim}"));
             } else {
                 lines.push(format!(
-                    "  {label} {win}: {used_str}{unit_display}, resets {reset_str}"
+                    "  {label} {win}: {}, resets {reset_str}",
+                    tooltip_metric_value(m)
                 ));
             }
         }
@@ -239,8 +267,8 @@ mod tests {
         let snaps = vec![make_snapshot(Some(40.0), Freshness::Live, Some("primary"))];
         let vm = build_tray_view(&snaps);
         assert!(vm.tooltip.contains("codex"));
-        assert!(vm.tooltip.contains("40"));
-        assert!(vm.tooltip.contains("40%"));
+        assert!(vm.tooltip.contains("60% left"));
+        assert!(!vm.tooltip.contains("40%"));
     }
 
     #[test]
