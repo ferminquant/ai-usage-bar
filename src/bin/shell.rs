@@ -1,3 +1,7 @@
+#[path = "../shell_logic.rs"]
+#[allow(dead_code)]
+mod shell_logic;
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!("ai-usage-bar-shell is only available on Windows");
@@ -5,10 +9,14 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_shell {
-    use ai_usage_bar::{build_tray_view, fetch_codex_snapshots, ProviderCard, UsageSnapshot};
+    use ai_usage_bar::{build_tray_view, fetch_codex_snapshots, UsageSnapshot};
     use std::ffi::c_void;
     use std::ptr::null_mut;
     use std::thread;
+
+    use super::shell_logic::{
+        normalize_used_percent, render_detail_text, usage_band, UsageBand,
+    };
 
     use windows::core::*;
     use windows::Win32::Foundation::*;
@@ -111,20 +119,14 @@ mod windows_shell {
     }
 
     fn percent_and_color(used_percent: Option<f64>) -> (Option<f64>, COLORREF) {
-        match used_percent.filter(|value| value.is_finite()) {
-            None => (None, COLOR_NEUTRAL),
-            Some(value) => {
-                let percent = value.clamp(0.0, 100.0);
-                let color = if percent >= 90.0 {
-                    COLOR_RED
-                } else if percent >= 70.0 {
-                    COLOR_YELLOW
-                } else {
-                    COLOR_GREEN
-                };
-                (Some(percent), color)
-            }
-        }
+        let percent = normalize_used_percent(used_percent);
+        let color = match usage_band(used_percent) {
+            UsageBand::Neutral => COLOR_NEUTRAL,
+            UsageBand::Green => COLOR_GREEN,
+            UsageBand::Yellow => COLOR_YELLOW,
+            UsageBand::Red => COLOR_RED,
+        };
+        (percent, color)
     }
 
     fn fill_rect(hdc: HDC, rect: RECT, color: COLORREF) {
@@ -602,56 +604,6 @@ mod windows_shell {
         }
     }
 
-    fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
-        let cards = ProviderCard::from_snapshots(snapshots);
-        if cards.is_empty() {
-            return "No provider data".to_string();
-        }
-
-        let mut lines = Vec::new();
-        for card in cards {
-            lines.push(format!("=== {} ({}) ===", card.provider, card.account_id));
-            for metric in &card.metrics {
-                let unit_display = if metric.unit == "percent" {
-                    "%"
-                } else {
-                    metric.unit.as_str()
-                };
-                let resets = metric.resets_at.as_deref().unwrap_or("?");
-                let value = if metric.unit == "percent" {
-                    format!(
-                        "{}% left ({}% used)",
-                        metric.remaining.as_deref().unwrap_or("?"),
-                        metric.used.as_deref().unwrap_or("?")
-                    )
-                } else {
-                    format!("{}{}", metric.used.as_deref().unwrap_or("?"), unit_display)
-                };
-                lines.push(format!(
-                    "  [{}] {:?} {} — {}, resets {}",
-                    metric.label,
-                    metric.metric_kind,
-                    metric.window_kind,
-                    value,
-                    resets
-                ));
-                lines.push(format!("    observed: {}", metric.observed_at));
-                lines.push(format!(
-                    "    source: {}, confidence: {}",
-                    metric.source, metric.confidence
-                ));
-                if metric.unlimited {
-                    lines.push("    unlimited: true".to_string());
-                }
-                if let Some(error) = &metric.error {
-                    lines.push(format!("    error: {error}"));
-                }
-            }
-            lines.push(String::new());
-        }
-        lines.join("\n")
-    }
-
     fn copy_text_to_clipboard(hwnd: HWND, text: &str) -> std::result::Result<(), String> {
         let wide = to_wide(text);
         unsafe {
@@ -1027,6 +979,31 @@ mod windows_shell {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn percent_and_color_maps_normalized_usage_to_widget_colors() {
+            assert_eq!(percent_and_color(None), (None, COLOR_NEUTRAL));
+            assert_eq!(percent_and_color(Some(69.9)), (Some(69.9), COLOR_GREEN));
+            assert_eq!(percent_and_color(Some(70.0)), (Some(70.0), COLOR_YELLOW));
+            assert_eq!(percent_and_color(Some(90.0)), (Some(90.0), COLOR_RED));
+            assert_eq!(percent_and_color(Some(120.0)), (Some(100.0), COLOR_RED));
+            assert_eq!(percent_and_color(Some(f64::NAN)), (None, COLOR_NEUTRAL));
+        }
+
+        #[test]
+        fn wide_strings_are_nul_terminated_for_win32_apis() {
+            assert_eq!(to_wide("AI"), vec![b'A' as u16, b'I' as u16, 0]);
+        }
+
+        #[test]
+        fn clipboard_payload_uses_the_same_detail_renderer_as_the_menu_action() {
+            assert_eq!(render_detail_text(&[]), "No provider data");
         }
     }
 }
