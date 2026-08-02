@@ -6,6 +6,9 @@ const CODEX_PROVIDER: Provider = Provider::Codex;
 const CODEX_SOURCE: Source = Source::Cli;
 const CODEX_CONFIDENCE: Confidence = Confidence::Exact;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodexAdapter;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CodexAdapterError {
     #[error("auth expired or not configured")]
@@ -32,6 +35,16 @@ impl From<CodexAdapterError> for AdapterError {
             _ => None,
         };
         AdapterError { code, message }
+    }
+}
+
+impl ProviderAdapter for CodexAdapter {
+    fn provider(&self) -> Provider {
+        CODEX_PROVIDER
+    }
+
+    fn fetch(&self) -> Result<Vec<UsageSnapshot>, AdapterError> {
+        fetch_codex_snapshots().map_err(AdapterError::from)
     }
 }
 
@@ -449,6 +462,11 @@ mod tests {
 
     fn fixture_time() -> DateTime<Utc> {
         Utc.timestamp_opt(1786000000, 0).unwrap()
+    }
+
+    #[test]
+    fn adapter_reports_codex_provider_without_fetching() {
+        assert_eq!(CodexAdapter.provider(), Provider::Codex);
     }
 
     fn load_fixture(name: &str) -> serde_json::Value {

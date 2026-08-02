@@ -103,7 +103,8 @@ notes until their spikes (#3-#5) complete.
       "description": "When the adapter observed this value. Never mutated by the cache; the cache preserves the original."
     },
     "source": {
-      "enum": ["api", "cli", "local_api", "browser", "fixture"]
+      "enum": ["api", "cli", "local_api", "browser", "fixture", "system"],
+      "description": "Where the value came from. system is reserved for registry-generated state when no provider call was made."
     },
     "freshness": {
       "enum": ["live", "cached", "stale", "unavailable", "not_configured", "not_applicable"]

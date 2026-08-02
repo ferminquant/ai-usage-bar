@@ -123,7 +123,10 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
         .count();
 
     let primary = snapshots.iter().find(|s| {
-        s.freshness == Freshness::Live
+        matches!(
+            s.freshness,
+            Freshness::Live | Freshness::Cached | Freshness::Stale
+        )
             && s.window_label.as_deref() == Some("primary")
             && s.used.is_some()
     });
@@ -175,6 +178,8 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
                 let bal = m.used.as_deref().unwrap_or("?");
                 let unlim = if m.unlimited { " (unlimited)" } else { "" };
                 lines.push(format!("  {label}: {bal} {unit_display}{unlim}"));
+            } else if let Some(error) = &m.error {
+                lines.push(format!("  {label}: unavailable ({error})"));
             } else {
                 lines.push(format!(
                     "  {label} {win}: {}, resets {reset_str}",
@@ -257,9 +262,15 @@ mod tests {
 
     #[test]
     fn error_icon_when_unavailable() {
-        let snaps = vec![make_snapshot(None, Freshness::Unavailable, None)];
+        let mut snapshot = make_snapshot(None, Freshness::Unavailable, None);
+        snapshot.error = Some(AdapterError {
+            code: ErrorCode::Timeout,
+            message: None,
+        });
+        let snaps = vec![snapshot];
         let vm = build_tray_view(&snaps);
         assert_eq!(vm.icon_text, "⛔");
+        assert!(vm.tooltip.contains("timeout"));
     }
 
     #[test]
@@ -288,6 +299,7 @@ mod tests {
     fn stale_state_labeled_in_tooltip() {
         let snaps = vec![make_snapshot(Some(40.0), Freshness::Stale, Some("primary"))];
         let vm = build_tray_view(&snaps);
+        assert_eq!(vm.icon_text, "🟢");
         assert!(vm.tooltip.contains("(stale)"));
     }
 
