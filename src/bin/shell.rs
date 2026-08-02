@@ -14,6 +14,10 @@ mod windows_shell {
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Controls::*;
     use windows::Win32::UI::HiDpi::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -33,8 +37,11 @@ mod windows_shell {
     const TOOLTIP_POLL_INTERVAL_MS: u32 = 100;
 
     const MENU_REFRESH: usize = 1001;
-    const MENU_DETAILS: usize = 1002;
+    const MENU_COPY_DETAILS: usize = 1002;
     const MENU_QUIT: usize = 1003;
+    const STATUS_TIMER_ID: usize = 4;
+    const STATUS_INTERVAL_MS: u32 = 2_500;
+    const CF_UNICODETEXT_FORMAT: u32 = 13;
 
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
 
@@ -57,6 +64,7 @@ mod windows_shell {
         tooltip_text: Vec<u16>,
         tooltip_visible: bool,
         refresh_in_flight: bool,
+        status: Option<String>,
     }
 
     struct RefreshPayload {
@@ -73,6 +81,7 @@ mod windows_shell {
                 tooltip_text: Vec::new(),
                 tooltip_visible: false,
                 refresh_in_flight: false,
+                status: None,
             }
         }
     }
@@ -211,7 +220,12 @@ mod windows_shell {
         }
     }
 
-    fn paint_widget(hwnd: HWND, used_percent: Option<f64>, refreshing: bool) {
+    fn paint_widget(
+        hwnd: HWND,
+        used_percent: Option<f64>,
+        refreshing: bool,
+        status: Option<&str>,
+    ) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
@@ -237,7 +251,11 @@ mod windows_shell {
             let remaining_label = remaining
                 .map(|value| format!("{value:.0}%"))
                 .unwrap_or_else(|| "—".to_string());
-            let status_label = if refreshing { "Updating…" } else { "Codex left" };
+            let status_label = status.unwrap_or(if refreshing {
+                "Updating…"
+            } else {
+                "Codex left"
+            });
             draw_text(
                 hdc,
                 RECT {
@@ -599,15 +617,22 @@ mod windows_shell {
                 } else {
                     metric.unit.as_str()
                 };
-                let used = metric.used.as_deref().unwrap_or("?");
                 let resets = metric.resets_at.as_deref().unwrap_or("?");
+                let value = if metric.unit == "percent" {
+                    format!(
+                        "{}% left ({}% used)",
+                        metric.remaining.as_deref().unwrap_or("?"),
+                        metric.used.as_deref().unwrap_or("?")
+                    )
+                } else {
+                    format!("{}{}", metric.used.as_deref().unwrap_or("?"), unit_display)
+                };
                 lines.push(format!(
-                    "  [{}] {:?} {} — {}{}, resets {}",
+                    "  [{}] {:?} {} — {}, resets {}",
                     metric.label,
                     metric.metric_kind,
                     metric.window_kind,
-                    used,
-                    unit_display,
+                    value,
                     resets
                 ));
                 lines.push(format!("    observed: {}", metric.observed_at));
@@ -627,9 +652,60 @@ mod windows_shell {
         lines.join("\n")
     }
 
-    fn print_details(hwnd: HWND) {
-        if let Some(state) = app_state_ref(hwnd) {
-            println!("{}", render_detail_text(&state.snapshots));
+    fn copy_text_to_clipboard(hwnd: HWND, text: &str) -> std::result::Result<(), String> {
+        let wide = to_wide(text);
+        unsafe {
+            OpenClipboard(Some(hwnd)).map_err(|error| format!("open clipboard: {error}"))?;
+            let result = (|| {
+                EmptyClipboard().map_err(|error| format!("empty clipboard: {error}"))?;
+                let bytes = wide
+                    .len()
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| "clipboard text is too large".to_string())?;
+                let memory = GlobalAlloc(GMEM_MOVEABLE, bytes)
+                    .map_err(|error| format!("allocate clipboard memory: {error}"))?;
+                let locked = GlobalLock(memory);
+                if locked.is_null() {
+                    let _ = GlobalFree(Some(memory));
+                    return Err("lock clipboard memory".to_string());
+                }
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), locked.cast::<u16>(), wide.len());
+                let _ = GlobalUnlock(memory);
+
+                match SetClipboardData(CF_UNICODETEXT_FORMAT, Some(HANDLE(memory.0))) {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        let _ = GlobalFree(Some(memory));
+                        Err(format!("set clipboard data: {error}"))
+                    }
+                }
+            })();
+            let close_result = CloseClipboard();
+            result.and(close_result.map_err(|error| format!("close clipboard: {error}")))
+        }
+    }
+
+    fn set_status(hwnd: HWND, state: &mut AppState, message: &str) {
+        state.status = Some(message.to_string());
+        unsafe {
+            let _ = SetTimer(Some(hwnd), STATUS_TIMER_ID, STATUS_INTERVAL_MS, None);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+
+    fn copy_details_to_clipboard(hwnd: HWND) {
+        let details = app_state_ref(hwnd)
+            .map(|state| render_detail_text(&state.snapshots))
+            .unwrap_or_else(|| "No provider data".to_string());
+        let result = copy_text_to_clipboard(hwnd, &details);
+        if let Some(state) = app_state(hwnd) {
+            match result {
+                Ok(()) => set_status(hwnd, state, "Copied!"),
+                Err(error) => {
+                    eprintln!("clipboard copy failed: {error}");
+                    set_status(hwnd, state, "Copy failed");
+                }
+            }
         }
     }
 
@@ -641,6 +717,10 @@ mod windows_shell {
             return;
         }
         state.refresh_in_flight = true;
+        state.status = None;
+        unsafe {
+            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+        }
         let current_view = build_tray_view(&state.snapshots);
         state.tooltip = if state.snapshots.is_empty() {
             "AI Usage Bar — refreshing…".to_string()
@@ -712,8 +792,8 @@ mod windows_shell {
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
-                MENU_DETAILS,
-                w!("Print details to console"),
+                MENU_COPY_DETAILS,
+                w!("Copy details to clipboard"),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
             let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
@@ -734,7 +814,7 @@ mod windows_shell {
 
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
-                MENU_DETAILS => print_details(hwnd),
+                MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -751,10 +831,16 @@ mod windows_shell {
     ) -> LRESULT {
         match msg {
             WM_PAINT => {
-                let (used_percent, refreshing) = app_state_ref(hwnd)
-                    .map(|state| (state.used_percent, state.refresh_in_flight))
-                    .unwrap_or((None, false));
-                paint_widget(hwnd, used_percent, refreshing);
+                let (used_percent, refreshing, status) = app_state_ref(hwnd)
+                    .map(|state| {
+                        (
+                            state.used_percent,
+                            state.refresh_in_flight,
+                            state.status.as_deref(),
+                        )
+                    })
+                    .unwrap_or((None, false, None));
+                paint_widget(hwnd, used_percent, refreshing, status);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -811,6 +897,14 @@ mod windows_shell {
                 }
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == STATUS_TIMER_ID => {
+                if let Some(state) = app_state(hwnd) {
+                    state.status = None;
+                    let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                LRESULT(0)
+            }
             WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_DPICHANGED => {
                 relocate_widget(hwnd);
                 let _ = InvalidateRect(Some(hwnd), None, true);
@@ -831,6 +925,7 @@ mod windows_shell {
                 let _ = KillTimer(Some(hwnd), REFRESH_TIMER_ID);
                 let _ = KillTimer(Some(hwnd), POSITION_TIMER_ID);
                 let _ = KillTimer(Some(hwnd), TOOLTIP_POLL_TIMER_ID);
+                let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
                 if let Some(state) = app_state_ref(hwnd) {
                     if let Some(tooltip_hwnd) = state.tooltip_hwnd {
                         let _ = DestroyWindow(tooltip_hwnd);
