@@ -19,12 +19,10 @@ mod windows_shell {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    const WIDGET_W: i32 = 210;
+    const WIDGET_W: i32 = 158;
     const WIDGET_H: i32 = 44;
-    const CARD_W: i32 = 158;
+    const CARD_W: i32 = WIDGET_W;
     const CARD_H: i32 = 40;
-    const REFRESH_CENTER_X: i32 = 174;
-    const PROVIDER_CENTER_X: i32 = 201;
     const SCREEN_MARGIN: i32 = 12;
     const TASKBAR_GAP: i32 = 4;
     const REFRESH_INTERVAL_MS: u32 = 60_000;
@@ -50,7 +48,6 @@ mod windows_shell {
     const COLOR_RED: COLORREF = COLORREF(0x003643f4);
     const COLOR_TEXT: COLORREF = COLORREF(0x00f5f5f5);
     const COLOR_MUTED: COLORREF = COLORREF(0x00c0c0c0);
-    const COLOR_ACCENT: COLORREF = COLORREF(0x00a8e6c0);
 
     struct AppState {
         snapshots: Vec<UsageSnapshot>,
@@ -214,25 +211,7 @@ mod windows_shell {
         }
     }
 
-    fn draw_circle(hdc: HDC, center_x: i32, center_y: i32, radius: i32, color: COLORREF) {
-        unsafe {
-            let pen = CreatePen(PS_SOLID, 1, color);
-            let old_pen = SelectObject(hdc, pen.into());
-            let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            let _ = Ellipse(
-                hdc,
-                center_x - radius,
-                center_y - radius,
-                center_x + radius,
-                center_y + radius,
-            );
-            SelectObject(hdc, old_brush);
-            SelectObject(hdc, old_pen);
-            let _ = DeleteObject(pen.into());
-        }
-    }
-
-    fn paint_widget(hwnd: HWND, used_percent: Option<f64>) {
+    fn paint_widget(hwnd: HWND, used_percent: Option<f64>, refreshing: bool) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
@@ -258,6 +237,7 @@ mod windows_shell {
             let remaining_label = remaining
                 .map(|value| format!("{value:.0}%"))
                 .unwrap_or_else(|| "—".to_string());
+            let status_label = if refreshing { "Updating…" } else { "Codex left" };
             draw_text(
                 hdc,
                 RECT {
@@ -280,7 +260,7 @@ mod windows_shell {
                     right: CARD_W - 8,
                     bottom: 27,
                 },
-                "Codex left",
+                status_label,
                 11,
                 FW_NORMAL,
                 COLOR_MUTED,
@@ -314,36 +294,6 @@ mod windows_shell {
                 }
             }
 
-            draw_circle(hdc, REFRESH_CENTER_X, 19, 7, COLOR_BORDER);
-            draw_text(
-                hdc,
-                RECT {
-                    left: REFRESH_CENTER_X - 8,
-                    top: 10,
-                    right: REFRESH_CENTER_X + 8,
-                    bottom: 28,
-                },
-                "↻",
-                13,
-                FW_NORMAL,
-                COLOR_ACCENT,
-                DT_SINGLELINE | DT_VCENTER | DT_CENTER,
-            );
-            draw_circle(hdc, PROVIDER_CENTER_X, 19, 8, COLOR_BORDER);
-            draw_text(
-                hdc,
-                RECT {
-                    left: PROVIDER_CENTER_X - 8,
-                    top: 10,
-                    right: PROVIDER_CENTER_X + 8,
-                    bottom: 28,
-                },
-                "✦",
-                12,
-                FW_NORMAL,
-                COLOR_TEXT,
-                DT_SINGLELINE | DT_VCENTER | DT_CENTER,
-            );
             let _ = EndPaint(hwnd, &paint);
         }
     }
@@ -691,6 +641,16 @@ mod windows_shell {
             return;
         }
         state.refresh_in_flight = true;
+        let current_view = build_tray_view(&state.snapshots);
+        state.tooltip = if state.snapshots.is_empty() {
+            "AI Usage Bar — refreshing…".to_string()
+        } else {
+            format!("{}\nRefreshing…", current_view.tooltip)
+        };
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
 
         let hwnd_raw = hwnd.0 as usize;
         thread::spawn(move || {
@@ -791,8 +751,10 @@ mod windows_shell {
     ) -> LRESULT {
         match msg {
             WM_PAINT => {
-                let used_percent = app_state_ref(hwnd).and_then(|state| state.used_percent);
-                paint_widget(hwnd, used_percent);
+                let (used_percent, refreshing) = app_state_ref(hwnd)
+                    .map(|state| (state.used_percent, state.refresh_in_flight))
+                    .unwrap_or((None, false));
+                paint_widget(hwnd, used_percent, refreshing);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -820,12 +782,10 @@ mod windows_shell {
             }
             WM_MOUSELEAVE => LRESULT(0),
             WM_LBUTTONUP => {
-                let click_x = (lparam.0 as i16) as i32;
-                if (REFRESH_CENTER_X - 10..=REFRESH_CENTER_X + 10).contains(&click_x) {
-                    begin_refresh(hwnd);
-                } else {
-                    print_details(hwnd);
-                }
+                // The whole pill is the manual refresh target. Details remain
+                // available explicitly from the context menu, so a left click
+                // always has visible, predictable behavior.
+                begin_refresh(hwnd);
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
