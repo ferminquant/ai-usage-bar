@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux tests and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  windows:
+    name: Windows shell tests and clippy
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+# Keep these first gates on GitHub-hosted runners. Issue #15 tracks the
+# separate registration, labels, isolation, and cleanup policy needed before
+# any public pull request can execute on a Budget workspace runner.
