@@ -29,6 +29,10 @@ mod windows_shell {
     const TASKBAR_GAP: i32 = 4;
     const REFRESH_INTERVAL_MS: u32 = 60_000;
     const REFRESH_TIMER_ID: usize = 1;
+    const POSITION_TIMER_ID: usize = 2;
+    const TOOLTIP_POLL_TIMER_ID: usize = 3;
+    const POSITION_TIMER_INTERVAL_MS: u32 = 1_000;
+    const TOOLTIP_POLL_INTERVAL_MS: u32 = 100;
 
     const MENU_REFRESH: usize = 1001;
     const MENU_DETAILS: usize = 1002;
@@ -54,6 +58,7 @@ mod windows_shell {
         tooltip: String,
         tooltip_hwnd: Option<HWND>,
         tooltip_text: Vec<u16>,
+        tooltip_visible: bool,
         refresh_in_flight: bool,
     }
 
@@ -69,6 +74,7 @@ mod windows_shell {
                 tooltip: "AI Usage Bar — loading…".to_string(),
                 tooltip_hwnd: None,
                 tooltip_text: Vec::new(),
+                tooltip_visible: false,
                 refresh_in_flight: false,
             }
         }
@@ -453,45 +459,111 @@ mod windows_shell {
         }
     }
 
+    fn ensure_widget_topmost(hwnd: HWND) {
+        unsafe {
+            let mut widget_rect = RECT::default();
+            let Ok(()) = GetWindowRect(hwnd, &mut widget_rect) else {
+                return;
+            };
+            let center = POINT {
+                x: (widget_rect.left + widget_rect.right) / 2,
+                y: (widget_rect.top + widget_rect.bottom) / 2,
+            };
+            let Ok(taskbar) = FindWindowW(w!("Shell_TrayWnd"), None) else {
+                return;
+            };
+            if WindowFromPoint(center) == taskbar {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
+    }
+
     fn make_tool_info(hwnd: HWND, text: &mut [u16]) -> TTTOOLINFOW {
         TTTOOLINFOW {
-            cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
-            uFlags: TTF_IDISHWND,
+            // comctl32 currently accepts the V2 TOOLINFO layout (through
+            // lParam) but rejects the newer lpReserved-inclusive size.
+            cbSize: (std::mem::size_of::<TTTOOLINFOW>() - std::mem::size_of::<*mut c_void>())
+                as u32,
+            uFlags: TTF_TRACK | TTF_ABSOLUTE,
             hwnd,
-            uId: hwnd.0 as usize,
+            uId: 1,
+            rect: RECT {
+                left: 0,
+                top: 0,
+                right: WIDGET_W,
+                bottom: WIDGET_H,
+            },
             lpszText: PWSTR(text.as_mut_ptr()),
             ..Default::default()
         }
     }
 
-    fn relay_tooltip_event(
-        hwnd: HWND,
-        state: &AppState,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) {
+    fn set_tooltip_visible(hwnd: HWND, state: &mut AppState, visible: bool) {
         let Some(tooltip_hwnd) = state.tooltip_hwnd else {
             return;
         };
 
         unsafe {
-            let mut point = POINT::default();
-            let _ = GetCursorPos(&mut point);
-            let mut event = MSG {
-                hwnd,
-                message,
-                wParam: wparam,
-                lParam: lparam,
-                pt: point,
-                ..Default::default()
-            };
+            let state_changed = state.tooltip_visible != visible;
+            if visible {
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                let tooltip_x = point.x.saturating_sub(40);
+                let tooltip_y = point.y.saturating_sub(60);
+                let packed_point =
+                    ((tooltip_y as u32 & 0xffff) << 16) | (tooltip_x as u32 & 0xffff);
+                let _ = SendMessageW(
+                    tooltip_hwnd,
+                    TTM_TRACKPOSITION,
+                    None,
+                    Some(LPARAM(packed_point as isize)),
+                );
+            }
+            if !state_changed {
+                return;
+            }
+
+            state.tooltip_visible = visible;
+            if visible {
+                let _ = SetTimer(
+                    Some(hwnd),
+                    TOOLTIP_POLL_TIMER_ID,
+                    TOOLTIP_POLL_INTERVAL_MS,
+                    None,
+                );
+            } else {
+                let _ = KillTimer(Some(hwnd), TOOLTIP_POLL_TIMER_ID);
+            }
+            let mut tooltip_text = state.tooltip_text.clone();
+            let mut tool = make_tool_info(hwnd, &mut tooltip_text);
             let _ = SendMessageW(
                 tooltip_hwnd,
-                TTM_RELAYEVENT,
-                None,
-                Some(LPARAM(&mut event as *mut MSG as isize)),
+                TTM_TRACKACTIVATE,
+                Some(WPARAM(usize::from(visible))),
+                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
             );
+            if !visible {
+                let _ = SendMessageW(tooltip_hwnd, TTM_POP, None, None);
+            }
+        }
+    }
+
+    fn cursor_over_widget_or_tooltip(hwnd: HWND, state: &AppState) -> bool {
+        unsafe {
+            let mut point = POINT::default();
+            if GetCursorPos(&mut point).is_err() {
+                return false;
+            }
+            let window = WindowFromPoint(point);
+            window == hwnd || state.tooltip_hwnd == Some(window)
         }
     }
 
@@ -727,8 +799,8 @@ mod windows_shell {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_MOUSEMOVE => {
-                if let Some(state) = app_state_ref(hwnd) {
-                    relay_tooltip_event(hwnd, state, msg, wparam, lparam);
+                if let Some(state) = app_state(hwnd) {
+                    set_tooltip_visible(hwnd, state, true);
                 }
                 let mut tracking = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -739,12 +811,7 @@ mod windows_shell {
                 let _ = TrackMouseEvent(&mut tracking);
                 LRESULT(0)
             }
-            WM_MOUSELEAVE => {
-                if let Some(state) = app_state_ref(hwnd) {
-                    relay_tooltip_event(hwnd, state, msg, wparam, lparam);
-                }
-                LRESULT(0)
-            }
+            WM_MOUSELEAVE => LRESULT(0),
             WM_LBUTTONUP => {
                 let click_x = (lparam.0 as i16) as i32;
                 if (REFRESH_CENTER_X - 10..=REFRESH_CENTER_X + 10).contains(&click_x) {
@@ -760,6 +827,21 @@ mod windows_shell {
             }
             WM_TIMER if wparam.0 == REFRESH_TIMER_ID => {
                 begin_refresh(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == POSITION_TIMER_ID => {
+                ensure_widget_topmost(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == TOOLTIP_POLL_TIMER_ID => {
+                let over_tool = app_state_ref(hwnd)
+                    .map(|state| cursor_over_widget_or_tooltip(hwnd, state))
+                    .unwrap_or(false);
+                if !over_tool {
+                    if let Some(state) = app_state(hwnd) {
+                        set_tooltip_visible(hwnd, state, false);
+                    }
+                }
                 LRESULT(0)
             }
             WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_DPICHANGED => {
@@ -780,6 +862,8 @@ mod windows_shell {
             }
             WM_DESTROY => {
                 let _ = KillTimer(Some(hwnd), REFRESH_TIMER_ID);
+                let _ = KillTimer(Some(hwnd), POSITION_TIMER_ID);
+                let _ = KillTimer(Some(hwnd), TOOLTIP_POLL_TIMER_ID);
                 if let Some(state) = app_state_ref(hwnd) {
                     if let Some(tooltip_hwnd) = state.tooltip_hwnd {
                         let _ = DestroyWindow(tooltip_hwnd);
@@ -859,8 +943,16 @@ mod windows_shell {
             if SetTimer(Some(hwnd), REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, None) == 0 {
                 eprintln!("failed to start usage refresh timer");
             }
-            relocate_widget(hwnd);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // ShowWindow can place the taskbar above a newly created topmost
+            // popup, so reassert the z-order after the first show.
+            relocate_widget(hwnd);
+            let _ = SetTimer(
+                Some(hwnd),
+                POSITION_TIMER_ID,
+                POSITION_TIMER_INTERVAL_MS,
+                None,
+            );
             let _ = UpdateWindow(hwnd);
             begin_refresh(hwnd);
 
