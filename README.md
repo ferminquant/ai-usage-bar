@@ -1,7 +1,7 @@
 # AI Usage Bar
 
-AI Usage Bar is a planned, local-first desktop usage widget for people who
-use several AI subscriptions and local model runtimes at once.
+AI Usage Bar is a desktop usage widget for people who use several online AI
+subscriptions at once.
 
 The first target is a small Windows taskbar/tray surface inspired by the
 compact usage pill in [this Codex example](https://x.com/i/status/2083054528522268756).
@@ -9,13 +9,13 @@ The initial provider set is:
 
 - Codex
 - Kimi
-- Ollama (local and cloud kept distinct)
+- Ollama Pro/cloud (hosted)
 - Grok
 
-The project is currently in discovery and planning. This repository starts
-with the product brief, architecture notes, quality contract, and an
-evidence-backed agile backlog. Provider adapters and the desktop shell are
-not implemented yet.
+The MVP core is implemented: Codex and Grok consumer adapters, cached
+freshness states, contract/invariant tests, a Windows shell, and hosted-provider
+configuration. Kimi and Ollama Pro/cloud remain future evidence-driven
+adapters.
 
 ## Product direction
 
@@ -28,22 +28,21 @@ It should:
 - show the relevant limit window(s), remaining/used values, and reset time;
 - distinguish live, cached, stale, unavailable, and not-applicable data;
 - keep credentials on the machine and avoid sending them to a project server;
-- support providers whose limits are quotas, credits, spend, or local runtime
-  telemetry rather than pretending all usage is one comparable percentage;
+- support providers whose limits are quotas, credits, or spend rather than
+  pretending all usage is one comparable percentage;
 - provide a compact glance view plus a detailed provider view.
 
 It should not:
 
 - scrape or bypass provider controls;
 - combine unrelated percentages into a false “total quota”;
-- make a local Ollama token count look like a hosted subscription allowance;
-- require a cloud account just to display locally available information.
+- invent hosted usage data for an unsupported provider.
 
 ## Current status
 
-Planning only. The current work is intentionally documentation and backlog
-creation; implementation starts only after the provider and shell contracts
-are agreed.
+The current implementation is Windows-first. Provider adapters run locally and
+use each service's existing session or credential surface; no provider
+credentials are sent to a project server.
 
 ## Documentation
 
@@ -59,6 +58,8 @@ are agreed.
   uncertain, and the proposed evidence path for each provider.
 - [Agile plan](docs/agile-plan.md) — increments, definition of ready/done,
   and the first backlog slices.
+- [Configuration example](docs/config.example.json) — hosted-provider
+  enablement settings; credentials remain in provider-owned local sessions.
 - [Quality engineering](docs/quality-engineering.md) — measurable gates,
   evidence artifacts, and the “constraints around agent-generated code”
   approach.
@@ -71,20 +72,23 @@ are agreed.
 - [References](docs/references.md) — design inspiration, prior art, and
   primary provider documentation.
 
+On Windows, copy that example to %APPDATA%\AI Usage Bar\config.json and set
+enabled to false for any hosted provider you want to opt out of. A missing
+file uses the default Codex and Grok configuration.
+
 ## Proposed first release
 
 The first useful slice is deliberately small:
 
 1. a Windows tray/taskbar shell with a compact pill and a detail panel;
 2. a provider-neutral usage snapshot model;
-3. one reliable hosted-provider adapter and one local Ollama adapter;
+3. one or more reliable hosted-provider adapters;
 4. cached data with explicit freshness and error states;
 5. fixture-driven tests and a quality gate before more providers are added.
 
-Kimi and Grok should be added only after their supported, user-authorized
-usage surfaces have been verified. A browser/dashboard bridge is an option
-for surfaces without a documented API, but it remains read-only and
-opt-in.
+Kimi should be added only after its supported, user-authorized usage surface
+has been verified. A browser/dashboard bridge is an option for surfaces
+without a documented API, but it remains read-only and opt-in.
 
 ## Quality promise
 

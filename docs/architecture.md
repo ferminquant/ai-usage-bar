@@ -6,7 +6,7 @@
 Provider surfaces
   ├─ Codex app-server / local auth
   ├─ Kimi CLI or Console
-  ├─ Ollama local API (and explicitly separate cloud surface)
+  ├─ Ollama Pro/cloud supported surface
   └─ Grok supported usage surface / optional browser bridge
              │
              ▼

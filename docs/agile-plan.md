@@ -29,9 +29,42 @@ observable capability or one durable engineering contract.
 
 ### Increment 2 — provider expansion
 
-- Add the remaining providers only after their evidence spikes pass.
-- Keep local Ollama telemetry distinct from hosted quotas.
-- Add account/provider configuration and per-provider opt-out.
+- Add hosted providers only after their evidence spikes pass.
+- Add account/provider configuration and per-provider opt-out for hosted
+  providers.
+
+### Issue #10 — hosted provider configuration and registry bootstrap
+
+Issue #10 is intentionally narrower than a general plugin system. The goal is
+to make the verified, compiled hosted adapters configurable without putting
+provider registration in the Windows shell or CLI entrypoints.
+
+#### In scope
+
+- A versioned, per-user JSON configuration file containing provider enablement.
+- One shared bootstrap path for the shell and CLI.
+- Codex and Grok consumer enabled by default; missing local sessions remain
+  `not_configured`, while disabling either provider persists across restarts.
+- Disabled providers are not scheduled, rendered, or surfaced from the cache.
+- `not_configured` remains distinct from an explicit user opt-out.
+- Deterministic config, registry, cache-filtering, and redaction tests.
+
+#### Explicitly out of scope
+
+- Kimi implementation; keep the evidence spike in #3 and the adapter in #17.
+- Ollama Pro/cloud implementation; add it only after a hosted usage source is
+  verified.
+- Runtime DLL/plugin loading. Adding a new adapter still changes the compiled
+  provider factory, but it must not require edits to the shell UI.
+- Credentials, cookies, or access tokens in the configuration file.
+
+#### Acceptance boundary
+
+The slice is complete when a fresh install can run with the defaults, a user
+can disable Codex or Grok by editing the config file and restart without that
+provider being called or shown, and both entrypoints produce the same provider
+set from the same configuration. Unknown or unsupported providers are ignored
+  without being treated as usage data.
 
 ### Increment 3 — hardening
 

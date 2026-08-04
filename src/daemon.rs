@@ -138,6 +138,35 @@ impl ProviderRegistry {
         Ok(())
     }
 
+    /// Return providers known to this registry in registration order.
+    pub fn registered_providers(&self) -> Vec<Provider> {
+        self.entries
+            .read()
+            .expect("provider registry poisoned")
+            .iter()
+            .map(|entry| entry.provider.clone())
+            .collect()
+    }
+
+    /// Return whether a registered provider is enabled.
+    pub fn is_enabled(&self, provider: &Provider) -> Result<bool, RegistryError> {
+        self.entries
+            .read()
+            .expect("provider registry poisoned")
+            .iter()
+            .find(|entry| &entry.provider == provider)
+            .map(|entry| entry.enabled)
+            .ok_or_else(|| RegistryError::UnknownProvider(provider.clone()))
+    }
+
+    fn is_enabled_internal(&self, provider: &Provider) -> bool {
+        self.entries
+            .read()
+            .expect("provider registry poisoned")
+            .iter()
+            .any(|entry| &entry.provider == provider && entry.enabled)
+    }
+
     fn enabled_entries(&self) -> Vec<RegisteredProvider> {
         self.entries
             .read()
@@ -384,6 +413,7 @@ impl RefreshService {
         self.cache
             .all()
             .into_iter()
+            .filter(|snapshot| self.registry.is_enabled_internal(&snapshot.provider))
             .filter_map(|snapshot| {
                 if age_since(now, snapshot.observed_at) > self.policy.stale_after {
                     None
@@ -579,16 +609,8 @@ fn window_schema_drift_snapshot(
     } else {
         format!("{}-unavailable", provider.as_str())
     };
-    // Do not re-emit rejected hosted-quota shapes for local Ollama.
-    let metric_kind = if provider == &Provider::OllamaLocal && snapshot.metric_kind == MetricKind::Quota
-    {
-        MetricKind::Health
-    } else {
-        snapshot.metric_kind
-    };
-    let unit = if snapshot.unit.trim().is_empty()
-        || (provider == &Provider::OllamaLocal && snapshot.metric_kind == MetricKind::Quota)
-    {
+    let metric_kind = snapshot.metric_kind;
+    let unit = if snapshot.unit.trim().is_empty() {
         "status".to_string()
     } else {
         snapshot.unit.clone()
@@ -1013,6 +1035,35 @@ mod tests {
     }
 
     #[test]
+    fn disabled_provider_cache_is_hidden_until_reenabled() {
+        let first = instant();
+        let clock = FixedClock::new(first);
+        let registry = ProviderRegistry::new();
+        let (adapter, _) = SequenceAdapter::new(
+            Provider::Codex,
+            vec![Ok(vec![snapshot(
+                Provider::Codex,
+                first,
+                MetricKind::Quota,
+                WindowKind::Weekly,
+                25.0,
+            )])],
+        );
+        registry.register(adapter).unwrap();
+        let service = service(registry.clone(), &clock, RefreshPolicy::default());
+
+        service.refresh_all();
+        registry.set_enabled(&Provider::Codex, false).unwrap();
+        assert!(service.cached_snapshots().is_empty());
+
+        registry.set_enabled(&Provider::Codex, true).unwrap();
+        let cached = service.cached_snapshots();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].freshness, Freshness::Cached);
+        assert_eq!(cached[0].observed_at, first);
+    }
+
+    #[test]
     fn cache_expiry_turns_a_failed_refresh_into_unavailable() {
         let first = instant();
         let clock = FixedClock::new(first);
@@ -1197,7 +1248,6 @@ mod tests {
         for provider in [
             Provider::Codex,
             Provider::Kimi,
-            Provider::OllamaLocal,
             Provider::OllamaCloud,
         ] {
             registry
@@ -1215,7 +1265,7 @@ mod tests {
 
         let report = RefreshService::new(registry, policy).refresh_all_with_report();
 
-        assert_eq!(report.snapshots.len(), 4);
+        assert_eq!(report.snapshots.len(), 3);
         assert!(maximum.load(Ordering::SeqCst) <= 2);
     }
 }

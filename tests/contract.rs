@@ -43,7 +43,7 @@ fn contract_snapshot_round_trip_preserves_state_and_timestamps() {
 #[test]
 fn contract_distinguishes_missing_zero_and_unlimited_values() {
     let missing = metric_snapshot(
-        Provider::OllamaLocal,
+        Provider::Codex,
         instant(),
         MetricKind::Tokens,
         WindowKind::Session,
@@ -55,7 +55,7 @@ fn contract_distinguishes_missing_zero_and_unlimited_values() {
         None,
     );
     let zero = metric_snapshot(
-        Provider::OllamaLocal,
+        Provider::Codex,
         instant(),
         MetricKind::Tokens,
         WindowKind::Session,
@@ -206,16 +206,6 @@ fn contract_rejects_impossible_values_with_actionable_errors() {
                 "unavailable with values",
                 snapshot,
                 SnapshotValidationError::UnavailableHasValues,
-            )
-        },
-        {
-            let mut snapshot = base.clone();
-            snapshot.provider = Provider::OllamaLocal;
-            snapshot.metric_kind = MetricKind::Quota;
-            (
-                "local hosted quota",
-                snapshot,
-                SnapshotValidationError::LocalHostedQuota,
             )
         },
         {

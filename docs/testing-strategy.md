@@ -31,7 +31,6 @@ The highest-risk cross-layer truths should be expressed as invariants:
   unavailable;
 - an older concurrent response cannot overwrite a newer observation;
 - cache keys cannot mix provider, account, metric, or window;
-- local Ollama telemetry is never classified as hosted quota;
 - the compact view never aggregates incompatible percentages;
 - reset timestamps and observed timestamps survive cache round trips;
 - redaction removes tokens, cookies, authorization headers, and sensitive
@@ -50,14 +49,6 @@ Scenario: A stale provider value is visible as stale
   Then the provider card shows the last value with a stale label
   And the reset time remains the provider-reported reset time
   And the card explains when the value was observed
-~~~
-
-~~~gherkin
-Scenario: Local Ollama telemetry is not a subscription quota
-  Given Ollama is running locally and reports token counts
-  When the usage bar renders the Ollama card
-  Then it shows local runtime telemetry
-  And it does not show a hosted quota percentage or fake reset time
 ~~~
 
 ### Integration tests
@@ -96,7 +87,7 @@ and the files can be run independently:
   redaction, cache identity, and property-based generators;
 - `tests/acceptance.rs` — `scenario_*` tests written as Given/When/Then
   user behavior against fake adapters (stale-after-failure, first-failure
-  unavailable, disabled provider, local Ollama is not hosted quota).
+  unavailable, disabled provider).
 
 The remaining markers stay reserved for the corresponding future suites:
 

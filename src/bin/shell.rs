@@ -10,8 +10,8 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_tray_view_focused, provider_display_name, CodexAdapter, GrokConsumerAdapter, Provider,
-        ProviderRegistry, RefreshPolicy, RefreshService, UsageSnapshot,
+        build_tray_view_focused, load_registry, provider_display_name, Provider, RefreshPolicy,
+        RefreshService, UsageSnapshot,
     };
     use std::ffi::c_void;
     use std::ptr::null_mut;
@@ -1266,6 +1266,14 @@ mod windows_shell {
                 return;
             }
 
+            let registry = match load_registry() {
+                Ok(registry) => registry,
+                Err(error) => {
+                    eprintln!("failed to load provider configuration: {error}");
+                    return;
+                }
+            };
+
             let (x, y) = compute_widget_pos();
             let hwnd = match CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1288,15 +1296,6 @@ mod windows_shell {
                 }
             };
 
-            let registry = ProviderRegistry::new();
-            if let Err(error) = registry.register(CodexAdapter) {
-                eprintln!("failed to register Codex provider: {error}");
-                return;
-            }
-            if let Err(error) = registry.register(GrokConsumerAdapter) {
-                eprintln!("failed to register Grok consumer provider: {error}");
-                return;
-            }
             let refresh_service = Arc::new(RefreshService::new(
                 registry,
                 RefreshPolicy::default(),
