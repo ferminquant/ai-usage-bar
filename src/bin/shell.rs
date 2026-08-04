@@ -9,9 +9,13 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_shell {
-    use ai_usage_bar::{build_tray_view, fetch_codex_snapshots, UsageSnapshot};
+    use ai_usage_bar::{
+        build_tray_view, CodexAdapter, ProviderRegistry, RefreshPolicy, RefreshService,
+        UsageSnapshot,
+    };
     use std::ffi::c_void;
     use std::ptr::null_mut;
+    use std::sync::Arc;
     use std::thread;
 
     use super::shell_logic::{
@@ -65,6 +69,7 @@ mod windows_shell {
     const COLOR_MUTED: COLORREF = COLORREF(0x00c0c0c0);
 
     struct AppState {
+        refresh_service: Arc<RefreshService>,
         snapshots: Vec<UsageSnapshot>,
         used_percent: Option<f64>,
         tooltip: String,
@@ -80,8 +85,9 @@ mod windows_shell {
     }
 
     impl AppState {
-        fn loading() -> Self {
+        fn loading(refresh_service: Arc<RefreshService>) -> Self {
             Self {
+                refresh_service,
                 snapshots: Vec::new(),
                 used_percent: None,
                 tooltip: "AI Usage Bar — loading…".to_string(),
@@ -668,6 +674,7 @@ mod windows_shell {
         if state.refresh_in_flight {
             return;
         }
+        let refresh_service = state.refresh_service.clone();
         state.refresh_in_flight = true;
         state.status = None;
         unsafe {
@@ -686,7 +693,7 @@ mod windows_shell {
 
         let hwnd_raw = hwnd.0 as usize;
         thread::spawn(move || {
-            let result = fetch_codex_snapshots().map_err(|error| error.to_string());
+            let result = Ok(refresh_service.refresh_all());
             let payload = Box::new(RefreshPayload { result });
             let payload_ptr = Box::into_raw(payload);
             let target = HWND(hwnd_raw as *mut c_void);
@@ -950,7 +957,16 @@ mod windows_shell {
                 }
             };
 
-            let state_ptr = Box::into_raw(Box::new(AppState::loading()));
+            let registry = ProviderRegistry::new();
+            if let Err(error) = registry.register(CodexAdapter) {
+                eprintln!("failed to register Codex provider: {error}");
+                return;
+            }
+            let refresh_service = Arc::new(RefreshService::new(
+                registry,
+                RefreshPolicy::default(),
+            ));
+            let state_ptr = Box::into_raw(Box::new(AppState::loading(refresh_service)));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
             create_tooltip(hwnd, hinst, &mut *state_ptr);
 

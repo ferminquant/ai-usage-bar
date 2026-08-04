@@ -61,7 +61,7 @@ limit
 unit
 resets_at
 observed_at
-source: api | cli | local_api | browser | fixture
+source: api | cli | local_api | browser | fixture | system
 freshness: live | cached | stale | unavailable | not_configured | not_applicable
 confidence: exact | reported_estimate | inferred | unknown
 error (optional, redacted, object with code and message)

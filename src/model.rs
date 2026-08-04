@@ -68,6 +68,7 @@ pub enum Source {
     LocalApi,
     Browser,
     Fixture,
+    System,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
