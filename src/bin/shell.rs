@@ -10,7 +10,8 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_tray_view, CodexAdapter, ProviderRegistry, RefreshPolicy, RefreshService,
+        build_tray_view, CodexAdapter, GrokConsumerAdapter, ProviderRegistry, RefreshPolicy,
+        RefreshService,
         UsageSnapshot,
     };
     use std::ffi::c_void;
@@ -960,6 +961,10 @@ mod windows_shell {
             let registry = ProviderRegistry::new();
             if let Err(error) = registry.register(CodexAdapter) {
                 eprintln!("failed to register Codex provider: {error}");
+                return;
+            }
+            if let Err(error) = registry.register(GrokConsumerAdapter) {
+                eprintln!("failed to register Grok consumer provider: {error}");
                 return;
             }
             let refresh_service = Arc::new(RefreshService::new(
