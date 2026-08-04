@@ -195,7 +195,10 @@ impl SnapshotCache {
 
     /// Store a successful live snapshot only when it is newer than the cached value.
     pub fn store_live(&self, snapshot: UsageSnapshot) -> bool {
-        if snapshot.freshness != Freshness::Live || snapshot.error.is_some() {
+        if snapshot.validate().is_err()
+            || snapshot.freshness != Freshness::Live
+            || snapshot.error.is_some()
+        {
             return false;
         }
 
@@ -458,9 +461,28 @@ fn successful_refresh(
     policy: RefreshPolicy,
     now: DateTime<Utc>,
 ) -> ProviderRun {
+    let snapshots = snapshots
+        .into_iter()
+        .map(sanitize_adapter_snapshot)
+        .collect::<Vec<_>>();
+    if snapshots
+        .iter()
+        .any(|snapshot| snapshot.validate().is_err())
+    {
+        return fallback(
+            provider,
+            cache,
+            policy,
+            now,
+            AdapterError {
+                code: ErrorCode::SchemaDrift,
+                message: None,
+            },
+        );
+    }
+
     let mut output = Vec::new();
     for snapshot in snapshots {
-        let snapshot = sanitize_adapter_snapshot(snapshot);
         if snapshot.freshness != Freshness::Live || snapshot.error.is_some() {
             output.push(snapshot);
             continue;

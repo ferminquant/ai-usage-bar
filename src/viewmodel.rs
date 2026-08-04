@@ -127,6 +127,8 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
             s.freshness,
             Freshness::Live | Freshness::Cached | Freshness::Stale
         )
+            && matches!(s.metric_kind, MetricKind::Quota | MetricKind::Credits | MetricKind::Requests)
+            && s.unit == "percent"
             && s.window_label.as_deref() == Some("primary")
             && s.used.is_some()
     });
@@ -314,5 +316,21 @@ mod tests {
         let vm = build_tray_view(&snaps);
         assert!(!vm.tooltip.contains("total"));
         assert!(!vm.tooltip.contains("average"));
+    }
+
+    #[test]
+    fn local_token_telemetry_is_not_a_quota_percentage() {
+        let mut snapshot = make_snapshot(Some(400.0), Freshness::Live, Some("primary"));
+        snapshot.provider = Provider::OllamaLocal;
+        snapshot.metric_kind = MetricKind::Tokens;
+        snapshot.window_kind = WindowKind::Session;
+        snapshot.unit = "tokens".into();
+        snapshot.limit = None;
+        snapshot.remaining = None;
+
+        let vm = build_tray_view(&[snapshot]);
+
+        assert_eq!(vm.icon_text, "—");
+        assert_eq!(vm.used_percent, None);
     }
 }

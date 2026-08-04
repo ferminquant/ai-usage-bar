@@ -13,6 +13,6 @@ pub use daemon::{
 };
 pub use model::{
     AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, ProviderAdapter,
-    Source, UsageSnapshot, WindowKind,
+    SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
 pub use viewmodel::{build_tray_view, MetricCard, ProviderCard, TrayViewModel};

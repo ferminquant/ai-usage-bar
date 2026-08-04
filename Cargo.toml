@@ -38,3 +38,4 @@ windows = { version = "0.61", features = [
 
 [dev-dependencies]
 pretty_assertions = "1"
+proptest = "1"
