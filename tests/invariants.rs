@@ -2,7 +2,7 @@ mod common;
 
 use ai_usage_bar::{
     build_tray_view, AdapterError, ErrorCode, Freshness, MetricKind, Provider, ProviderRegistry,
-    RefreshPolicy, SnapshotCache, WindowKind,
+    RefreshPolicy, SnapshotCache, StoreLiveReject, StoreLiveResult, WindowKind,
 };
 use chrono::Duration;
 use common::{instant, metric_snapshot, percent_snapshot, service, FixedClock, SequenceAdapter};
@@ -54,6 +54,15 @@ fn invalid_percentage_strategy() -> impl Strategy<Value = f64> {
     prop_oneof![-1000.0f64..=-0.01, 100.01f64..=1000.0]
 }
 
+fn invalid_account_id_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just(String::new()),
+        Just("   ".to_string()),
+        Just("has\nnewline".to_string()),
+        Just("has\ttab".to_string()),
+    ]
+}
+
 proptest! {
     #[test]
     fn invariant_generated_fields_are_contract_safe(
@@ -66,6 +75,18 @@ proptest! {
         limit in prop::option::of(0.0f64..=100.0),
         offset_seconds in 0i64..=86_400,
     ) {
+        // Keep generated snapshots inside the contract: local Ollama never
+        // reports hosted quota, and used must not exceed limit.
+        let metric = if provider == Provider::OllamaLocal && metric == MetricKind::Quota {
+            MetricKind::Tokens
+        } else {
+            metric
+        };
+        let (used, limit) = match (used, limit) {
+            (Some(used), Some(limit)) if used > limit => (Some(limit), Some(limit)),
+            pair => pair,
+        };
+
         let snapshot = metric_snapshot(
             provider,
             instant() + Duration::seconds(offset_seconds),
@@ -110,6 +131,46 @@ proptest! {
     }
 
     #[test]
+    fn invariant_invalid_account_ids_are_rejected(account_id in invalid_account_id_strategy()) {
+        let mut snapshot = percent_snapshot(
+            Provider::Codex,
+            instant(),
+            Some(25.0),
+            Freshness::Live,
+            Some("primary"),
+        );
+        snapshot.account_id = account_id;
+        prop_assert_eq!(
+            snapshot.validate(),
+            Err(ai_usage_bar::SnapshotValidationError::InvalidAccountId)
+        );
+    }
+
+    #[test]
+    fn invariant_used_above_limit_is_rejected(
+        used in 1.0f64..=1_000.0,
+        limit in 0.0f64..=999.0,
+    ) {
+        prop_assume!(used > limit);
+        let snapshot = metric_snapshot(
+            Provider::Codex,
+            instant(),
+            MetricKind::Credits,
+            WindowKind::None,
+            "credits",
+            Some(used),
+            None,
+            Some(limit),
+            Freshness::Live,
+            None,
+        );
+        prop_assert_eq!(
+            snapshot.validate(),
+            Err(ai_usage_bar::SnapshotValidationError::UsedExceedsLimit)
+        );
+    }
+
+    #[test]
     fn invariant_cache_age_preserves_observation_time(age_seconds in 0i64..=300) {
         let observed_at = instant();
         let clock = FixedClock::new(observed_at);
@@ -146,6 +207,7 @@ proptest! {
     }
 }
 
+// Also covered as an acceptance scenario; kept here as a cross-layer invariant.
 #[test]
 fn invariant_disabled_provider_is_not_scheduled_or_rendered() {
     let now = instant();
@@ -175,6 +237,8 @@ fn invariant_disabled_provider_is_not_scheduled_or_rendered() {
     assert_eq!(view.tooltip, "No provider data");
 }
 
+// Redaction is also exercised by daemon unit tests; this invariant locks the
+// refresh-report surface used by the tray path.
 #[test]
 fn invariant_provider_errors_are_redacted_from_snapshots_and_diagnostics() {
     let now = instant();
@@ -257,6 +321,147 @@ fn invariant_cache_key_keeps_provider_account_metric_and_window_separate() {
 }
 
 #[test]
+fn invariant_store_live_reports_reject_reason() {
+    let cache = SnapshotCache::new();
+    let now = instant();
+    let live = percent_snapshot(
+        Provider::Codex,
+        now,
+        Some(20.0),
+        Freshness::Live,
+        Some("primary"),
+    );
+
+    assert_eq!(cache.try_store_live(live.clone()), StoreLiveResult::Stored);
+
+    let mut not_live = live.clone();
+    not_live.freshness = Freshness::Cached;
+    assert_eq!(
+        cache.try_store_live(not_live),
+        StoreLiveResult::Rejected(StoreLiveReject::NotLive)
+    );
+
+    let mut with_error = live.clone();
+    with_error.error = Some(AdapterError {
+        code: ErrorCode::Timeout,
+        message: None,
+    });
+    assert_eq!(
+        cache.try_store_live(with_error),
+        StoreLiveResult::Rejected(StoreLiveReject::HasError)
+    );
+
+    let mut invalid = live.clone();
+    invalid.used = Some(150.0);
+    assert_eq!(
+        cache.try_store_live(invalid),
+        StoreLiveResult::Rejected(StoreLiveReject::InvalidContract)
+    );
+
+    let older = percent_snapshot(
+        Provider::Codex,
+        now - Duration::minutes(1),
+        Some(10.0),
+        Freshness::Live,
+        Some("primary"),
+    );
+    assert_eq!(
+        cache.try_store_live(older),
+        StoreLiveResult::Rejected(StoreLiveReject::OlderThanCached)
+    );
+}
+
+#[test]
+fn invariant_one_invalid_window_does_not_drop_valid_siblings() {
+    let now = instant();
+    let clock = FixedClock::new(now);
+    let registry = ProviderRegistry::new();
+    let primary = percent_snapshot(
+        Provider::Codex,
+        now,
+        Some(25.0),
+        Freshness::Live,
+        Some("primary"),
+    );
+    let mut secondary = percent_snapshot(
+        Provider::Codex,
+        now,
+        Some(101.0),
+        Freshness::Live,
+        Some("secondary"),
+    );
+    secondary.window_kind = WindowKind::Daily;
+    let (adapter, _) = SequenceAdapter::new(Provider::Codex, vec![Ok(vec![primary, secondary])]);
+    registry.register(adapter).unwrap();
+
+    let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
+
+    assert_eq!(report.snapshots.len(), 2);
+    let primary = report
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.window_label.as_deref() == Some("primary"))
+        .expect("primary window kept");
+    let secondary = report
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.window_label.as_deref() == Some("secondary"))
+        .expect("secondary window present");
+    assert_eq!(primary.freshness, Freshness::Live);
+    assert_eq!(primary.used, Some(25.0));
+    assert_eq!(secondary.freshness, Freshness::Unavailable);
+    assert_eq!(
+        secondary.error.as_ref().map(|error| error.code.clone()),
+        Some(ErrorCode::SchemaDrift)
+    );
+    assert_eq!(
+        report.diagnostics[0].error_code,
+        Some(ErrorCode::SchemaDrift)
+    );
+}
+
+#[test]
+fn invariant_cached_with_error_is_schema_drift_not_healed() {
+    let now = instant();
+    let clock = FixedClock::new(now);
+    let registry = ProviderRegistry::new();
+    let mut snapshot = percent_snapshot(
+        Provider::Codex,
+        now,
+        Some(40.0),
+        Freshness::Cached,
+        Some("primary"),
+    );
+    snapshot.error = Some(AdapterError {
+        code: ErrorCode::Network,
+        message: Some("authorization=secret-token".into()),
+    });
+    let (adapter, _) = SequenceAdapter::new(Provider::Codex, vec![Ok(vec![snapshot])]);
+    registry.register(adapter).unwrap();
+
+    let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
+    let rendered = format!("{report:?}");
+
+    assert_eq!(report.snapshots[0].freshness, Freshness::Unavailable);
+    assert_eq!(
+        report.snapshots[0].error.as_ref().map(|error| error.code.clone()),
+        Some(ErrorCode::SchemaDrift)
+    );
+    assert!(report.snapshots[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .message
+        .is_none());
+    assert!(!rendered.contains("secret-token"));
+    assert_eq!(
+        report.diagnostics[0].error_code,
+        Some(ErrorCode::SchemaDrift)
+    );
+}
+
+// Compact-view policy; acceptance covers the full Ollama scenario narrative.
+#[test]
 fn invariant_local_telemetry_never_becomes_a_quota_icon() {
     let snapshot = metric_snapshot(
         Provider::OllamaLocal,
@@ -275,4 +480,33 @@ fn invariant_local_telemetry_never_becomes_a_quota_icon() {
 
     assert_eq!(view.icon_text, "—");
     assert_eq!(view.used_percent, None);
+}
+
+#[test]
+fn invariant_local_hosted_quota_is_rejected_at_the_boundary() {
+    let now = instant();
+    let clock = FixedClock::new(now);
+    let registry = ProviderRegistry::new();
+    let mut snapshot = percent_snapshot(
+        Provider::OllamaLocal,
+        now,
+        Some(50.0),
+        Freshness::Live,
+        Some("primary"),
+    );
+    snapshot.metric_kind = MetricKind::Quota;
+    let (adapter, _) = SequenceAdapter::new(Provider::OllamaLocal, vec![Ok(vec![snapshot])]);
+    registry.register(adapter).unwrap();
+
+    let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
+    let view = build_tray_view(&report.snapshots);
+
+    assert_eq!(report.snapshots[0].freshness, Freshness::Unavailable);
+    assert_eq!(report.snapshots[0].metric_kind, MetricKind::Health);
+    assert_eq!(view.used_percent, None);
+    assert_eq!(view.icon_text, "⛔");
+    assert_eq!(
+        report.diagnostics[0].error_code,
+        Some(ErrorCode::SchemaDrift)
+    );
 }

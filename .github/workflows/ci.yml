@@ -31,6 +31,8 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # Intentional dedicated gate (also covered by linux --all-targets) so contract
+  # and invariant failures surface under a named job and can be required alone.
   contract-and-invariants:
     name: Contract, invariant, and acceptance tests
     runs-on: ubuntu-latest

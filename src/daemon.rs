@@ -182,6 +182,26 @@ impl SnapshotKey {
     }
 }
 
+/// Why [`SnapshotCache::try_store_live`] refused to write a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreLiveReject {
+    /// Snapshot failed provider-neutral contract validation.
+    InvalidContract,
+    /// Only `freshness=live` snapshots may enter the cache.
+    NotLive,
+    /// Live snapshots must not carry an error payload.
+    HasError,
+    /// An existing cache entry already has a newer `observed_at`.
+    OlderThanCached,
+}
+
+/// Outcome of attempting to store a live snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreLiveResult {
+    Stored,
+    Rejected(StoreLiveReject),
+}
+
 /// In-memory cache keyed by the complete provider snapshot identity.
 #[derive(Clone, Default)]
 pub struct SnapshotCache {
@@ -195,11 +215,20 @@ impl SnapshotCache {
 
     /// Store a successful live snapshot only when it is newer than the cached value.
     pub fn store_live(&self, snapshot: UsageSnapshot) -> bool {
-        if snapshot.validate().is_err()
-            || snapshot.freshness != Freshness::Live
-            || snapshot.error.is_some()
-        {
-            return false;
+        matches!(self.try_store_live(snapshot), StoreLiveResult::Stored)
+    }
+
+    /// Store a live snapshot, reporting why the write was rejected when it is not stored.
+    pub fn try_store_live(&self, snapshot: UsageSnapshot) -> StoreLiveResult {
+        // Check shape gates first so callers see the most specific reject reason.
+        if snapshot.freshness != Freshness::Live {
+            return StoreLiveResult::Rejected(StoreLiveReject::NotLive);
+        }
+        if snapshot.error.is_some() {
+            return StoreLiveResult::Rejected(StoreLiveReject::HasError);
+        }
+        if snapshot.validate().is_err() {
+            return StoreLiveResult::Rejected(StoreLiveReject::InvalidContract);
         }
 
         let key = SnapshotKey::from_snapshot(&snapshot);
@@ -208,10 +237,10 @@ impl SnapshotCache {
             .get(&key)
             .is_some_and(|existing| existing.observed_at > snapshot.observed_at)
         {
-            return false;
+            return StoreLiveResult::Rejected(StoreLiveReject::OlderThanCached);
         }
         entries.insert(key, snapshot);
-        true
+        StoreLiveResult::Stored
     }
 
     pub fn get(
@@ -433,22 +462,6 @@ fn run_provider(
                 },
             )
         }
-        Ok(snapshots)
-            if snapshots.iter().any(|snapshot| {
-                snapshot.freshness == Freshness::Live && snapshot.error.is_some()
-            }) =>
-        {
-            fallback(
-                &provider,
-                cache,
-                policy,
-                now,
-                AdapterError {
-                    code: ErrorCode::SchemaDrift,
-                    message: None,
-                },
-            )
-        }
         Ok(snapshots) => successful_refresh(&provider, snapshots, cache, policy, now),
         Err(error) => fallback(&provider, cache, policy, now, error),
     }
@@ -461,46 +474,62 @@ fn successful_refresh(
     policy: RefreshPolicy,
     now: DateTime<Utc>,
 ) -> ProviderRun {
-    let snapshots = snapshots
-        .into_iter()
-        .map(sanitize_adapter_snapshot)
-        .collect::<Vec<_>>();
-    if snapshots
-        .iter()
-        .any(|snapshot| snapshot.validate().is_err())
-    {
-        return fallback(
-            provider,
-            cache,
-            policy,
-            now,
-            AdapterError {
-                code: ErrorCode::SchemaDrift,
-                message: None,
-            },
-        );
-    }
-
+    // Validate each raw adapter snapshot before redaction so contradictory
+    // freshness/error pairs cannot be rewritten into a successful shape.
+    // Invalid windows become redacted schema_drift (or stale cache for that
+    // key); valid windows are still stored and rendered.
     let mut output = Vec::new();
+    let mut saw_schema_drift = false;
+
     for snapshot in snapshots {
-        if snapshot.freshness != Freshness::Live || snapshot.error.is_some() {
+        if let Err(_reason) = snapshot.validate() {
+            saw_schema_drift = true;
+            output.push(invalid_window_outcome(provider, &snapshot, &cache, policy, now));
+            continue;
+        }
+
+        let snapshot = sanitize_adapter_snapshot(snapshot);
+        if snapshot.freshness != Freshness::Live {
             output.push(snapshot);
             continue;
         }
 
         let key = SnapshotKey::from_snapshot(&snapshot);
-        let accepted = cache.store_live(snapshot);
-        let effective = cache
-            .entries
-            .lock()
-            .expect("snapshot cache poisoned")
-            .get(&key)
-            .cloned()
-            .expect("live snapshot was not stored");
-        if accepted {
-            output.push(effective);
-        } else {
-            output.push(classify_cached(effective, now, policy));
+        match cache.try_store_live(snapshot) {
+            StoreLiveResult::Stored => {
+                let effective = cache
+                    .entries
+                    .lock()
+                    .expect("snapshot cache poisoned")
+                    .get(&key)
+                    .cloned()
+                    .expect("live snapshot was stored");
+                output.push(effective);
+            }
+            StoreLiveResult::Rejected(StoreLiveReject::OlderThanCached) => {
+                let effective = cache
+                    .entries
+                    .lock()
+                    .expect("snapshot cache poisoned")
+                    .get(&key)
+                    .cloned()
+                    .expect("newer live snapshot remains cached");
+                output.push(classify_cached(effective, now, policy));
+            }
+            StoreLiveResult::Rejected(reason) => {
+                // validate() already passed; NotLive/HasError/InvalidContract
+                // here means an invariant was broken after sanitization.
+                saw_schema_drift = true;
+                let _ = reason;
+                output.push(unavailable_snapshot(
+                    provider,
+                    now,
+                    AdapterError {
+                        code: ErrorCode::SchemaDrift,
+                        message: None,
+                    },
+                ));
+            }
         }
     }
 
@@ -510,11 +539,85 @@ fn successful_refresh(
         diagnostic: RefreshDiagnostic {
             provider: provider.clone(),
             freshness,
-            error_code: None,
+            error_code: saw_schema_drift.then_some(ErrorCode::SchemaDrift),
         },
     }
 }
 
+/// Prefer a still-fresh cached window for an invalid adapter result; otherwise
+/// emit a redacted unavailable snapshot for that window identity.
+fn invalid_window_outcome(
+    provider: &Provider,
+    snapshot: &UsageSnapshot,
+    cache: &SnapshotCache,
+    policy: RefreshPolicy,
+    now: DateTime<Utc>,
+) -> UsageSnapshot {
+    if snapshot.has_safe_account_id() {
+        if let Some(previous) = cache.get(
+            &snapshot.provider,
+            &snapshot.account_id,
+            snapshot.metric_kind,
+            snapshot.window_kind,
+        ) {
+            if age_since(now, previous.observed_at) <= policy.stale_after {
+                return set_freshness(previous, Freshness::Stale);
+            }
+        }
+    }
+
+    window_schema_drift_snapshot(provider, snapshot, now)
+}
+
+fn window_schema_drift_snapshot(
+    provider: &Provider,
+    snapshot: &UsageSnapshot,
+    now: DateTime<Utc>,
+) -> UsageSnapshot {
+    let account_id = if snapshot.has_safe_account_id() {
+        snapshot.account_id.clone()
+    } else {
+        format!("{}-unavailable", provider.as_str())
+    };
+    // Do not re-emit rejected hosted-quota shapes for local Ollama.
+    let metric_kind = if provider == &Provider::OllamaLocal && snapshot.metric_kind == MetricKind::Quota
+    {
+        MetricKind::Health
+    } else {
+        snapshot.metric_kind
+    };
+    let unit = if snapshot.unit.trim().is_empty()
+        || (provider == &Provider::OllamaLocal && snapshot.metric_kind == MetricKind::Quota)
+    {
+        "status".to_string()
+    } else {
+        snapshot.unit.clone()
+    };
+
+    UsageSnapshot {
+        provider: provider.clone(),
+        account_id,
+        metric_kind,
+        window_kind: snapshot.window_kind,
+        unit,
+        observed_at: now,
+        source: Source::System,
+        freshness: Freshness::Unavailable,
+        confidence: crate::model::Confidence::Unknown,
+        used: None,
+        remaining: None,
+        limit: None,
+        unlimited: false,
+        resets_at: None,
+        window_label: snapshot.window_label.clone(),
+        error: Some(AdapterError {
+            code: ErrorCode::SchemaDrift,
+            message: None,
+        }),
+    }
+}
+
+/// Redact human-readable error text. Call only after [`UsageSnapshot::validate`].
 fn sanitize_adapter_snapshot(mut snapshot: UsageSnapshot) -> UsageSnapshot {
     if let Some(error) = snapshot.error.take() {
         snapshot.error = (snapshot.freshness == Freshness::Unavailable).then_some(AdapterError {

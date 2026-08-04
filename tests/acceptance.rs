@@ -1,10 +1,11 @@
 mod common;
 
 use ai_usage_bar::{
-    build_tray_view, AdapterError, ErrorCode, Freshness, Provider, ProviderRegistry, RefreshPolicy,
+    build_tray_view, AdapterError, ErrorCode, Freshness, MetricKind, Provider, ProviderRegistry,
+    RefreshPolicy, WindowKind,
 };
 use chrono::Duration;
-use common::{instant, percent_snapshot, service, FixedClock, SequenceAdapter};
+use common::{instant, metric_snapshot, percent_snapshot, service, FixedClock, SequenceAdapter};
 
 #[test]
 fn scenario_stale_provider_value_remains_visible_after_refresh_failure() {
@@ -79,6 +80,8 @@ fn scenario_failed_provider_without_cache_is_explicitly_unavailable() {
     assert!(!view.tooltip.contains("0%"));
 }
 
+// Cross-layer invariant also asserts disabled providers; this scenario is the
+// user-facing acceptance form from the testing strategy.
 #[test]
 fn scenario_disabled_provider_is_not_scheduled_or_shown() {
     // Scenario: A user disables a provider
@@ -107,4 +110,40 @@ fn scenario_disabled_provider_is_not_scheduled_or_shown() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(snapshots.is_empty());
     assert_eq!(view.tooltip, "No provider data");
+}
+
+#[test]
+fn scenario_local_ollama_telemetry_is_not_a_subscription_quota() {
+    // Scenario: Local Ollama telemetry is not a subscription quota
+    // Given Ollama is running locally and reports token counts
+    let now = instant();
+    let clock = FixedClock::new(now);
+    let registry = ProviderRegistry::new();
+    let telemetry = metric_snapshot(
+        Provider::OllamaLocal,
+        now,
+        MetricKind::Tokens,
+        WindowKind::Session,
+        "tokens",
+        Some(4_000.0),
+        None,
+        None,
+        Freshness::Live,
+        Some("primary"),
+    );
+    let (adapter, _) = SequenceAdapter::new(Provider::OllamaLocal, vec![Ok(vec![telemetry])]);
+    registry.register(adapter).unwrap();
+
+    // When the usage bar refreshes and renders the Ollama card
+    let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
+    let view = build_tray_view(&report.snapshots);
+
+    // Then it shows local runtime telemetry and no hosted quota percentage
+    assert_eq!(report.snapshots[0].provider, Provider::OllamaLocal);
+    assert_eq!(report.snapshots[0].metric_kind, MetricKind::Tokens);
+    assert_eq!(report.snapshots[0].used, Some(4_000.0));
+    assert_eq!(report.snapshots[0].freshness, Freshness::Live);
+    assert_eq!(view.used_percent, None);
+    assert_eq!(view.icon_text, "—");
+    assert!(!view.tooltip.contains("% left"));
 }

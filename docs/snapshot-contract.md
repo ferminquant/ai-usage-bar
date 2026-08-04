@@ -180,10 +180,21 @@ Rules:
   does not silently correct it.
 - `observed_at` is immutable once set. The cache must not bump it on a
   cache hit.
-- Every adapter result is validated before it enters the cache. Non-finite or
-  negative values, out-of-range percentages, unsafe account identifiers, and
-  contradictory freshness/error states become a redacted `schema_drift`
-  outcome rather than being rendered as provider data.
+- Every adapter result is validated **before** message redaction and before it
+  enters the cache. Validation rejects:
+  - non-finite or negative `used` / `remaining` / `limit`;
+  - out-of-range percentages (`unit=percent` values outside 0–100);
+  - `used > limit` when `unlimited` is false;
+  - unsafe `account_id` (empty/whitespace or control characters);
+  - empty `unit`;
+  - `freshness=unavailable` carrying metric values or missing `error`;
+  - `error` present on live/cached/stale/not_configured/not_applicable;
+  - `provider=ollama_local` with `metric_kind=quota` (local telemetry is never
+    hosted quota).
+- Invalid windows become a redacted `schema_drift` outcome (or the previous
+  stale cache entry for that window key when still within `stale_after`).
+  Sibling windows from the same refresh are validated independently and are
+  not dropped because another window failed.
 
 ## Multiple windows
 

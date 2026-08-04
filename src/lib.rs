@@ -9,7 +9,7 @@ pub use codex::{
 };
 pub use daemon::{
     Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,
-    RegistryError, SharedAdapter, SnapshotCache, SystemClock,
+    RegistryError, SharedAdapter, SnapshotCache, StoreLiveReject, StoreLiveResult, SystemClock,
 };
 pub use model::{
     AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, ProviderAdapter,
