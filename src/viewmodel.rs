@@ -41,11 +41,14 @@ pub struct MetricCard {
 
 impl MetricCard {
     pub fn from_snapshot(s: &UsageSnapshot) -> Self {
-        let label = s.window_label.clone().unwrap_or_else(|| match s.metric_kind {
-            MetricKind::Credits => "credits".into(),
-            MetricKind::Health => "health".into(),
-            _ => "usage".into(),
-        });
+        let label = s
+            .window_label
+            .clone()
+            .unwrap_or_else(|| match s.metric_kind {
+                MetricKind::Credits => "credits".into(),
+                MetricKind::Health => "health".into(),
+                _ => "usage".into(),
+            });
         MetricCard {
             label,
             metric_kind: s.metric_kind,
@@ -76,7 +79,7 @@ impl ProviderCard {
         for s in snapshots {
             let key = format!("{}-{}", s.provider, s.account_id);
             let card = providers.entry(key.clone()).or_insert(ProviderCard {
-                provider: s.provider.to_string(),
+                provider: provider_display_name(&s.provider).to_string(),
                 account_id: s.account_id.clone(),
                 freshness: s.freshness,
                 metrics: Vec::new(),
@@ -115,6 +118,20 @@ fn tooltip_metric_value(metric: &MetricCard) -> String {
     format!("{value}{unit_display}")
 }
 
+fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
+    if provider == "Ollama" && metric.label == "session" {
+        return "5-hour session".to_string();
+    }
+
+    // A provider-native label can already include the window name. Avoid
+    // rendering redundant text such as "weekly weekly" in that case.
+    if metric.label.eq_ignore_ascii_case(&metric.window_kind) {
+        metric.label.clone()
+    } else {
+        format!("{} {}", metric.label, metric.window_kind)
+    }
+}
+
 /// Human-readable reset with remaining days/hours, e.g. `3d 5h left · Tue 13:28 UTC`.
 pub fn format_reset_label(resets_at: Option<&str>, now: DateTime<Utc>) -> String {
     let Some(dt) = resets_at
@@ -148,7 +165,7 @@ pub fn provider_display_name(provider: &Provider) -> &'static str {
     match provider {
         Provider::Codex => "Codex",
         Provider::Kimi => "Kimi",
-        Provider::OllamaCloud => "Ollama cloud",
+        Provider::OllamaCloud => "Ollama",
         Provider::GrokConsumer => "Grok",
         Provider::GrokApi => "Grok API",
     }
@@ -286,19 +303,18 @@ pub fn build_tray_view_focused_window(
             } else {
                 m.unit.as_str()
             };
-            let label = &m.label;
-            let win = &m.window_kind;
+            let metric_name = tooltip_metric_name(&card.provider, m);
             let reset_str = format_reset_label(m.resets_at.as_deref(), now);
 
             if m.metric_kind == MetricKind::Credits {
                 let bal = m.used.as_deref().unwrap_or("?");
                 let unlim = if m.unlimited { " (unlimited)" } else { "" };
-                lines.push(format!("  {label}: {bal} {unit_display}{unlim}"));
+                lines.push(format!("  {metric_name}: {bal} {unit_display}{unlim}"));
             } else if let Some(error) = &m.error {
-                lines.push(format!("  {label}: unavailable ({error})"));
+                lines.push(format!("  {metric_name}: unavailable ({error})"));
             } else {
                 lines.push(format!(
-                    "  {label} {win}: {}, resets {reset_str}",
+                    "  {metric_name}: {}, resets {reset_str}",
                     tooltip_metric_value(m)
                 ));
             }
@@ -397,7 +413,7 @@ mod tests {
     fn tooltip_contains_provider_and_usage() {
         let snaps = vec![make_snapshot(Some(40.0), Freshness::Live, Some("primary"))];
         let vm = build_tray_view(&snaps);
-        assert!(vm.tooltip.contains("codex"));
+        assert!(vm.tooltip.contains("Codex"));
         assert!(vm.tooltip.contains("60% left"));
         assert!(!vm.tooltip.contains("40%"));
     }
@@ -469,7 +485,7 @@ mod tests {
 
         let default = build_tray_view(&[session.clone(), weekly.clone()]);
         assert_eq!(default.used_percent, Some(37.0));
-        assert_eq!(default.status_label, "Ollama cloud");
+        assert_eq!(default.status_label, "Ollama");
         assert_eq!(default.switchable_providers, vec![Provider::OllamaCloud]);
 
         let weekly_view = build_tray_view_focused_window(
@@ -480,6 +496,27 @@ mod tests {
         );
         assert_eq!(weekly_view.used_percent, Some(18.4));
         assert_eq!(weekly_view.focus_provider, Some(Provider::OllamaCloud));
+    }
+
+    #[test]
+    fn provider_cards_and_ollama_tooltip_use_short_labels() {
+        let mut session = make_snapshot(Some(72.0), Freshness::Live, Some("session"));
+        session.provider = Provider::OllamaCloud;
+        session.account_id = "ollama-test".into();
+        session.window_kind = WindowKind::Rolling;
+        let mut weekly = session.clone();
+        weekly.used = Some(31.0);
+        weekly.remaining = Some(69.0);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("weekly".into());
+
+        let view = build_tray_view(&[session, weekly]);
+        assert!(view.tooltip.contains("Ollama"));
+        assert!(!view.tooltip.contains("Ollama cloud"));
+        assert!(view.tooltip.contains("5-hour session: 28% left"));
+        assert!(view.tooltip.contains("weekly: 69% left"));
+        assert!(!view.tooltip.contains("session rolling"));
+        assert!(!view.tooltip.contains("weekly weekly"));
     }
 
     #[test]
