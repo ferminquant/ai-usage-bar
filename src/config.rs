@@ -1,10 +1,13 @@
 //! User configuration and the shared built-in provider bootstrap.
 //!
 //! Configuration controls which compiled hosted providers are scheduled. It
-//! deliberately contains no credentials: Codex and Grok continue to discover
-//! their own local login sessions through their adapters.
+//! deliberately contains no credentials: each hosted adapter discovers its
+//! own local login/session surface.
 
-use crate::{CodexAdapter, GrokConsumerAdapter, Provider, ProviderRegistry, RegistryError};
+use crate::{
+    CodexAdapter, GrokConsumerAdapter, OllamaCloudAdapter, Provider, ProviderRegistry,
+    RegistryError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -171,8 +174,9 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
     let registry = ProviderRegistry::new();
     registry.register(CodexAdapter)?;
     registry.register(GrokConsumerAdapter)?;
+    registry.register(OllamaCloudAdapter)?;
 
-    for provider in [Provider::Codex, Provider::GrokConsumer] {
+    for provider in [Provider::Codex, Provider::GrokConsumer, Provider::OllamaCloud] {
         registry.set_enabled(&provider, config.provider_enabled(&provider))?;
     }
 
@@ -280,7 +284,7 @@ mod tests {
         let registry = build_registry(&AppConfig::default()).unwrap();
         assert_eq!(
             registry.registered_providers(),
-            vec![Provider::Codex, Provider::GrokConsumer]
+            vec![Provider::Codex, Provider::GrokConsumer, Provider::OllamaCloud]
         );
     }
 
@@ -292,5 +296,6 @@ mod tests {
 
         assert!(!registry.is_enabled(&Provider::Codex).unwrap());
         assert!(registry.is_enabled(&Provider::GrokConsumer).unwrap());
+        assert!(!registry.is_enabled(&Provider::OllamaCloud).unwrap());
     }
 }

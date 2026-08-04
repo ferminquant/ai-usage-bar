@@ -162,11 +162,29 @@ fn is_compact_candidate(s: &UsageSnapshot) -> bool {
         s.metric_kind,
         MetricKind::Quota | MetricKind::Credits | MetricKind::Requests
     ) && s.unit == "percent"
-        && s.window_label.as_deref() == Some("primary")
+        && (s.window_label.as_deref() == Some("primary")
+            || (s.provider == Provider::OllamaCloud
+                && s.window_label.as_deref() == Some("session")))
         && s.used.is_some()
 }
 
-/// Compact tray view using the first eligible primary percentage window.
+fn is_window_candidate(s: &UsageSnapshot, window: &str) -> bool {
+    matches!(
+        s.freshness,
+        Freshness::Live | Freshness::Cached | Freshness::Stale
+    ) && matches!(
+        s.metric_kind,
+        MetricKind::Quota | MetricKind::Credits | MetricKind::Requests
+    ) && s.unit == "percent"
+        && s.used.is_some()
+        && if s.provider == Provider::OllamaCloud {
+            matches!(window, "session" | "weekly") && s.window_label.as_deref() == Some(window)
+        } else {
+            window == "primary" && s.window_label.as_deref() == Some("primary")
+        }
+}
+
+/// Compact tray view using the first eligible default percentage window.
 pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
     build_tray_view_focused(snapshots, None, Utc::now())
 }
@@ -175,6 +193,20 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
 pub fn build_tray_view_focused(
     snapshots: &[UsageSnapshot],
     focus: Option<&Provider>,
+    now: DateTime<Utc>,
+) -> TrayViewModel {
+    build_tray_view_focused_window(snapshots, focus, None, now)
+}
+
+/// Compact tray view with an optional focused provider and quota window.
+///
+/// Ollama's session window is the default candidate; callers can pass
+/// `Some("weekly")` to select the weekly cloud quota without changing the
+/// provider-neutral snapshot model.
+pub fn build_tray_view_focused_window(
+    snapshots: &[UsageSnapshot],
+    focus: Option<&Provider>,
+    focus_window: Option<&str>,
     now: DateTime<Utc>,
 ) -> TrayViewModel {
     if snapshots.is_empty() {
@@ -202,9 +234,20 @@ pub fn build_tray_view_focused(
 
     let primary = focus
         .and_then(|wanted| {
-            snapshots
-                .iter()
-                .find(|s| is_compact_candidate(s) && &s.provider == wanted)
+            focus_window.and_then(|window| {
+                snapshots.iter().find(|s| {
+                    is_window_candidate(s, window)
+                        && &s.provider == wanted
+                        && s.window_label.as_deref() == Some(window)
+                })
+            })
+        })
+        .or_else(|| {
+            focus.and_then(|wanted| {
+                snapshots
+                    .iter()
+                    .find(|s| is_compact_candidate(s) && &s.provider == wanted)
+            })
         })
         .or_else(|| snapshots.iter().find(|s| is_compact_candidate(s)));
 
@@ -411,6 +454,32 @@ mod tests {
         assert_eq!(focused.status_label, "Grok");
         assert_eq!(focused.focus_provider, Some(Provider::GrokConsumer));
         assert_eq!(focused.switchable_providers.len(), 2);
+    }
+
+    #[test]
+    fn ollama_defaults_to_session_and_can_focus_weekly() {
+        let mut session = make_snapshot(Some(37.0), Freshness::Live, Some("session"));
+        session.provider = Provider::OllamaCloud;
+        session.account_id = "ollama-test".into();
+        let mut weekly = session.clone();
+        weekly.used = Some(18.4);
+        weekly.remaining = Some(81.6);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("weekly".into());
+
+        let default = build_tray_view(&[session.clone(), weekly.clone()]);
+        assert_eq!(default.used_percent, Some(37.0));
+        assert_eq!(default.status_label, "Ollama cloud");
+        assert_eq!(default.switchable_providers, vec![Provider::OllamaCloud]);
+
+        let weekly_view = build_tray_view_focused_window(
+            &[session, weekly],
+            Some(&Provider::OllamaCloud),
+            Some("weekly"),
+            Utc::now(),
+        );
+        assert_eq!(weekly_view.used_percent, Some(18.4));
+        assert_eq!(weekly_view.focus_provider, Some(Provider::OllamaCloud));
     }
 
     #[test]

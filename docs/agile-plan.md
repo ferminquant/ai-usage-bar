@@ -52,8 +52,8 @@ provider registration in the Windows shell or CLI entrypoints.
 #### Explicitly out of scope
 
 - Kimi implementation; keep the evidence spike in #3 and the adapter in #17.
-- Ollama Pro/cloud implementation; add it only after a hosted usage source is
-  verified.
+- Ollama Pro/cloud adapter behavior is tracked separately in #9; this registry
+  slice only owns its compiled registration and opt-in enablement.
 - Runtime DLL/plugin loading. Adding a new adapter still changes the compiled
   provider factory, but it must not require edits to the shell UI.
 - Credentials, cookies, or access tokens in the configuration file.

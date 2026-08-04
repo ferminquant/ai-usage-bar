@@ -1,7 +1,8 @@
 mod common;
 
 use ai_usage_bar::{
-    build_tray_view, AdapterError, ErrorCode, Freshness, Provider, ProviderRegistry, RefreshPolicy,
+    build_tray_view, build_tray_view_focused_window, AdapterError, ErrorCode, Freshness, Provider,
+    ProviderRegistry, RefreshPolicy,
 };
 use chrono::Duration;
 use common::{instant, percent_snapshot, service, FixedClock, SequenceAdapter};
@@ -108,4 +109,35 @@ fn scenario_disabled_provider_is_not_scheduled_or_shown() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(snapshots.is_empty());
     assert_eq!(view.tooltip, "No provider data");
+}
+
+#[test]
+fn scenario_ollama_session_is_default_and_weekly_is_selectable() {
+    let now = instant();
+    let mut session = common::percent_snapshot(
+        Provider::OllamaCloud,
+        now,
+        Some(37.0),
+        Freshness::Live,
+        Some("session"),
+    );
+    session.window_kind = ai_usage_bar::WindowKind::Rolling;
+    let mut weekly = session.clone();
+    weekly.used = Some(18.4);
+    weekly.remaining = Some(81.6);
+    weekly.window_kind = ai_usage_bar::WindowKind::Weekly;
+    weekly.window_label = Some("weekly".into());
+
+    let snapshots = vec![session, weekly];
+    let default_view = build_tray_view(&snapshots);
+    assert_eq!(default_view.used_percent, Some(37.0));
+
+    let weekly_view = build_tray_view_focused_window(
+        &snapshots,
+        Some(&Provider::OllamaCloud),
+        Some("weekly"),
+        now,
+    );
+    assert_eq!(weekly_view.used_percent, Some(18.4));
+    assert!(weekly_view.tooltip.contains("weekly"));
 }

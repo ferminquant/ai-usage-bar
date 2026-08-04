@@ -12,10 +12,19 @@ The initial provider set is:
 - Ollama Pro/cloud (hosted)
 - Grok
 
-The MVP core is implemented: Codex and Grok consumer adapters, cached
-freshness states, contract/invariant tests, a Windows shell, and hosted-provider
-configuration. Kimi and Ollama Pro/cloud remain future evidence-driven
-adapters.
+The MVP core is implemented: Codex, Grok consumer, and opt-in Ollama Pro/cloud
+adapters, cached freshness states, contract/invariant tests, a Windows shell,
+and hosted-provider configuration. Kimi remains a future evidence-driven
+adapter.
+
+Ollama reports hosted session (5-hour) and weekly (7-day) totals from its
+authenticated cloud endpoint. The compact view defaults to the session quota;
+the right-click menu can select the weekly quota. Reset timestamps are optional
+settings-page enrichment, so totals remain usable when a browser session is
+not available. To opt into reset enrichment, provide the browser's Ollama
+cookie header in the local `OLLAMA_SESSION_COOKIE` environment variable; the
+app does not persist or log that value. The API totals do not require this
+cookie.
 
 ## Product direction
 
@@ -74,7 +83,8 @@ credentials are sent to a project server.
 
 On Windows, copy that example to %APPDATA%\AI Usage Bar\config.json and set
 enabled to false for any hosted provider you want to opt out of. A missing
-file uses the default Codex and Grok configuration.
+file uses the default Codex and Grok configuration; Ollama Pro/cloud is
+registered but opt-in until enabled in that file.
 
 ## Proposed first release
 

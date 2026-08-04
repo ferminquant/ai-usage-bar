@@ -132,9 +132,9 @@ unavailable or the HTML contract changes, the adapter keeps the live API totals
 and leaves `resets_at` absent. It must not infer a session reset from the
 5-hour description or a weekly reset from a guessed calendar boundary.
 
-The shell/view-model work in the implementation story should make `session`
-the default focused window and expose `weekly` through the existing provider
-menu/detail path without aggregating them.
+The runtime adapter and shell/view-model implementation make `session` the
+default focused window and expose `weekly` through the context menu without
+aggregating the two windows.
 
 ## Adapter admission gate
 
@@ -155,6 +155,11 @@ following are covered:
 6. missing reset timestamps are represented honestly, rather than inferred;
 7. model-specific request detail stays out of the initial UI.
 
-The totals and reset-enrichment design are now implementable in issue #9. The
-runtime adapter belongs in a separate implementation PR; this spike remains
-the source and contract record.
+The totals and reset-enrichment design are now implemented in issue #9. The
+spike remains the source and contract record.
+
+The runtime bridge accepts the browser cookie explicitly through the local
+`OLLAMA_SESSION_COOKIE` environment variable. It makes one settings-page
+request when present, never persists or logs the cookie, and treats missing or
+expired cookies as a normal totals-only fallback. Automatic browser-cookie
+discovery can be added later without changing the API-primary contract.

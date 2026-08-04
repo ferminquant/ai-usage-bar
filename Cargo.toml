@@ -23,6 +23,9 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 ureq = { version = "2", default-features = true, features = ["json"] }
+base64 = "0.22"
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "std"] }
+signature = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

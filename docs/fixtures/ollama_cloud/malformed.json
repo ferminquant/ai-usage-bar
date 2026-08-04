@@ -1,0 +1,7 @@
+{
+  "limits": {
+    "session": {
+      "usage": "not-a-fraction"
+    }
+  }
+}
