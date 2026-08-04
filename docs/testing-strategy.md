@@ -95,7 +95,8 @@ and the files can be run independently:
 - `tests/invariants.rs` — `invariant_*` tests for cross-layer policy,
   redaction, cache identity, and property-based generators;
 - `tests/acceptance.rs` — `scenario_*` tests written as Given/When/Then
-  user behavior against fake adapters.
+  user behavior against fake adapters (stale-after-failure, first-failure
+  unavailable, disabled provider, local Ollama is not hosted quota).
 
 The remaining markers stay reserved for the corresponding future suites:
 

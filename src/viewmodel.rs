@@ -135,7 +135,8 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
 
     let (icon_text, used_percent) = match primary {
         Some(s) => {
-            let pct = s.used.unwrap();
+            // Bound icon percentage even if a caller bypasses validate().
+            let pct = s.used.unwrap().clamp(0.0, 100.0);
             let icon = if pct >= 90.0 {
                 "\u{1F534}"
             } else if pct >= 70.0 {

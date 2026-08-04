@@ -90,30 +90,7 @@ fn contract_distinguishes_missing_zero_and_unlimited_values() {
 
 #[test]
 fn contract_rejects_impossible_values_with_actionable_errors() {
-    let mut percentage = metric_snapshot(
-        Provider::Codex,
-        instant(),
-        MetricKind::Quota,
-        WindowKind::Weekly,
-        "percent",
-        Some(101.0),
-        None,
-        Some(100.0),
-        Freshness::Live,
-        Some("primary"),
-    );
-    assert_eq!(
-        percentage.validate(),
-        Err(SnapshotValidationError::PercentageOutOfRange("used"))
-    );
-
-    percentage.used = Some(f64::NAN);
-    assert_eq!(
-        percentage.validate(),
-        Err(SnapshotValidationError::NonFiniteValue("used"))
-    );
-
-    let mut live_error = metric_snapshot(
+    let base = metric_snapshot(
         Provider::Codex,
         instant(),
         MetricKind::Quota,
@@ -125,14 +102,169 @@ fn contract_rejects_impossible_values_with_actionable_errors() {
         Freshness::Live,
         Some("primary"),
     );
-    live_error.error = Some(AdapterError {
-        code: ErrorCode::Timeout,
-        message: None,
-    });
-    assert_eq!(
-        live_error.validate(),
-        Err(SnapshotValidationError::ErrorStateMismatch)
-    );
+
+    let cases: Vec<(&str, UsageSnapshot, SnapshotValidationError)> = vec![
+        {
+            let mut snapshot = base.clone();
+            snapshot.account_id = "   ".into();
+            (
+                "empty account_id",
+                snapshot,
+                SnapshotValidationError::InvalidAccountId,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.account_id = "bad\nid".into();
+            (
+                "control char account_id",
+                snapshot,
+                SnapshotValidationError::InvalidAccountId,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.unit = "  ".into();
+            ("empty unit", snapshot, SnapshotValidationError::EmptyUnit)
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.used = Some(f64::NAN);
+            (
+                "non-finite used",
+                snapshot,
+                SnapshotValidationError::NonFiniteValue("used"),
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.remaining = Some(f64::INFINITY);
+            (
+                "non-finite remaining",
+                snapshot,
+                SnapshotValidationError::NonFiniteValue("remaining"),
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.limit = Some(f64::NEG_INFINITY);
+            (
+                "non-finite limit",
+                snapshot,
+                SnapshotValidationError::NonFiniteValue("limit"),
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.used = Some(-0.01);
+            (
+                "negative used",
+                snapshot,
+                SnapshotValidationError::NegativeValue("used"),
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.remaining = Some(-1.0);
+            (
+                "negative remaining",
+                snapshot,
+                SnapshotValidationError::NegativeValue("remaining"),
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.used = Some(101.0);
+            (
+                "percentage out of range",
+                snapshot,
+                SnapshotValidationError::PercentageOutOfRange("used"),
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.used = Some(120.0);
+            snapshot.limit = Some(100.0);
+            snapshot.unit = "tokens".into();
+            (
+                "used exceeds limit",
+                snapshot,
+                SnapshotValidationError::UsedExceedsLimit,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.freshness = Freshness::Unavailable;
+            snapshot.error = Some(AdapterError {
+                code: ErrorCode::Timeout,
+                message: None,
+            });
+            snapshot.used = Some(10.0);
+            snapshot.remaining = None;
+            snapshot.limit = None;
+            (
+                "unavailable with values",
+                snapshot,
+                SnapshotValidationError::UnavailableHasValues,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.provider = Provider::OllamaLocal;
+            snapshot.metric_kind = MetricKind::Quota;
+            (
+                "local hosted quota",
+                snapshot,
+                SnapshotValidationError::LocalHostedQuota,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.error = Some(AdapterError {
+                code: ErrorCode::Timeout,
+                message: None,
+            });
+            (
+                "live with error",
+                snapshot,
+                SnapshotValidationError::ErrorStateMismatch,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.freshness = Freshness::Cached;
+            snapshot.error = Some(AdapterError {
+                code: ErrorCode::Network,
+                message: Some("should not heal on sanitize".into()),
+            });
+            (
+                "cached with error",
+                snapshot,
+                SnapshotValidationError::ErrorStateMismatch,
+            )
+        },
+        {
+            let mut snapshot = base.clone();
+            snapshot.freshness = Freshness::Unavailable;
+            snapshot.used = None;
+            snapshot.remaining = None;
+            snapshot.limit = None;
+            snapshot.error = None;
+            (
+                "unavailable without error",
+                snapshot,
+                SnapshotValidationError::ErrorStateMismatch,
+            )
+        },
+    ];
+
+    for (label, snapshot, expected) in cases {
+        assert_eq!(
+            snapshot.validate(),
+            Err(expected),
+            "contract: expected {label} to fail validation"
+        );
+    }
 
     let unavailable = UsageSnapshot {
         provider: Provider::Codex,
@@ -156,4 +288,14 @@ fn contract_rejects_impossible_values_with_actionable_errors() {
         }),
     };
     assert!(unavailable.validate().is_ok());
+
+    let mut unlimited_over_limit = base;
+    unlimited_over_limit.used = Some(150.0);
+    unlimited_over_limit.limit = Some(100.0);
+    unlimited_over_limit.unit = "credits".into();
+    unlimited_over_limit.unlimited = true;
+    assert!(
+        unlimited_over_limit.validate().is_ok(),
+        "contract: unlimited may exceed a reported limit field"
+    );
 }
