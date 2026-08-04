@@ -17,8 +17,9 @@ authoritative.
 
 Revised after the Codex evidence spike (#2). The Codex-specific mapping is
 now backed by a real response. Field names and value semantics are frozen
-for adapter work. The Grok consumer mapping is also verified; Kimi and hosted
-Ollama Pro remain planning notes until their spikes (#3-#4) complete.
+for adapter work. The Grok consumer mapping is also verified; Kimi remains a
+planning note, while the hosted Ollama Pro totals source is now verified in
+spike #4.
 
 ## Guiding rules
 
@@ -223,9 +224,16 @@ the evidence spikes (#2-#5) and then folded back here.
 - **Kimi**: rolling 5-hour and weekly limits plus membership/credit cycle.
   Expect `metric_kind=quota` and `metric_kind=credits` snapshots. The
   evidence spike (#3) must confirm which surface exposes each.
-- **Ollama Pro/cloud**: hosted quota windows, if a supported surface exists,
-  are a separate provider/account. The evidence spike (#4) decides whether
-  this is implemented or deferred.
+- **Ollama Pro/cloud**: authenticated `GET /api/usage` is the primary source
+  for separate session and weekly hosted quota fractions. Map them to separate
+  `quota` snapshots (`rolling`/`session` and `weekly`/`weekly`) for one
+  provider/account, scaling the reported fraction by 100. An optional
+  authenticated settings fetch may enrich those snapshots with `resets_at`
+  from the page's ISO `data-time` attributes. If that enrichment is unavailable,
+  keep the API totals live and leave `resets_at` absent; never infer it from the
+  documented five-hour/seven-day durations. Session is the default UI focus;
+  model-level request rows are detail-only and deferred. See
+  [ollama-spike.md](spikes/ollama-spike.md).
 - **Grok consumer**: shared weekly SuperGrok pool across products.
   `metric_kind=quota`, `window_kind=weekly`, `unit="percent"`, store
   `creditUsagePercent` as `used` with `limit=100`. Source is Grok Build CLI
@@ -319,6 +327,7 @@ This draft is the first step on #1, not the close. #1 closes when:
       captures the first real response, then frozen for adapter work.
 
 The Codex revision is complete. The Grok consumer surface is verified in
-[grok-spike.md](spikes/grok-spike.md). Kimi and hosted Ollama Pro notes remain
-planning until their spikes (#3-#4) complete.
+[grok-spike.md](spikes/grok-spike.md). Kimi remains planning; hosted Ollama Pro
+totals are verified in [ollama-spike.md](spikes/ollama-spike.md), with reset
+timestamps still absent from the current API response.
 ~~~

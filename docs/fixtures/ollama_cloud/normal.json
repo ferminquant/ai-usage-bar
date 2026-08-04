@@ -1,0 +1,12 @@
+{
+  "limits": {
+    "session": {
+      "usage": 0.37,
+      "models": []
+    },
+    "weekly": {
+      "usage": 0.184,
+      "models": []
+    }
+  }
+}
