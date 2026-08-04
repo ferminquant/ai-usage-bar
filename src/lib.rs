@@ -20,4 +20,7 @@ pub use model::{
     AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, ProviderAdapter,
     SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
-pub use viewmodel::{build_tray_view, MetricCard, ProviderCard, TrayViewModel};
+pub use viewmodel::{
+    build_tray_view, build_tray_view_focused, format_reset_label, provider_display_name, MetricCard,
+    ProviderCard, TrayViewModel,
+};

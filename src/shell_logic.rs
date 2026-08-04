@@ -1,4 +1,5 @@
-use ai_usage_bar::{ProviderCard, UsageSnapshot};
+use ai_usage_bar::{format_reset_label, ProviderCard, UsageSnapshot};
+use chrono::Utc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UsageBand {
@@ -38,7 +39,7 @@ pub(crate) fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
             } else {
                 metric.unit.as_str()
             };
-            let resets = metric.resets_at.as_deref().unwrap_or("?");
+            let resets = format_reset_label(metric.resets_at.as_deref(), Utc::now());
             let value = if metric.unit == "percent" {
                 format!(
                     "{}% left ({}% used)",

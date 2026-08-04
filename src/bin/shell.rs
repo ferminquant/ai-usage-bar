@@ -10,9 +10,8 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_tray_view, CodexAdapter, GrokConsumerAdapter, ProviderRegistry, RefreshPolicy,
-        RefreshService,
-        UsageSnapshot,
+        build_tray_view_focused, provider_display_name, CodexAdapter, GrokConsumerAdapter, Provider,
+        ProviderRegistry, RefreshPolicy, RefreshService, UsageSnapshot,
     };
     use std::ffi::c_void;
     use std::ptr::null_mut;
@@ -52,6 +51,9 @@ mod windows_shell {
     const MENU_REFRESH: usize = 1001;
     const MENU_COPY_DETAILS: usize = 1002;
     const MENU_QUIT: usize = 1003;
+    /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
+    const MENU_SHOW_PROVIDER_BASE: usize = 1100;
+    const MENU_SHOW_PROVIDER_MAX: usize = 8;
     const STATUS_TIMER_ID: usize = 4;
     const STATUS_INTERVAL_MS: u32 = 2_500;
     const CF_UNICODETEXT_FORMAT: u32 = 13;
@@ -73,6 +75,11 @@ mod windows_shell {
         refresh_service: Arc<RefreshService>,
         snapshots: Vec<UsageSnapshot>,
         used_percent: Option<f64>,
+        /// Pill subtitle, e.g. "Codex" / "Grok".
+        pill_status: String,
+        /// Which provider drives the compact pill (None = auto first).
+        focus_provider: Option<Provider>,
+        switchable_providers: Vec<Provider>,
         tooltip: String,
         tooltip_hwnd: Option<HWND>,
         tooltip_text: Vec<u16>,
@@ -91,12 +98,25 @@ mod windows_shell {
                 refresh_service,
                 snapshots: Vec::new(),
                 used_percent: None,
+                pill_status: "Loading…".to_string(),
+                focus_provider: None,
+                switchable_providers: Vec::new(),
                 tooltip: "AI Usage Bar — loading…".to_string(),
                 tooltip_hwnd: None,
                 tooltip_text: Vec::new(),
                 tooltip_visible: false,
                 refresh_in_flight: false,
                 status: None,
+            }
+        }
+
+        fn apply_view(&mut self, view: ai_usage_bar::TrayViewModel) {
+            self.used_percent = view.used_percent;
+            self.pill_status = view.status_label;
+            self.tooltip = view.tooltip;
+            self.switchable_providers = view.switchable_providers;
+            if self.focus_provider.is_none() {
+                self.focus_provider = view.focus_provider;
             }
         }
     }
@@ -260,11 +280,7 @@ mod windows_shell {
             let remaining_label = remaining
                 .map(|value| format!("{value:.0}%"))
                 .unwrap_or_else(|| "—".to_string());
-            let status_label = status.unwrap_or(if refreshing {
-                "Updating…"
-            } else {
-                "Codex left"
-            });
+            let status_label = status.unwrap_or(if refreshing { "…" } else { "—" });
             draw_text(
                 hdc,
                 RECT {
@@ -364,6 +380,8 @@ mod windows_shell {
         if let Some((taskbar, tray)) = taskbar_rects() {
             let taskbar_width = taskbar.right - taskbar.left;
             let taskbar_height = taskbar.bottom - taskbar.top;
+            // Bottom-right style dock: immediately left of the tray icons,
+            // vertically centered on the taskbar band (original product placement).
             let (x, y) = if taskbar_width >= taskbar_height {
                 (
                     tray.left - WIDGET_W - TASKBAR_GAP,
@@ -463,13 +481,24 @@ mod windows_shell {
         }
     }
 
+    /// Wide enough for multi-provider lines with day-countdown reset strings
+    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 UTC`).
+    const TOOLTIP_MAX_WIDTH_PX: i32 = 640;
+    /// Gap between the tooltip bottom edge and the pill top edge.
+    const TOOLTIP_PILL_GAP_PX: i32 = 8;
+    /// Extra chrome around measured text (border + padding the tip control adds).
+    const TOOLTIP_CHROME_PAD_X: i32 = 16;
+    const TOOLTIP_CHROME_PAD_Y: i32 = 12;
+
     fn make_tool_info(hwnd: HWND, text: &mut [u16]) -> TTTOOLINFOW {
         TTTOOLINFOW {
             // comctl32 currently accepts the V2 TOOLINFO layout (through
             // lParam) but rejects the newer lpReserved-inclusive size.
             cbSize: (std::mem::size_of::<TTTOOLINFOW>() - std::mem::size_of::<*mut c_void>())
                 as u32,
-            uFlags: TTF_TRACK | TTF_ABSOLUTE,
+            // TTF_TRANSPARENT: mouse hits the pill underneath so hover chrome
+            // never steals clicks from the bar.
+            uFlags: TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT,
             hwnd,
             uId: 1,
             rect: RECT {
@@ -483,6 +512,177 @@ mod windows_shell {
         }
     }
 
+    /// Measure tooltip text with the system status/tooltip font via
+    /// `DrawTextW(DT_CALCRECT)`. Returns (width, height) including chrome pad.
+    fn measure_tooltip_text_size(text: &str) -> (i32, i32) {
+        unsafe {
+            let hdc = GetDC(None);
+            if hdc.is_invalid() {
+                // Last-resort fallback only if GDI is unavailable.
+                let lines = text.lines().count().max(1) as i32;
+                return (240, lines * 20 + TOOLTIP_CHROME_PAD_Y);
+            }
+
+            let mut metrics = NONCLIENTMETRICSW {
+                cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+                ..Default::default()
+            };
+            let font = if SystemParametersInfoW(
+                SPI_GETNONCLIENTMETRICS,
+                metrics.cbSize,
+                Some(&mut metrics as *mut _ as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .is_ok()
+            {
+                // Status font matches the standard tooltip face.
+                CreateFontIndirectW(&metrics.lfStatusFont)
+            } else {
+                CreateFontW(
+                    -12,
+                    0,
+                    0,
+                    0,
+                    FW_NORMAL.0 as i32,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    DEFAULT_QUALITY,
+                    DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+                    w!("Segoe UI"),
+                )
+            };
+
+            let old_font = SelectObject(hdc, font.into());
+            let mut wide = to_wide(text);
+            // DrawText expects a writable buffer; exclude the trailing NUL from
+            // the effective length by using the full slice (NUL is fine).
+            let mut text_rect = RECT {
+                left: 0,
+                top: 0,
+                right: TOOLTIP_MAX_WIDTH_PX - TOOLTIP_CHROME_PAD_X,
+                bottom: 0,
+            };
+            let _ = DrawTextW(
+                hdc,
+                &mut wide,
+                &mut text_rect,
+                DT_CALCRECT | DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS,
+            );
+            SelectObject(hdc, old_font);
+            let _ = DeleteObject(font.into());
+            let _ = ReleaseDC(None, hdc);
+
+            let text_w = (text_rect.right - text_rect.left).max(1);
+            let text_h = (text_rect.bottom - text_rect.top).max(1);
+            (
+                (text_w + TOOLTIP_CHROME_PAD_X).clamp(40, TOOLTIP_MAX_WIDTH_PX + TOOLTIP_CHROME_PAD_X),
+                text_h + TOOLTIP_CHROME_PAD_Y,
+            )
+        }
+    }
+
+    /// Read the live tooltip window size after it has been activated/laid out.
+    fn tooltip_window_size(tooltip_hwnd: HWND) -> Option<(i32, i32)> {
+        unsafe {
+            let mut tip_rect = RECT::default();
+            if GetWindowRect(tooltip_hwnd, &mut tip_rect).is_err() {
+                return None;
+            }
+            let w = tip_rect.right - tip_rect.left;
+            let h = tip_rect.bottom - tip_rect.top;
+            if w <= 0 || h <= 0 {
+                return None;
+            }
+            Some((w, h))
+        }
+    }
+
+    /// Compute top-left track point so the tip box never intersects the pill.
+    fn tooltip_origin_clear_of_pill(
+        widget_rect: RECT,
+        tip_w: i32,
+        tip_h: i32,
+    ) -> (i32, i32) {
+        let gap = TOOLTIP_PILL_GAP_PX;
+        // Prefer fully above: tip.bottom + gap == widget.top
+        let above_y = widget_rect.top - tip_h - gap;
+        if above_y >= 0 {
+            return (widget_rect.left, above_y);
+        }
+
+        // Not enough room above (unusual for taskbar dock): place to the left.
+        let left_x = widget_rect.left - tip_w - gap;
+        if left_x >= 0 {
+            let y = (widget_rect.bottom - tip_h).max(0);
+            return (left_x, y);
+        }
+
+        // Last resort: pin at screen origin above as much as possible.
+        (0, 0)
+    }
+
+    fn set_tracking_tooltip_origin(tooltip_hwnd: HWND, x: i32, y: i32) {
+        // TTM_TRACKPOSITION packs screen coords as signed 16-bit halves.
+        let packed = ((y as u16 as u32) << 16) | (x as u16 as u32);
+        unsafe {
+            let _ = SendMessageW(
+                tooltip_hwnd,
+                TTM_TRACKPOSITION,
+                None,
+                Some(LPARAM(packed as isize)),
+            );
+        }
+    }
+
+    /// Place the tracking tooltip so it does not cover the pill.
+    ///
+    /// Uses GDI-measured text size first, then corrects with the live
+    /// tooltip `GetWindowRect` after activation so layout/DPI are exact.
+    fn place_tooltip_clear_of_pill(hwnd: HWND, tooltip_hwnd: HWND, text: &str) {
+        unsafe {
+            let mut widget_rect = RECT::default();
+            if GetWindowRect(hwnd, &mut widget_rect).is_err() {
+                return;
+            }
+
+            let measured = measure_tooltip_text_size(text);
+            let (tip_w, tip_h) = tooltip_window_size(tooltip_hwnd).unwrap_or(measured);
+            let (x, y) = tooltip_origin_clear_of_pill(widget_rect, tip_w, tip_h);
+            set_tracking_tooltip_origin(tooltip_hwnd, x, y);
+
+            // After moving, re-read the real window box (font/DPI/margins) and
+            // correct once more if the tip still intersects the pill.
+            if let Some((live_w, live_h)) = tooltip_window_size(tooltip_hwnd) {
+                let (cx, cy) = tooltip_origin_clear_of_pill(widget_rect, live_w, live_h);
+                if (cx, cy) != (x, y) {
+                    set_tracking_tooltip_origin(tooltip_hwnd, cx, cy);
+                }
+
+                // Final intersection guard: if still overlapping, force above
+                // using the live height only (ignore left placement failures).
+                let mut tip_rect = RECT::default();
+                if GetWindowRect(tooltip_hwnd, &mut tip_rect).is_ok() {
+                    let overlaps = tip_rect.left < widget_rect.right
+                        && tip_rect.right > widget_rect.left
+                        && tip_rect.top < widget_rect.bottom
+                        && tip_rect.bottom > widget_rect.top;
+                    if overlaps {
+                        let forced_y = widget_rect.top - live_h - TOOLTIP_PILL_GAP_PX;
+                        set_tracking_tooltip_origin(
+                            tooltip_hwnd,
+                            widget_rect.left,
+                            forced_y.max(0),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn set_tooltip_visible(hwnd: HWND, state: &mut AppState, visible: bool) {
         let Some(tooltip_hwnd) = state.tooltip_hwnd else {
             return;
@@ -490,28 +690,9 @@ mod windows_shell {
 
         unsafe {
             let state_changed = state.tooltip_visible != visible;
-            if visible {
-                // Keep the tooltip above the pill instead of placing it on the
-                // cursor. This leaves both halves of the widget clickable while
-                // the native tooltip remains visible.
-                let mut widget_rect = RECT::default();
-                let (tooltip_x, tooltip_y) = if GetWindowRect(hwnd, &mut widget_rect).is_ok() {
-                    (widget_rect.left, widget_rect.top.saturating_sub(72))
-                } else {
-                    let mut point = POINT::default();
-                    let _ = GetCursorPos(&mut point);
-                    (point.x.saturating_sub(40), point.y.saturating_sub(90))
-                };
-                let packed_point =
-                    ((tooltip_y as u32 & 0xffff) << 16) | (tooltip_x as u32 & 0xffff);
-                let _ = SendMessageW(
-                    tooltip_hwnd,
-                    TTM_TRACKPOSITION,
-                    None,
-                    Some(LPARAM(packed_point as isize)),
-                );
-            }
-            if !state_changed {
+            if visible && !state_changed {
+                // Already showing: keep position honest as text/size changes.
+                place_tooltip_clear_of_pill(hwnd, tooltip_hwnd, &state.tooltip);
                 return;
             }
 
@@ -523,18 +704,29 @@ mod windows_shell {
                     TOOLTIP_POLL_INTERVAL_MS,
                     None,
                 );
+                // Pre-position from measured text so the first paint is clear.
+                place_tooltip_clear_of_pill(hwnd, tooltip_hwnd, &state.tooltip);
+                let mut tooltip_text = state.tooltip_text.clone();
+                let mut tool = make_tool_info(hwnd, &mut tooltip_text);
+                let _ = SendMessageW(
+                    tooltip_hwnd,
+                    TTM_TRACKACTIVATE,
+                    Some(WPARAM(1)),
+                    Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+                );
+                // Activate can reflow the tip; re-measure live window size.
+                let _ = SendMessageW(tooltip_hwnd, TTM_UPDATE, None, None);
+                place_tooltip_clear_of_pill(hwnd, tooltip_hwnd, &state.tooltip);
             } else {
                 let _ = KillTimer(Some(hwnd), TOOLTIP_POLL_TIMER_ID);
-            }
-            let mut tooltip_text = state.tooltip_text.clone();
-            let mut tool = make_tool_info(hwnd, &mut tooltip_text);
-            let _ = SendMessageW(
-                tooltip_hwnd,
-                TTM_TRACKACTIVATE,
-                Some(WPARAM(usize::from(visible))),
-                Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
-            );
-            if !visible {
+                let mut tooltip_text = state.tooltip_text.clone();
+                let mut tool = make_tool_info(hwnd, &mut tooltip_text);
+                let _ = SendMessageW(
+                    tooltip_hwnd,
+                    TTM_TRACKACTIVATE,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
+                );
                 let _ = SendMessageW(tooltip_hwnd, TTM_POP, None, None);
             }
         }
@@ -566,6 +758,9 @@ mod windows_shell {
                 Some(LPARAM(&mut tool as *mut TTTOOLINFOW as isize)),
             );
             let _ = SendMessageW(tooltip_hwnd, TTM_UPDATE, None, None);
+        }
+        if state.tooltip_visible {
+            place_tooltip_clear_of_pill(hwnd, tooltip_hwnd, &state.tooltip);
         }
     }
 
@@ -607,7 +802,12 @@ mod windows_shell {
             }
 
             // Keep longer provider details readable instead of forcing one line.
-            let _ = SendMessageW(tooltip_hwnd, TTM_SETMAXTIPWIDTH, None, Some(LPARAM(360)));
+            let _ = SendMessageW(
+                tooltip_hwnd,
+                TTM_SETMAXTIPWIDTH,
+                None,
+                Some(LPARAM(TOOLTIP_MAX_WIDTH_PX as isize)),
+            );
         }
     }
 
@@ -681,7 +881,8 @@ mod windows_shell {
         unsafe {
             let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
         }
-        let current_view = build_tray_view(&state.snapshots);
+        let current_view =
+            build_tray_view_focused(&state.snapshots, state.focus_provider.as_ref(), chrono::Utc::now());
         state.tooltip = if state.snapshots.is_empty() {
             "AI Usage Bar — refreshing…".to_string()
         } else {
@@ -721,13 +922,20 @@ mod windows_shell {
 
         match payload.result {
             Ok(snapshots) => {
-                let view = build_tray_view(&snapshots);
+                let view = build_tray_view_focused(
+                    &snapshots,
+                    state.focus_provider.as_ref(),
+                    chrono::Utc::now(),
+                );
                 state.snapshots = snapshots;
-                state.used_percent = view.used_percent;
-                state.tooltip = view.tooltip;
+                state.apply_view(view);
             }
             Err(error) => {
-                let view = build_tray_view(&state.snapshots);
+                let view = build_tray_view_focused(
+                    &state.snapshots,
+                    state.focus_provider.as_ref(),
+                    chrono::Utc::now(),
+                );
                 state.tooltip = if state.snapshots.is_empty() {
                     format!("AI Usage Bar — refresh failed: {error}")
                 } else {
@@ -743,40 +951,150 @@ mod windows_shell {
         }
     }
 
+    fn set_focus_provider(hwnd: HWND, provider: Provider) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        // Clear any transient status so the pill only shows the provider name.
+        state.status = None;
+        unsafe {
+            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+        }
+        state.focus_provider = Some(provider);
+        let view = build_tray_view_focused(
+            &state.snapshots,
+            state.focus_provider.as_ref(),
+            chrono::Utc::now(),
+        );
+        state.apply_view(view);
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+
+    fn cycle_focus_provider(hwnd: HWND) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        if state.switchable_providers.len() < 2 {
+            begin_refresh(hwnd);
+            return;
+        }
+        let current = state.focus_provider.clone();
+        let next = match current.as_ref().and_then(|c| {
+            state
+                .switchable_providers
+                .iter()
+                .position(|p| p == c)
+        }) {
+            Some(idx) => state.switchable_providers
+                [(idx + 1) % state.switchable_providers.len()]
+            .clone(),
+            None => state.switchable_providers[0].clone(),
+        };
+        set_focus_provider(hwnd, next);
+    }
+
     fn show_context_menu(hwnd: HWND) {
+        // Dismiss hover tip first so the menu is not stacked under/over it.
+        if let Some(state) = app_state(hwnd) {
+            set_tooltip_visible(hwnd, state, false);
+        }
+
         unsafe {
             let Ok(menu) = CreatePopupMenu() else {
                 return;
             };
             let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("Refresh"));
+
+            // Keep wide strings alive until TrackPopupMenu returns.
+            let mut provider_labels: Vec<Vec<u16>> = Vec::new();
+            let switchable = app_state_ref(hwnd)
+                .map(|s| s.switchable_providers.clone())
+                .unwrap_or_default();
+            let focused = app_state_ref(hwnd).and_then(|s| s.focus_provider.clone());
+            if !switchable.is_empty() {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                for (index, provider) in switchable
+                    .iter()
+                    .take(MENU_SHOW_PROVIDER_MAX)
+                    .enumerate()
+                {
+                    let checked = focused.as_ref() == Some(provider);
+                    let flags = if checked {
+                        MF_STRING | MF_CHECKED
+                    } else {
+                        MF_STRING
+                    };
+                    // Short names only: "Codex" / "Grok", not "Show …".
+                    let label = provider_display_name(provider).to_string();
+                    provider_labels.push(to_wide(&label));
+                    let _ = AppendMenuW(
+                        menu,
+                        flags,
+                        MENU_SHOW_PROVIDER_BASE + index,
+                        PCWSTR(provider_labels[index].as_ptr()),
+                    );
+                }
+            }
+
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
                 MENU_COPY_DETAILS,
                 w!("Copy details to clipboard"),
             );
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
             let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
 
-            let mut point = POINT::default();
-            let _ = GetCursorPos(&mut point);
+            // Anchor the menu fully *above* the pill. Popup menus are not
+            // topmost, so any geometric overlap with the pill paints under it.
+            // Do **not** demote the pill from HWND_TOPMOST — near the taskbar
+            // that makes the pill vanish under the tray until restored.
+            let mut widget_rect = RECT::default();
+            let (menu_x, menu_y) = if GetWindowRect(hwnd, &mut widget_rect).is_ok() {
+                // TPM_BOTTOMALIGN: bottom edge of the menu sits at (x, y), so
+                // the whole menu grows upward and clears the pill.
+                (widget_rect.left, widget_rect.top - 2)
+            } else {
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                (point.x, point.y)
+            };
+            // Without foreground ownership, Win32 popup menus ignore outside
+            // clicks and stay open until an item is chosen.
+            let _ = SetForegroundWindow(hwnd);
             let command = TrackPopupMenu(
                 menu,
-                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                point.x,
-                point.y,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+                menu_x,
+                menu_y,
                 Some(0),
                 hwnd,
                 None,
             )
             .0 as usize;
+            // Required so the next click is delivered and the menu fully tears down.
+            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
+            // Keep labels live until here.
+            let _ = provider_labels;
 
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
                 MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);
+                }
+                id if (MENU_SHOW_PROVIDER_BASE
+                    ..MENU_SHOW_PROVIDER_BASE + MENU_SHOW_PROVIDER_MAX)
+                    .contains(&id) =>
+                {
+                    let index = id - MENU_SHOW_PROVIDER_BASE;
+                    if let Some(provider) = switchable.get(index).cloned() {
+                        set_focus_provider(hwnd, provider);
+                    }
                 }
                 _ => {}
             }
@@ -793,14 +1111,25 @@ mod windows_shell {
             WM_PAINT => {
                 let (used_percent, refreshing, status) = app_state_ref(hwnd)
                     .map(|state| {
+                        // Pill text is only the provider name (or "…" while refreshing).
+                        let label = if state.refresh_in_flight {
+                            "…"
+                        } else {
+                            state.pill_status.as_str()
+                        };
                         (
                             state.used_percent,
                             state.refresh_in_flight,
-                            state.status.as_deref(),
+                            Some(label.to_string()),
                         )
                     })
                     .unwrap_or((None, false, None));
-                paint_widget(hwnd, used_percent, refreshing, status);
+                paint_widget(
+                    hwnd,
+                    used_percent,
+                    refreshing,
+                    status.as_deref(),
+                );
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -828,13 +1157,13 @@ mod windows_shell {
             }
             WM_MOUSELEAVE => LRESULT(0),
             WM_LBUTTONUP => {
-                // The whole pill is the manual refresh target. Details remain
-                // available explicitly from the context menu, so a left click
-                // always has visible, predictable behavior.
-                begin_refresh(hwnd);
+                // Left-click cycles the compact pill across providers when more
+                // than one is available; otherwise it refreshes.
+                cycle_focus_provider(hwnd);
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
+                // Swallow further mouse-move tip until the menu is done.
                 show_context_menu(hwnd);
                 LRESULT(0)
             }
@@ -843,6 +1172,7 @@ mod windows_shell {
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == POSITION_TIMER_ID => {
+                relocate_widget(hwnd);
                 ensure_widget_topmost(hwnd);
                 LRESULT(0)
             }
