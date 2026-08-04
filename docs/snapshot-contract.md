@@ -180,6 +180,10 @@ Rules:
   does not silently correct it.
 - `observed_at` is immutable once set. The cache must not bump it on a
   cache hit.
+- Every adapter result is validated before it enters the cache. Non-finite or
+  negative values, out-of-range percentages, unsafe account identifiers, and
+  contradictory freshness/error states become a redacted `schema_drift`
+  outcome rather than being rendered as provider data.
 
 ## Multiple windows
 

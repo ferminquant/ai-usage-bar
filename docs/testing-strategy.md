@@ -86,8 +86,18 @@ windows, units, timestamps, missing fields, and provider error combinations.
 
 ## Planned markers and commands
 
-The exact language/tooling is not locked yet. The eventual suite should
-separate markers such as:
+Rust integration-test binaries now provide the first executable marker
+boundary. Test names use the same prefixes so local filtering remains clear,
+and the files can be run independently:
+
+- `tests/contract.rs` — `contract_*` tests for serialization and value/state
+  semantics;
+- `tests/invariants.rs` — `invariant_*` tests for cross-layer policy,
+  redaction, cache identity, and property-based generators;
+- `tests/acceptance.rs` — `scenario_*` tests written as Given/When/Then
+  user behavior against fake adapters.
+
+The remaining markers stay reserved for the corresponding future suites:
 
 - unit
 - contract
@@ -98,6 +108,15 @@ separate markers such as:
 - security
 - diagnostic
 
-CI should run deterministic unit/contract/invariant tests on every pull
-request, with integration, UI, packaging, and mutation jobs split by risk and
-runtime.
+The deterministic CI job runs the three implemented integration binaries on
+every pull request:
+
+~~~text
+cargo test --test contract --all-features
+cargo test --test invariants --all-features
+cargo test --test acceptance --all-features
+~~~
+
+The broader Linux and Windows jobs continue to run all targets. Integration,
+UI, packaging, security, diagnostic, and mutation jobs remain split by risk
+and runtime as those surfaces are implemented.

@@ -31,6 +31,21 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  contract-and-invariants:
+    name: Contract, invariant, and acceptance tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run contract tests
+        run: cargo test --test contract --all-features
+      - name: Run invariant tests
+        run: cargo test --test invariants --all-features
+      - name: Run acceptance tests
+        run: cargo test --test acceptance --all-features
+
   windows:
     name: Windows shell tests and clippy
     runs-on: windows-latest

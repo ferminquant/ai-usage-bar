@@ -122,6 +122,22 @@ pub struct AdapterError {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SnapshotValidationError {
+    #[error("contract: account_id must be a non-empty safe identifier")]
+    InvalidAccountId,
+    #[error("contract: unit must be non-empty")]
+    EmptyUnit,
+    #[error("contract: {0} must be finite")]
+    NonFiniteValue(&'static str),
+    #[error("contract: {0} must not be negative")]
+    NegativeValue(&'static str),
+    #[error("contract: {0} percentage must be between 0 and 100")]
+    PercentageOutOfRange(&'static str),
+    #[error("contract: error is only valid for unavailable snapshots")]
+    ErrorStateMismatch,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     pub provider: Provider,
@@ -153,6 +169,48 @@ pub struct UsageSnapshot {
 impl UsageSnapshot {
     pub fn is_percentage(&self) -> bool {
         self.unit == "percent"
+    }
+
+    /// Validate the provider-neutral contract at the adapter/cache boundary.
+    ///
+    /// Provider responses are untrusted input. Keeping this check on the
+    /// normalized model prevents an adapter from introducing impossible
+    /// percentages, non-finite values, or contradictory freshness states.
+    pub fn validate(&self) -> Result<(), SnapshotValidationError> {
+        if self.account_id.trim().is_empty() || self.account_id.chars().any(char::is_control) {
+            return Err(SnapshotValidationError::InvalidAccountId);
+        }
+        if self.unit.trim().is_empty() {
+            return Err(SnapshotValidationError::EmptyUnit);
+        }
+
+        for (name, value) in [
+            ("used", self.used),
+            ("remaining", self.remaining),
+            ("limit", self.limit),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            if !value.is_finite() {
+                return Err(SnapshotValidationError::NonFiniteValue(name));
+            }
+            if value < 0.0 {
+                return Err(SnapshotValidationError::NegativeValue(name));
+            }
+            if self.is_percentage() && value > 100.0 {
+                return Err(SnapshotValidationError::PercentageOutOfRange(name));
+            }
+        }
+
+        match (self.freshness, self.error.is_some()) {
+            (Freshness::Unavailable, false)
+            | (Freshness::Live | Freshness::Cached | Freshness::Stale, true)
+            | (Freshness::NotConfigured | Freshness::NotApplicable, true) => {
+                Err(SnapshotValidationError::ErrorStateMismatch)
+            }
+            _ => Ok(()),
+        }
     }
 }
 
