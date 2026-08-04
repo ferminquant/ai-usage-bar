@@ -1,0 +1,10 @@
+{
+  "_description": "Redacted fixture: no billing response within provider timeout. Adapter preserves stale cache or unavailable+timeout.",
+  "_source": "synthetic timeout for Grok consumer billing fetch",
+  "_capturedAt": "2026-08-04T00:00:00Z",
+  "_evidence": "docs/spikes/grok-spike.md",
+  "error": {
+    "code": "timeout",
+    "message": null
+  }
+}

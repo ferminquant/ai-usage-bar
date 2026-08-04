@@ -1,0 +1,20 @@
+{
+  "_description": "Redacted fixture: prepaid extra credits present; included percent not reported (missing fields must not become zero).",
+  "_source": "Synthetic shape based on open-source BillingConfig + live credits response",
+  "_capturedAt": "2026-08-04T00:00:00Z",
+  "_evidence": "docs/spikes/grok-spike.md",
+  "config": {
+    "currentPeriod": {
+      "type": "USAGE_PERIOD_TYPE_WEEKLY",
+      "start": "2026-08-04T13:28:26.395580+00:00",
+      "end": "2026-08-11T13:28:26.395580+00:00"
+    },
+    "onDemandCap": { "val": 0 },
+    "onDemandUsed": { "val": 0 },
+    "productUsage": [],
+    "isUnifiedBillingUser": true,
+    "prepaidBalance": { "val": 1500 },
+    "billingPeriodStart": "2026-08-04T13:28:26.395580+00:00",
+    "billingPeriodEnd": "2026-08-11T13:28:26.395580+00:00"
+  }
+}

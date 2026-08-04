@@ -65,8 +65,10 @@ dashboards.
    taskbar-integrated pill required?
 2. Which Codex and Kimi surfaces can be accessed through stable,
    user-authorized interfaces?
-3. Should Grok consumer usage be a browser bridge in the first release, or be
-   deferred until a supported API exists?
+3. Grok consumer remaining usage: **implement** via Grok Build CLI auth +
+   cli-chat-proxy billing (not a browser bridge). See
+   [grok-spike.md](spikes/grok-spike.md). Grok API remains a separate deferred
+   surface.
 4. Which Ollama cloud metrics are available programmatically, and which must
    remain dashboard-only?
 
