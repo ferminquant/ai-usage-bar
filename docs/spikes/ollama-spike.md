@@ -2,12 +2,14 @@
 
 ## Decision status
 
-**Totals source found; adapter implementation is now unblocked for the first
-slice.** The Ollama Pro account API exposes the two percentages this product
-needs without scraping the settings page. Reset timestamps are still absent
-from the API response, so the adapter must not invent them. This spike records
-the live source, its authentication boundary, and the remaining reset-metadata
-gap; it does not add model-specific detail or dashboard scraping.
+**Totals source found; a hybrid adapter is now unblocked for the first slice.**
+The Ollama Pro account API exposes the two percentages this product needs
+without scraping the settings page. Reset timestamps are still absent from the
+API response, so the adapter must not invent them. The implementation plan is
+to use the API as the primary totals source and make an authenticated settings
+fetch an optional reset-time enrichment. This spike records the live sources,
+their authentication boundaries, and the fallback behavior; it does not add
+runtime code or model-specific detail.
 
 ## Product scope
 
@@ -93,16 +95,23 @@ The upstream requests [#12532](https://github.com/ollama/ollama/issues/12532)
 and [#15663](https://github.com/ollama/ollama/issues/15663) are historical
 evidence that this surface was missing or undiscoverable; the live endpoint
 now exists even though the CLI and public API documentation have not caught up.
-The settings page remains useful for validating semantics, but is not an
-implementation source.
+The settings page remains useful for validating semantics and is the only
+observed source for exact reset timestamps. A current independent implementation
+extracts ISO timestamps from `data-time` attributes on the reset elements; see
+[its parser](https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Providers/Ollama/OllamaUsageParser.swift)
+and [provider notes](https://github.com/steipete/CodexBar/blob/main/docs/ollama.md).
+That is evidence of a workable HTML contract, not an Ollama-supported API
+guarantee. The implementation should make one authenticated page request and
+parse the machine-readable attribute, not crawl the site or parse the rounded
+countdown text.
 
 ## Candidate source decision
 
 | Source | Provides totals/reset | Auth boundary | Decision |
 | --- | --- | --- | --- |
-| Account settings page | Yes, visibly shows session and weekly totals plus countdowns | Browser session/cookies; would require page parsing | Defer; not an approved source for this slice |
+| Account settings page | Yes, visibly shows session and weekly totals plus countdowns; current HTML carries reset timestamps in `data-time` attributes | Browser session/cookies; HTML can change and requires a parser | Use only as optional reset-time enrichment; preserve totals when it is unavailable |
 | `ollama launch` CLI | No usage command | CLI integration setup only | Reject as a usage source; use the API directly |
-| `GET https://ollama.com/api/usage` | Yes, session and weekly percentages; no reset timestamps | Ollama self-signed key from the signed-in CLI | Use for totals; treat the undocumented response as a guarded contract |
+| `GET https://ollama.com/api/usage` | Yes, session and weekly percentages; no reset timestamps | Ollama self-signed key from the signed-in CLI | Primary totals source; treat the undocumented response as a guarded contract |
 | Model request responses | Per-request token counters | Request authentication | Insufficient for account windows and reset times |
 
 ## Contract mapping when a source exists
@@ -117,9 +126,11 @@ The adapter should emit two `UsageSnapshot` values for the same hosted account:
 For each snapshot, the API fraction maps to `used = fraction * 100` with
 `limit=100` and `remaining = 100 - used`. The API's `usage` field is the
 provider-reported utilization, so this conversion is exact for the current
-response contract. `resets_at` remains `None` until Ollama exposes a timestamp;
-the adapter must not infer a session reset from the 5-hour description or a
-weekly reset from a guessed calendar boundary.
+response contract. An optional authenticated settings fetch may fill
+`resets_at` from the page's ISO `data-time` attribute. If that fetch is
+unavailable or the HTML contract changes, the adapter keeps the live API totals
+and leaves `resets_at` absent. It must not infer a session reset from the
+5-hour description or a weekly reset from a guessed calendar boundary.
 
 The shell/view-model work in the implementation story should make `session`
 the default focused window and expose `weekly` through the existing provider
@@ -127,17 +138,23 @@ menu/detail path without aggregating them.
 
 ## Adapter admission gate
 
-Issue #9 can proceed with totals once all of the following are covered:
+Issue #9 can proceed with totals and optional reset enrichment once all of the
+following are covered:
 
 1. the live `GET /api/usage` response is treated as an explicitly reviewed,
    non-scraping account source, even though it is not in the public API docs;
 2. the self-signed Ollama key boundary is documented and the key never enters
    logs or fixtures;
-3. a redacted fixture or deterministic mock contains both windows;
-4. mappings cover plan/auth state, timeout, stale cache, malformed data, and
+3. the settings reset parser is limited to the authenticated settings page,
+   extracts `data-time` timestamps rather than display text, and never logs or
+   stores the session cookie;
+4. redacted fixtures or deterministic mocks cover both API windows and the
+   reset-enrichment states;
+5. mappings cover plan/auth state, timeout, stale cache, malformed data, and
    signed-out/unavailable results;
-5. missing reset timestamps are represented honestly, rather than inferred;
-6. model-specific request detail stays out of the initial UI.
+6. missing reset timestamps are represented honestly, rather than inferred;
+7. model-specific request detail stays out of the initial UI.
 
-The totals are now implementable. Reset countdowns and model detail remain
-separate follow-up work.
+The totals and reset-enrichment design are now implementable in issue #9. The
+runtime adapter belongs in a separate implementation PR; this spike remains
+the source and contract record.

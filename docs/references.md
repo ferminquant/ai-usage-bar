@@ -30,8 +30,11 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
 - [Ollama pricing and cloud limits](https://ollama.com/pricing)
 - [Ollama cloud](https://docs.ollama.com/cloud) (future hosted-provider
   evidence only)
+- [CodexBar Ollama provider notes](https://github.com/steipete/CodexBar/blob/main/docs/ollama.md)
+  and [reset parser](https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Providers/Ollama/OllamaUsageParser.swift)
+  (independent prior art for cookie-authenticated settings parsing)
 - [Ollama usage spike](spikes/ollama-spike.md) — session/weekly semantics,
-  authenticated `/api/usage` evidence, and the reset-metadata gap.
+  authenticated `/api/usage` evidence, and the hybrid reset-enrichment plan.
 - [Grok FAQ](https://docs.x.ai/grok/faq) (weekly SuperGrok pool semantics)
 - [Grok overview](https://docs.x.ai/grok/overview)
 - [Grok Build CLI](https://x.ai/news/grok-build-cli) / [xai-org/grok-build](https://github.com/xai-org/grok-build) (open-source client; billing path)
