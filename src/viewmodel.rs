@@ -1,10 +1,17 @@
-use crate::model::{Freshness, MetricKind, UsageSnapshot};
+use crate::model::{Freshness, MetricKind, Provider, UsageSnapshot};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrayViewModel {
     pub icon_text: String,
     pub tooltip: String,
     pub used_percent: Option<f64>,
+    /// Short label for the pill, e.g. "Codex" / "Grok".
+    pub status_label: String,
+    /// Provider currently driving the compact pill (if any).
+    pub focus_provider: Option<Provider>,
+    /// Providers that can be selected for the compact pill.
+    pub switchable_providers: Vec<Provider>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,12 +115,77 @@ fn tooltip_metric_value(metric: &MetricCard) -> String {
     format!("{value}{unit_display}")
 }
 
+/// Human-readable reset with remaining days/hours, e.g. `3d 5h left · Tue 13:28 UTC`.
+pub fn format_reset_label(resets_at: Option<&str>, now: DateTime<Utc>) -> String {
+    let Some(dt) = resets_at
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+    else {
+        return "—".to_string();
+    };
+
+    let when = dt.format("%a %H:%M UTC");
+    let remaining = dt.signed_duration_since(now);
+    if remaining.num_seconds() <= 0 {
+        return format!("{when} (reset due)");
+    }
+
+    let days = remaining.num_days();
+    let hours = remaining.num_hours() % 24;
+    let minutes = remaining.num_minutes() % 60;
+    let countdown = if days > 0 {
+        format!("{days}d {hours}h left")
+    } else if remaining.num_hours() > 0 {
+        format!("{}h {minutes}m left", remaining.num_hours())
+    } else {
+        format!("{}m left", remaining.num_minutes().max(1))
+    };
+    format!("{countdown} · {when}")
+}
+
+/// Short UI name for the compact pill label.
+pub fn provider_display_name(provider: &Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "Codex",
+        Provider::Kimi => "Kimi",
+        Provider::OllamaLocal => "Ollama",
+        Provider::OllamaCloud => "Ollama cloud",
+        Provider::GrokConsumer => "Grok",
+        Provider::GrokApi => "Grok API",
+    }
+}
+
+fn is_compact_candidate(s: &UsageSnapshot) -> bool {
+    matches!(
+        s.freshness,
+        Freshness::Live | Freshness::Cached | Freshness::Stale
+    ) && matches!(
+        s.metric_kind,
+        MetricKind::Quota | MetricKind::Credits | MetricKind::Requests
+    ) && s.unit == "percent"
+        && s.window_label.as_deref() == Some("primary")
+        && s.used.is_some()
+}
+
+/// Compact tray view using the first eligible primary percentage window.
 pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
+    build_tray_view_focused(snapshots, None, Utc::now())
+}
+
+/// Compact tray view with an optional focused provider for the main pill.
+pub fn build_tray_view_focused(
+    snapshots: &[UsageSnapshot],
+    focus: Option<&Provider>,
+    now: DateTime<Utc>,
+) -> TrayViewModel {
     if snapshots.is_empty() {
         return TrayViewModel {
             icon_text: "—".into(),
             tooltip: "No provider data".into(),
             used_percent: None,
+            status_label: "No data".into(),
+            focus_provider: None,
+            switchable_providers: Vec::new(),
         };
     }
 
@@ -122,18 +194,22 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
         .filter(|s| s.freshness == Freshness::Unavailable)
         .count();
 
-    let primary = snapshots.iter().find(|s| {
-        matches!(
-            s.freshness,
-            Freshness::Live | Freshness::Cached | Freshness::Stale
-        )
-            && matches!(s.metric_kind, MetricKind::Quota | MetricKind::Credits | MetricKind::Requests)
-            && s.unit == "percent"
-            && s.window_label.as_deref() == Some("primary")
-            && s.used.is_some()
-    });
+    let mut switchable = Vec::new();
+    for snapshot in snapshots.iter().filter(|s| is_compact_candidate(s)) {
+        if !switchable.contains(&snapshot.provider) {
+            switchable.push(snapshot.provider.clone());
+        }
+    }
 
-    let (icon_text, used_percent) = match primary {
+    let primary = focus
+        .and_then(|wanted| {
+            snapshots
+                .iter()
+                .find(|s| is_compact_candidate(s) && &s.provider == wanted)
+        })
+        .or_else(|| snapshots.iter().find(|s| is_compact_candidate(s)));
+
+    let (icon_text, used_percent, status_label, focus_provider) = match primary {
         Some(s) => {
             // Bound icon percentage even if a caller bypasses validate().
             let pct = s.used.unwrap().clamp(0.0, 100.0);
@@ -144,10 +220,11 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
             } else {
                 "\u{1F7E2}"
             };
-            (icon.to_string(), Some(pct))
+            let label = provider_display_name(&s.provider).to_string();
+            (icon.to_string(), Some(pct), label, Some(s.provider.clone()))
         }
-        None if error_count > 0 => ("\u{26D4}".to_string(), None),
-        None => ("—".to_string(), None),
+        None if error_count > 0 => ("\u{26D4}".to_string(), None, "—".into(), None),
+        None => ("—".to_string(), None, "—".into(), None),
     };
 
     let mut lines = Vec::new();
@@ -162,20 +239,14 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
         };
         lines.push(format!("{}{}", card.provider, status));
         for m in &card.metrics {
-            let unit_display = if m.unit == "percent" { "%" } else { m.unit.as_str() };
+            let unit_display = if m.unit == "percent" {
+                "%"
+            } else {
+                m.unit.as_str()
+            };
             let label = &m.label;
             let win = &m.window_kind;
-
-            let reset_str = m
-                .resets_at
-                .as_deref()
-                .and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok())
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Utc)
-                        .format("%a %H:%M UTC")
-                        .to_string()
-                })
-                .unwrap_or_else(|| "—".to_string());
+            let reset_str = format_reset_label(m.resets_at.as_deref(), now);
 
             if m.metric_kind == MetricKind::Credits {
                 let bal = m.used.as_deref().unwrap_or("?");
@@ -201,6 +272,9 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
         icon_text,
         tooltip,
         used_percent,
+        status_label,
+        focus_provider,
+        switchable_providers: switchable,
     }
 }
 
@@ -208,7 +282,7 @@ pub fn build_tray_view(snapshots: &[UsageSnapshot]) -> TrayViewModel {
 mod tests {
     use super::*;
     use crate::model::*;
-    use chrono::Utc;
+    use chrono::{Duration, TimeZone};
 
     fn make_snapshot(
         used: Option<f64>,
@@ -247,6 +321,7 @@ mod tests {
         let snaps = vec![make_snapshot(Some(40.0), Freshness::Live, Some("primary"))];
         let vm = build_tray_view(&snaps);
         assert_eq!(vm.icon_text, "🟢");
+        assert_eq!(vm.status_label, "Codex");
     }
 
     #[test]
@@ -333,5 +408,34 @@ mod tests {
 
         assert_eq!(vm.icon_text, "—");
         assert_eq!(vm.used_percent, None);
+    }
+
+    #[test]
+    fn focus_provider_selects_grok_for_compact_pill() {
+        let mut codex = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        codex.provider = Provider::Codex;
+        let mut grok = make_snapshot(Some(11.0), Freshness::Live, Some("primary"));
+        grok.provider = Provider::GrokConsumer;
+        grok.account_id = "grok-test".into();
+        let snaps = vec![codex, grok];
+
+        let auto = build_tray_view_focused(&snaps, None, Utc::now());
+        assert_eq!(auto.used_percent, Some(40.0));
+        assert_eq!(auto.status_label, "Codex");
+
+        let focused = build_tray_view_focused(&snaps, Some(&Provider::GrokConsumer), Utc::now());
+        assert_eq!(focused.used_percent, Some(11.0));
+        assert_eq!(focused.status_label, "Grok");
+        assert_eq!(focused.focus_provider, Some(Provider::GrokConsumer));
+        assert_eq!(focused.switchable_providers.len(), 2);
+    }
+
+    #[test]
+    fn reset_label_includes_days_remaining() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 4, 12, 0, 0).unwrap();
+        let reset = (now + Duration::days(3) + Duration::hours(5)).to_rfc3339();
+        let label = format_reset_label(Some(&reset), now);
+        assert!(label.contains("3d 5h left"), "{label}");
+        assert!(label.contains("UTC"), "{label}");
     }
 }
