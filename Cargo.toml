@@ -2,7 +2,7 @@
 name = "ai-usage-bar"
 version = "0.1.0"
 edition = "2021"
-description = "Local-first desktop usage widget for AI subscriptions and local model runtimes"
+description = "Desktop usage widget for hosted AI subscriptions"
 license = "MIT OR Apache-2.0"
 
 [lib]

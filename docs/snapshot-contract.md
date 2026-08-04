@@ -17,8 +17,8 @@ authoritative.
 
 Revised after the Codex evidence spike (#2). The Codex-specific mapping is
 now backed by a real response. Field names and value semantics are frozen
-for adapter work. The other providers (Kimi, Ollama, Grok) remain planning
-notes until their spikes (#3-#5) complete.
+for adapter work. The Grok consumer mapping is also verified; Kimi and hosted
+Ollama Pro remain planning notes until their spikes (#3-#4) complete.
 
 ## Guiding rules
 
@@ -56,7 +56,7 @@ notes until their spikes (#3-#5) complete.
   "properties": {
     "provider": {
       "type": "string",
-      "description": "Stable provider identifier, e.g. codex, kimi, ollama_local, ollama_cloud, grok_consumer, grok_api."
+      "description": "Stable provider identifier, e.g. codex, kimi, ollama_cloud, grok_consumer, grok_api."
     },
     "account_id": {
       "type": "string",
@@ -148,7 +148,7 @@ value. The cache and the shell must preserve these distinctions.
 | stale | the last good observation is older than the policy allows | preserved with the original observed_at and resets_at | absent | cache hit past policy, or a refresh failed but a prior snapshot exists |
 | unavailable | configured, but the most recent provider call failed and no prior snapshot exists | absent | present, redacted | adapter failure with no cache |
 | not_configured | the user has not enabled or authenticated the provider | absent | absent | registry decides this, not the adapter |
-| not_applicable | the provider does not expose this metric (e.g. Ollama local has no hosted quota) | absent | absent | adapter declares this metric unsupported |
+| not_applicable | the provider does not expose this metric | absent | absent | adapter declares this metric unsupported |
 
 Rules:
 
@@ -189,8 +189,6 @@ Rules:
   - empty `unit`;
   - `freshness=unavailable` carrying metric values or missing `error`;
   - `error` present on live/cached/stale/not_configured/not_applicable;
-  - `provider=ollama_local` with `metric_kind=quota` (local telemetry is never
-    hosted quota).
 - Invalid windows become a redacted `schema_drift` outcome (or the previous
   stale cache entry for that window key when still within `stale_after`).
   Sibling windows from the same refresh are validated independently and are
@@ -206,10 +204,6 @@ renders each independently. Examples:
   `account_id`, different `window_label`.
 - Kimi rolling 5-hour and weekly limits: two snapshots, different
   `window_kind` (rolling, weekly).
-- Ollama local telemetry: one snapshot with `metric_kind=health` or
-  `metric_kind=tokens`, `window_kind=session` or `none`, and
-  `freshness=not_applicable` for any hosted-quota metric the adapter is
-  asked for.
 
 ## Per-provider notes
 
@@ -229,13 +223,9 @@ the evidence spikes (#2-#5) and then folded back here.
 - **Kimi**: rolling 5-hour and weekly limits plus membership/credit cycle.
   Expect `metric_kind=quota` and `metric_kind=credits` snapshots. The
   evidence spike (#3) must confirm which surface exposes each.
-- **Ollama local**: local runtime telemetry, not a hosted quota.
-  `metric_kind=tokens` or `metric_kind=health`, `window_kind=session` or
-  `none`. Any hosted-quota metric requested for Ollama local must return
-  `not_applicable`, never a fake percentage.
-- **Ollama cloud**: separate account from local. Cloud quota windows, if a
-  supported surface exists, are a separate `account_id`. The evidence spike
-  (#4) decides whether cloud is implement or defer.
+- **Ollama Pro/cloud**: hosted quota windows, if a supported surface exists,
+  are a separate provider/account. The evidence spike (#4) decides whether
+  this is implemented or deferred.
 - **Grok consumer**: shared weekly SuperGrok pool across products.
   `metric_kind=quota`, `window_kind=weekly`, `unit="percent"`, store
   `creditUsagePercent` as `used` with `limit=100`. Source is Grok Build CLI
@@ -297,8 +287,6 @@ acceptance tests for this contract.
 
 ### Invariant
 
-- Local Ollama telemetry is never classified as a hosted quota. A snapshot
-  with `provider=ollama_local` and `metric_kind=quota` is rejected.
 - The compact view never aggregates incompatible metric kinds. A combined
   percentage across quota, spend, and tokens is rejected.
 - A provider failure preserves the last good snapshot and marks it stale or
@@ -331,6 +319,6 @@ This draft is the first step on #1, not the close. #1 closes when:
       captures the first real response, then frozen for adapter work.
 
 The Codex revision is complete. The Grok consumer surface is verified in
-[grok-spike.md](spikes/grok-spike.md). Kimi and Ollama notes remain planning
-until their spikes (#3-#4) complete.
+[grok-spike.md](spikes/grok-spike.md). Kimi and hosted Ollama Pro notes remain
+planning until their spikes (#3-#4) complete.
 ~~~

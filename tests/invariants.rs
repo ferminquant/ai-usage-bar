@@ -12,13 +12,11 @@ fn provider_strategy() -> impl Strategy<Value = Provider> {
     prop_oneof![
         Just(Provider::Codex),
         Just(Provider::Kimi),
-        Just(Provider::OllamaLocal),
         Just(Provider::OllamaCloud),
         Just(Provider::GrokConsumer),
         Just(Provider::GrokApi),
     ]
 }
-
 fn metric_strategy() -> impl Strategy<Value = MetricKind> {
     prop_oneof![
         Just(MetricKind::Quota),
@@ -75,13 +73,6 @@ proptest! {
         limit in prop::option::of(0.0f64..=100.0),
         offset_seconds in 0i64..=86_400,
     ) {
-        // Keep generated snapshots inside the contract: local Ollama never
-        // reports hosted quota, and used must not exceed limit.
-        let metric = if provider == Provider::OllamaLocal && metric == MetricKind::Quota {
-            MetricKind::Tokens
-        } else {
-            metric
-        };
         let (used, limit) = match (used, limit) {
             (Some(used), Some(limit)) if used > limit => (Some(limit), Some(limit)),
             pair => pair,
@@ -454,57 +445,6 @@ fn invariant_cached_with_error_is_schema_drift_not_healed() {
         .message
         .is_none());
     assert!(!rendered.contains("secret-token"));
-    assert_eq!(
-        report.diagnostics[0].error_code,
-        Some(ErrorCode::SchemaDrift)
-    );
-}
-
-// Compact-view policy; acceptance covers the full Ollama scenario narrative.
-#[test]
-fn invariant_local_telemetry_never_becomes_a_quota_icon() {
-    let snapshot = metric_snapshot(
-        Provider::OllamaLocal,
-        instant(),
-        MetricKind::Tokens,
-        WindowKind::Session,
-        "tokens",
-        Some(4_000.0),
-        None,
-        None,
-        Freshness::Live,
-        Some("primary"),
-    );
-
-    let view = build_tray_view(&[snapshot]);
-
-    assert_eq!(view.icon_text, "—");
-    assert_eq!(view.used_percent, None);
-}
-
-#[test]
-fn invariant_local_hosted_quota_is_rejected_at_the_boundary() {
-    let now = instant();
-    let clock = FixedClock::new(now);
-    let registry = ProviderRegistry::new();
-    let mut snapshot = percent_snapshot(
-        Provider::OllamaLocal,
-        now,
-        Some(50.0),
-        Freshness::Live,
-        Some("primary"),
-    );
-    snapshot.metric_kind = MetricKind::Quota;
-    let (adapter, _) = SequenceAdapter::new(Provider::OllamaLocal, vec![Ok(vec![snapshot])]);
-    registry.register(adapter).unwrap();
-
-    let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
-    let view = build_tray_view(&report.snapshots);
-
-    assert_eq!(report.snapshots[0].freshness, Freshness::Unavailable);
-    assert_eq!(report.snapshots[0].metric_kind, MetricKind::Health);
-    assert_eq!(view.used_percent, None);
-    assert_eq!(view.icon_text, "⛔");
     assert_eq!(
         report.diagnostics[0].error_code,
         Some(ErrorCode::SchemaDrift)

@@ -148,7 +148,6 @@ pub fn provider_display_name(provider: &Provider) -> &'static str {
     match provider {
         Provider::Codex => "Codex",
         Provider::Kimi => "Kimi",
-        Provider::OllamaLocal => "Ollama",
         Provider::OllamaCloud => "Ollama cloud",
         Provider::GrokConsumer => "Grok",
         Provider::GrokApi => "Grok API",
@@ -392,22 +391,6 @@ mod tests {
         let vm = build_tray_view(&snaps);
         assert!(!vm.tooltip.contains("total"));
         assert!(!vm.tooltip.contains("average"));
-    }
-
-    #[test]
-    fn local_token_telemetry_is_not_a_quota_percentage() {
-        let mut snapshot = make_snapshot(Some(400.0), Freshness::Live, Some("primary"));
-        snapshot.provider = Provider::OllamaLocal;
-        snapshot.metric_kind = MetricKind::Tokens;
-        snapshot.window_kind = WindowKind::Session;
-        snapshot.unit = "tokens".into();
-        snapshot.limit = None;
-        snapshot.remaining = None;
-
-        let vm = build_tray_view(&[snapshot]);
-
-        assert_eq!(vm.icon_text, "—");
-        assert_eq!(vm.used_percent, None);
     }
 
     #[test]

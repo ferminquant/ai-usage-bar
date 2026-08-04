@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "providers": {
+    "codex": {
+      "enabled": true
+    },
+    "grok_consumer": {
+      "enabled": true
+    },
+    "kimi": {
+      "enabled": false
+    },
+    "ollama_cloud": {
+      "enabled": false
+    }
+  }
+}

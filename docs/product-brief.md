@@ -6,19 +6,18 @@ AI Usage Bar
 
 ## Problem
 
-AI tools expose usage limits in different places and with different
-semantics. Codex, Kimi, Grok, and Ollama may use rolling windows, weekly
-pools, credits, spend, or local runtime counters. The user has to open several
-apps or dashboards to understand what is available.
+Hosted AI services expose usage limits in different places and with different
+semantics. Codex, Kimi, Grok, and future hosted Ollama services may use rolling
+windows, weekly pools, credits, or spend. The user has to open several apps or
+dashboards to understand what is available.
 
 The goal is a calm, glanceable surface that reports the evidence each provider
 actually exposes without inventing a common unit.
 
 ## Target user
 
-A developer who actively uses multiple AI subscriptions and local model
-runtimes and wants a small desktop indicator instead of several open
-dashboards.
+A developer who actively uses multiple online AI subscriptions and wants a
+small desktop indicator instead of several open dashboards.
 
 ## User stories
 
@@ -26,8 +25,8 @@ dashboards.
   or not configured.
 - As a user, I can see the active Codex/Kimi/Grok quota window and reset time
   without opening a browser.
-- As a user, I can see local Ollama activity without confusing it with a
-  hosted subscription quota.
+- As a user, I can see each supported online provider independently without
+  confusing unrelated quota, credit, and spend metrics.
 - As a user, I can click the compact bar to inspect the source, timestamp,
   window semantics, and any error.
 - As a user, I can disable a provider or hide a sensitive metric.
@@ -40,7 +39,7 @@ dashboards.
 
 - Windows-first compact taskbar/tray experience.
 - Local daemon with cached snapshots.
-- Provider adapter boundary for Codex, Kimi, Ollama, and Grok.
+- Provider adapter boundary for Codex, Kimi, hosted Ollama, and Grok.
 - Explicit freshness, confidence, and source labels.
 - Offline fixture tests before live provider calls.
 
@@ -69,8 +68,8 @@ dashboards.
    cli-chat-proxy billing (not a browser bridge). See
    [grok-spike.md](spikes/grok-spike.md). Grok API remains a separate deferred
    surface.
-4. Which Ollama cloud metrics are available programmatically, and which must
-   remain dashboard-only?
+4. Which Ollama Pro/cloud metrics are available programmatically, and which
+   must remain dashboard-only?
 
 ## Success signals
 

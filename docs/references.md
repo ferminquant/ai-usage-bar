@@ -12,7 +12,7 @@
 ## Related projects
 
 These projects are useful prior art, but none currently covers the complete
-Codex + Kimi + Ollama + Grok, Windows-first scope:
+Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
 
 - [hohieuu/ai-usage-bar](https://github.com/hohieuu/ai-usage-bar) —
   macOS SwiftBar integration for Claude Code and Cursor.
@@ -28,8 +28,8 @@ Codex + Kimi + Ollama + Grok, Windows-first scope:
 - [Kimi Code membership and usage](https://www.kimi.com/code/docs/en/kimi-code/membership.html)
 - [Kimi Code slash commands](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/slash-commands.html)
 - [Ollama pricing and cloud limits](https://ollama.com/pricing)
-- [Ollama usage API](https://docs.ollama.com/api/usage)
-- [Ollama cloud](https://docs.ollama.com/cloud)
+- [Ollama cloud](https://docs.ollama.com/cloud) (future hosted-provider
+  evidence only)
 - [Grok FAQ](https://docs.x.ai/grok/faq) (weekly SuperGrok pool semantics)
 - [Grok overview](https://docs.x.ai/grok/overview)
 - [Grok Build CLI](https://x.ai/news/grok-build-cli) / [xai-org/grok-build](https://github.com/xai-org/grok-build) (open-source client; billing path)

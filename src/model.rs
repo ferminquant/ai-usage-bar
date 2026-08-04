@@ -3,7 +3,6 @@ use std::fmt;
 
 const PROVIDER_CODEX: &str = "codex";
 const PROVIDER_KIMI: &str = "kimi";
-const PROVIDER_OLLAMA_LOCAL: &str = "ollama_local";
 const PROVIDER_OLLAMA_CLOUD: &str = "ollama_cloud";
 const PROVIDER_GROK_CONSUMER: &str = "grok_consumer";
 const PROVIDER_GROK_API: &str = "grok_api";
@@ -13,7 +12,6 @@ const PROVIDER_GROK_API: &str = "grok_api";
 pub enum Provider {
     Codex,
     Kimi,
-    OllamaLocal,
     OllamaCloud,
     GrokConsumer,
     GrokApi,
@@ -24,7 +22,6 @@ impl Provider {
         match self {
             Self::Codex => PROVIDER_CODEX,
             Self::Kimi => PROVIDER_KIMI,
-            Self::OllamaLocal => PROVIDER_OLLAMA_LOCAL,
             Self::OllamaCloud => PROVIDER_OLLAMA_CLOUD,
             Self::GrokConsumer => PROVIDER_GROK_CONSUMER,
             Self::GrokApi => PROVIDER_GROK_API,
@@ -138,8 +135,6 @@ pub enum SnapshotValidationError {
     UsedExceedsLimit,
     #[error("contract: unavailable snapshots must not carry used/remaining/limit")]
     UnavailableHasValues,
-    #[error("contract: ollama_local must not report hosted quota")]
-    LocalHostedQuota,
     #[error("contract: error is only valid for unavailable snapshots")]
     ErrorStateMismatch,
 }
@@ -192,10 +187,6 @@ impl UsageSnapshot {
         if self.unit.trim().is_empty() {
             return Err(SnapshotValidationError::EmptyUnit);
         }
-        if self.provider == Provider::OllamaLocal && self.metric_kind == MetricKind::Quota {
-            return Err(SnapshotValidationError::LocalHostedQuota);
-        }
-
         for (name, value) in [
             ("used", self.used),
             ("remaining", self.remaining),

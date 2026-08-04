@@ -1,27 +1,41 @@
 use ai_usage_bar::{
-    fetch_codex_snapshots, fetch_grok_consumer_snapshots, Freshness, UsageSnapshot,
+    load_registry, provider_display_name, Freshness, Provider, RefreshPolicy, RefreshService,
+    UsageSnapshot,
 };
 
 fn main() {
-    let mut any_ok = false;
-
-    match fetch_codex_snapshots() {
-        Ok(snapshots) => {
-            any_ok = true;
-            print_provider("Codex", &snapshots);
+    let registry = match load_registry() {
+        Ok(registry) => registry,
+        Err(error) => {
+            eprintln!("failed to load provider configuration: {error}");
+            std::process::exit(1);
         }
-        Err(e) => eprintln!("Codex: {e}"),
+    };
+    let report = RefreshService::new(registry, RefreshPolicy::default()).refresh_all_with_report();
+
+    let mut grouped: Vec<(Provider, Vec<UsageSnapshot>)> = Vec::new();
+    for snapshot in report.snapshots {
+        if let Some((_, snapshots)) = grouped
+            .iter_mut()
+            .find(|(provider, _)| provider == &snapshot.provider)
+        {
+            snapshots.push(snapshot);
+        } else {
+            grouped.push((snapshot.provider.clone(), vec![snapshot]));
+        }
     }
 
-    match fetch_grok_consumer_snapshots() {
-        Ok(snapshots) => {
-            any_ok = true;
-            print_provider("Grok consumer", &snapshots);
-        }
-        Err(e) => eprintln!("Grok consumer: {e}"),
+    for (provider, snapshots) in &grouped {
+        print_provider(provider_display_name(provider), snapshots);
     }
 
-    if !any_ok {
+    let any_usable = report.diagnostics.iter().any(|diagnostic| {
+        !matches!(
+            diagnostic.freshness,
+            Freshness::Unavailable | Freshness::NotConfigured
+        )
+    });
+    if !any_usable {
         std::process::exit(1);
     }
 }
