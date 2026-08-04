@@ -223,9 +223,11 @@ the evidence spikes (#2-#5) and then folded back here.
 - **Kimi**: rolling 5-hour and weekly limits plus membership/credit cycle.
   Expect `metric_kind=quota` and `metric_kind=credits` snapshots. The
   evidence spike (#3) must confirm which surface exposes each.
-- **Ollama Pro/cloud**: hosted quota windows, if a supported surface exists,
-  are a separate provider/account. The evidence spike (#4) decides whether
-  this is implemented or deferred.
+- **Ollama Pro/cloud**: the settings surface shows separate session and weekly
+  hosted quota windows. When a supported source exists, map them to separate
+  `quota` snapshots (`rolling`/`session` and `weekly`/`weekly`) for one
+  provider/account. Session is the default UI focus; model-level request rows
+  are detail-only and deferred. See [ollama-spike.md](spikes/ollama-spike.md).
 - **Grok consumer**: shared weekly SuperGrok pool across products.
   `metric_kind=quota`, `window_kind=weekly`, `unit="percent"`, store
   `creditUsagePercent` as `used` with `limit=100`. Source is Grok Build CLI
