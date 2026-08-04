@@ -236,11 +236,15 @@ the evidence spikes (#2-#5) and then folded back here.
 - **Ollama cloud**: separate account from local. Cloud quota windows, if a
   supported surface exists, are a separate `account_id`. The evidence spike
   (#4) decides whether cloud is implement or defer.
-- **Grok consumer**: shared weekly pool across supported products.
-  `metric_kind=quota`, `window_kind=weekly`. The evidence spike (#5) decides
-  whether this is a browser bridge or deferred.
-- **Grok API**: separate adapter/account type from consumer. API rate
-  limits and spend are not conflated with consumer subscription usage.
+- **Grok consumer**: shared weekly SuperGrok pool across products.
+  `metric_kind=quota`, `window_kind=weekly`, `unit="percent"`, store
+  `creditUsagePercent` as `used` with `limit=100`. Source is Grok Build CLI
+  auth + `cli-chat-proxy` billing (`format=credits`), not a browser scrape.
+  See [grok-spike.md](spikes/grok-spike.md). Optional product breakdown rows
+  are detail only; prepaid top-up cents are a separate credits snapshot.
+- **Grok API**: separate adapter/account type from consumer. API RPS/TPM and
+  console spend are not conflated with the consumer weekly pool; deferred
+  until a dedicated API-key story.
 
 ## Fixture shape
 
@@ -326,7 +330,7 @@ This draft is the first step on #1, not the close. #1 closes when:
 - [x] The contract is revised once after the Codex evidence spike (#2)
       captures the first real response, then frozen for adapter work.
 
-The Codex revision is complete. The contract is now frozen for Codex
-adapter work. Kimi, Ollama, and Grok notes remain planning until their
-spikes (#3-#5) complete.
+The Codex revision is complete. The Grok consumer surface is verified in
+[grok-spike.md](spikes/grok-spike.md). Kimi and Ollama notes remain planning
+until their spikes (#3-#4) complete.
 ~~~

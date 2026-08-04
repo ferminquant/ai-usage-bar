@@ -30,10 +30,12 @@ Codex + Kimi + Ollama + Grok, Windows-first scope:
 - [Ollama pricing and cloud limits](https://ollama.com/pricing)
 - [Ollama usage API](https://docs.ollama.com/api/usage)
 - [Ollama cloud](https://docs.ollama.com/cloud)
-- [Grok FAQ](https://docs.x.ai/grok/faq)
+- [Grok FAQ](https://docs.x.ai/grok/faq) (weekly SuperGrok pool semantics)
 - [Grok overview](https://docs.x.ai/grok/overview)
+- [Grok Build CLI](https://x.ai/news/grok-build-cli) / [xai-org/grok-build](https://github.com/xai-org/grok-build) (open-source client; billing path)
 - [xAI API rate limits](https://docs.x.ai/developers/rate-limits)
 - [xAI console usage](https://docs.x.ai/console/usage)
+- Spike evidence: [grok-spike.md](spikes/grok-spike.md)
 
 Provider interfaces and plan semantics can change. The links are evidence
 starting points, not a guarantee of a stable integration contract.

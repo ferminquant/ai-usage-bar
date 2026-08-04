@@ -1,0 +1,11 @@
+{
+  "_description": "Redacted fixture: billing proxy rejects missing/expired session. Adapter maps to freshness=unavailable, error.code=auth_expired.",
+  "_source": "GET https://cli-chat-proxy.grok.com/v1/billing?format=credits without valid auth",
+  "_capturedAt": "2026-08-04T00:00:00Z",
+  "_evidence": "docs/spikes/grok-spike.md",
+  "httpStatus": 401,
+  "error": {
+    "code": "auth_expired",
+    "message": null
+  }
+}

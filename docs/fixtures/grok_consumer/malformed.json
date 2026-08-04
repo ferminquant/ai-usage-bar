@@ -1,0 +1,8 @@
+{
+  "_description": "Redacted fixture: 200 body that is not a billing config. Adapter maps to schema_drift.",
+  "_source": "synthetic malformed billing response",
+  "_capturedAt": "2026-08-04T00:00:00Z",
+  "_evidence": "docs/spikes/grok-spike.md",
+  "unexpected": true,
+  "payload": "not-a-billing-config"
+}

@@ -1,0 +1,24 @@
+{
+  "_description": "Redacted fixture: normal SuperGrok weekly pool from Grok Build CLI billing proxy. No tokens, email, or user ids.",
+  "_source": "GET https://cli-chat-proxy.grok.com/v1/billing?format=credits (official grok CLI path)",
+  "_capturedAt": "2026-08-04T00:00:00Z",
+  "_evidence": "docs/spikes/grok-spike.md",
+  "config": {
+    "currentPeriod": {
+      "type": "USAGE_PERIOD_TYPE_WEEKLY",
+      "start": "2026-08-04T13:28:26.395580+00:00",
+      "end": "2026-08-11T13:28:26.395580+00:00"
+    },
+    "creditUsagePercent": 8.0,
+    "onDemandCap": { "val": 0 },
+    "onDemandUsed": { "val": 0 },
+    "productUsage": [
+      { "product": "GrokBuild", "usagePercent": 8.0 }
+    ],
+    "isUnifiedBillingUser": true,
+    "prepaidBalance": { "val": 0 },
+    "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+    "billingPeriodStart": "2026-08-04T13:28:26.395580+00:00",
+    "billingPeriodEnd": "2026-08-11T13:28:26.395580+00:00"
+  }
+}
