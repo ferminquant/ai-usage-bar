@@ -12,12 +12,11 @@ The initial provider set is:
 - Ollama Pro/cloud (hosted)
 - Grok
 
-The MVP core is implemented: Codex, Grok consumer, and opt-in Ollama Pro/cloud
-adapters, cached freshness states, contract/invariant tests, a Windows shell,
-and hosted-provider configuration. The Kimi usage source is validated in
-[spike #3](https://github.com/ferminquant/ai-usage-bar/issues/3) and the
-adapter is a future evidence-driven story
-([#17](https://github.com/ferminquant/ai-usage-bar/issues/17)).
+The MVP core is implemented: Codex, Grok consumer, Kimi, and opt-in Ollama
+Pro/cloud adapters, cached freshness states, contract/invariant tests, a
+Windows shell, and hosted-provider configuration. The Kimi usage source was
+validated in [spike #3](https://github.com/ferminquant/ai-usage-bar/issues/3)
+and implemented in [#17](https://github.com/ferminquant/ai-usage-bar/issues/17).
 
 Ollama reports hosted session (5-hour) and weekly (7-day) totals from its
 authenticated cloud endpoint. The compact view defaults to the session quota;
@@ -28,6 +27,18 @@ OS browser at `https://ollama.com/settings`; no browser extension, cookie
 copying, or manual setup is required. Reset metadata is tracked in
 [issue #35](https://github.com/ferminquant/ai-usage-bar/issues/35) while
 Ollama works on a supported API surface.
+
+Kimi reports the weekly plan window (7 days from the subscription date), each
+reported rate window (e.g. the rolling 5-hour window), and the Extra Usage
+balance as a credits snapshot. It reuses the OAuth session created by the
+official CLI (`kimi login`; `~/.kimi-code/credentials/kimi-code.json`) and
+calls the same managed endpoint behind the CLI `/usage` command. It does not
+report the shared monthly membership pool cap, the monthly spending cap or
+spend, the plan tier, the wallet currency, or the Kimi Open Platform
+(API-key billing) balance. Kimi is registered but opt-in until enabled in
+the config file; a missing CLI login shows as "not configured", never zero
+usage, and the user is pointed at `kimi login` and the
+[Kimi Code Console](https://www.kimi.com/code/console).
 
 ## Product direction
 
@@ -86,8 +97,8 @@ credentials are sent to a project server.
 
 On Windows, copy that example to %APPDATA%\AI Usage Bar\config.json and set
 enabled to false for any hosted provider you want to opt out of. A missing
-file uses the default Codex and Grok configuration; Ollama Pro/cloud is
-registered but opt-in until enabled in that file.
+file uses the default Codex and Grok configuration; Ollama Pro/cloud and Kimi
+are registered but opt-in until enabled in that file.
 
 ## Proposed first release
 
