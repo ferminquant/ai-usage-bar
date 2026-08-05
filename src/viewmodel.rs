@@ -1,5 +1,6 @@
 use crate::model::{Freshness, MetricKind, Provider, UsageSnapshot};
 use chrono::{DateTime, Utc};
+use chrono_tz::America::Toronto;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrayViewModel {
@@ -123,6 +124,17 @@ fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
         return "5-hour session".to_string();
     }
 
+    if metric.label == "primary" {
+        return match metric.window_kind.as_str() {
+            "weekly" => "Weekly".to_string(),
+            "rolling" => "Rolling".to_string(),
+            "daily" => "Daily".to_string(),
+            "monthly" => "Monthly".to_string(),
+            "session" => "Session".to_string(),
+            other => other.to_string(),
+        };
+    }
+
     // A provider-native label can already include the window name. Avoid
     // rendering redundant text such as "weekly weekly" in that case.
     if metric.label.eq_ignore_ascii_case(&metric.window_kind) {
@@ -132,7 +144,8 @@ fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
     }
 }
 
-/// Human-readable reset with remaining days/hours, e.g. `3d 5h left · Tue 13:28 UTC`.
+/// Human-readable reset with remaining days/hours in Eastern local time,
+/// e.g. `3d 5h left · Tue 13:28 EDT`.
 pub fn format_reset_label(resets_at: Option<&str>, now: DateTime<Utc>) -> String {
     let Some(dt) = resets_at
         .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
@@ -141,7 +154,7 @@ pub fn format_reset_label(resets_at: Option<&str>, now: DateTime<Utc>) -> String
         return "—".to_string();
     };
 
-    let when = dt.format("%a %H:%M UTC");
+    let when = dt.with_timezone(&Toronto).format("%a %H:%M %Z");
     let remaining = dt.signed_duration_since(now);
     if remaining.num_seconds() <= 0 {
         return format!("{when} (reset due)");
@@ -414,6 +427,8 @@ mod tests {
         let snaps = vec![make_snapshot(Some(40.0), Freshness::Live, Some("primary"))];
         let vm = build_tray_view(&snaps);
         assert!(vm.tooltip.contains("Codex"));
+        assert!(vm.tooltip.contains("Weekly:"));
+        assert!(!vm.tooltip.contains("primary weekly"));
         assert!(vm.tooltip.contains("60% left"));
         assert!(!vm.tooltip.contains("40%"));
     }
@@ -525,6 +540,11 @@ mod tests {
         let reset = (now + Duration::days(3) + Duration::hours(5)).to_rfc3339();
         let label = format_reset_label(Some(&reset), now);
         assert!(label.contains("3d 5h left"), "{label}");
-        assert!(label.contains("UTC"), "{label}");
+        assert!(label.contains("EDT"), "{label}");
+
+        let winter_now = Utc.with_ymd_and_hms(2026, 1, 4, 12, 0, 0).unwrap();
+        let winter_reset = (winter_now + Duration::days(3)).to_rfc3339();
+        let winter_label = format_reset_label(Some(&winter_reset), winter_now);
+        assert!(winter_label.contains("EST"), "{winter_label}");
     }
 }

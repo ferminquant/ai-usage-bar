@@ -488,7 +488,7 @@ mod windows_shell {
     }
 
     /// Wide enough for multi-provider lines with day-countdown reset strings
-    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 UTC`).
+    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 EDT`).
     const TOOLTIP_MAX_WIDTH_PX: i32 = 640;
     /// Gap between the tooltip bottom edge and the pill top edge.
     const TOOLTIP_PILL_GAP_PX: i32 = 8;
