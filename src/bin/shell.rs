@@ -33,6 +33,7 @@ mod windows_shell {
     use windows::Win32::UI::Controls::*;
     use windows::Win32::UI::HiDpi::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     const WIDGET_W: i32 = 158;
@@ -51,6 +52,7 @@ mod windows_shell {
     const MENU_REFRESH: usize = 1001;
     const MENU_COPY_DETAILS: usize = 1002;
     const MENU_QUIT: usize = 1003;
+    const MENU_OPEN_OLLAMA_USAGE: usize = 1004;
     /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
     const MENU_SHOW_PROVIDER_BASE: usize = 1100;
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
@@ -61,6 +63,7 @@ mod windows_shell {
     const CF_UNICODETEXT_FORMAT: u32 = 13;
 
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
+    const OLLAMA_USAGE_URL: &str = "https://ollama.com/settings";
 
     const COLOR_BACKGROUND: COLORREF = COLORREF(0x002a2a2a);
     const COLOR_OUTER: COLORREF = COLORREF(0x00141414);
@@ -488,7 +491,7 @@ mod windows_shell {
     }
 
     /// Wide enough for multi-provider lines with day-countdown reset strings
-    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 EDT`).
+    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 EST`).
     const TOOLTIP_MAX_WIDTH_PX: i32 = 640;
     /// Gap between the tooltip bottom edge and the pill top edge.
     const TOOLTIP_PILL_GAP_PX: i32 = 8;
@@ -1032,6 +1035,25 @@ mod windows_shell {
         set_focus_provider(hwnd, next);
     }
 
+    fn open_ollama_usage_page(hwnd: HWND) {
+        let url = to_wide(OLLAMA_USAGE_URL);
+        let launched = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                w!("open"),
+                PCWSTR(url.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if launched.0 as usize <= 32 {
+            if let Some(state) = app_state(hwnd) {
+                set_status(hwnd, state, "Could not open Ollama usage page");
+            }
+        }
+    }
+
     fn show_context_menu(hwnd: HWND) {
         // Dismiss hover tip first so the menu is not stacked under/over it.
         if let Some(state) = app_state(hwnd) {
@@ -1136,6 +1158,16 @@ mod windows_shell {
                 }
             }
 
+            if ollama_focused {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    MENU_OPEN_OLLAMA_USAGE,
+                    w!("Open Ollama usage page"),
+                );
+            }
+
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
             let _ = AppendMenuW(
                 menu,
@@ -1181,6 +1213,7 @@ mod windows_shell {
 
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
+                MENU_OPEN_OLLAMA_USAGE => open_ollama_usage_page(hwnd),
                 MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);
@@ -1194,7 +1227,8 @@ mod windows_shell {
                         set_focus_provider(hwnd, provider);
                     }
                 }
-                id if (MENU_SHOW_WINDOW_BASE..MENU_SHOW_WINDOW_BASE + MENU_SHOW_WINDOW_MAX)
+                id if (MENU_SHOW_WINDOW_BASE
+                    ..MENU_SHOW_WINDOW_BASE + MENU_SHOW_WINDOW_MAX)
                     .contains(&id) =>
                 {
                     if let Some(window) = available_windows.get(id - MENU_SHOW_WINDOW_BASE) {

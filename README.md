@@ -19,12 +19,13 @@ adapter.
 
 Ollama reports hosted session (5-hour) and weekly (7-day) totals from its
 authenticated cloud endpoint. The compact view defaults to the session quota;
-the right-click menu can select the weekly quota. Reset timestamps are optional
-settings-page enrichment, so totals remain usable when a browser session is
-not available. To opt into reset enrichment, provide the browser's Ollama
-cookie header in the local `OLLAMA_SESSION_COOKIE` environment variable; the
-app does not persist or log that value. The API totals do not require this
-cookie.
+the right-click menu can select the weekly quota. Ollama's usage response does
+not currently include reset timestamps, so the Ollama context menu includes
+**Open Ollama usage page** as the low-friction fallback. It opens the normal
+OS browser at `https://ollama.com/settings`; no browser extension, cookie
+copying, or manual setup is required. Reset metadata is tracked in
+[issue #35](https://github.com/ferminquant/ai-usage-bar/issues/35) while
+Ollama works on a supported API surface.
 
 ## Product direction
 

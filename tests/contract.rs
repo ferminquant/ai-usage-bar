@@ -49,7 +49,7 @@ fn contract_ollama_fixture_normalizes_both_hosted_windows() {
     )
     .expect("Ollama fixture should be JSON");
 
-    let snapshots = parse_usage_response(&raw, instant(), "ollama-contract", None)
+    let snapshots = parse_usage_response(&raw, instant(), "ollama-contract")
         .expect("Ollama totals should satisfy the adapter contract");
     assert_eq!(snapshots.len(), 2);
     assert_eq!(snapshots[0].provider, Provider::OllamaCloud);
