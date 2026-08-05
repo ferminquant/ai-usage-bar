@@ -1,0 +1,12 @@
+{
+  "_description": "Redacted fixture: unlimited or missing values. The usage summary reports an unlimited plan (remaining and resetTime absent), no limit rows, and no booster wallet. Absent fields mean not reported, not zero and not unlimited.",
+  "_source": "GET https://api.kimi.com/coding/v1/usages (official Kimi Code CLI managed endpoint)",
+  "_capturedAt": "2026-08-05T00:00:00Z",
+  "_evidence": "docs/spikes/kimi-spike.md",
+  "usage": {
+    "used": "0",
+    "limit": "100",
+    "remaining": "100"
+  },
+  "limits": []
+}

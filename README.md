@@ -14,8 +14,10 @@ The initial provider set is:
 
 The MVP core is implemented: Codex, Grok consumer, and opt-in Ollama Pro/cloud
 adapters, cached freshness states, contract/invariant tests, a Windows shell,
-and hosted-provider configuration. Kimi remains a future evidence-driven
-adapter.
+and hosted-provider configuration. The Kimi usage source is validated in
+[spike #3](https://github.com/ferminquant/ai-usage-bar/issues/3) and the
+adapter is a future evidence-driven story
+([#17](https://github.com/ferminquant/ai-usage-bar/issues/17)).
 
 Ollama reports hosted session (5-hour) and weekly (7-day) totals from its
 authenticated cloud endpoint. The compact view defaults to the session quota;

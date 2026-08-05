@@ -1,0 +1,47 @@
+{
+  "_description": "Redacted fixture: normal Kimi Code usage response. Weekly plan summary (7-day window from subscription date), rolling 5-hour window, and the Extra Usage booster wallet. No tokens, cookies, emails, or user ids.",
+  "_source": "GET https://api.kimi.com/coding/v1/usages (official Kimi Code CLI managed endpoint)",
+  "_capturedAt": "2026-08-05T00:00:00Z",
+  "_evidence": "docs/spikes/kimi-spike.md",
+  "usage": {
+    "used": "33",
+    "limit": "100",
+    "remaining": "67",
+    "resetTime": "2026-08-10T09:20:45.248979Z"
+  },
+  "limits": [
+    {
+      "window": {
+        "duration": 300,
+        "timeUnit": "TIME_UNIT_MINUTE"
+      },
+      "detail": {
+        "used": "2",
+        "limit": "100",
+        "remaining": "98",
+        "resetTime": "2026-08-05T11:20:45.248979Z"
+      }
+    }
+  ],
+  "user": {
+    "membership": {
+      "level": "LEVEL_INTERMEDIATE"
+    }
+  },
+  "boosterWallet": {
+    "balance": {
+      "type": "BOOSTER",
+      "amount": 1500000000,
+      "amountLeft": 1250000000
+    },
+    "monthlyChargeLimit": {
+      "priceInCents": 10000,
+      "currency": "CNY"
+    },
+    "monthlyUsed": {
+      "priceInCents": 4000,
+      "currency": "CNY"
+    },
+    "monthlyChargeLimitEnabled": true
+  }
+}

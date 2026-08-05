@@ -27,6 +27,11 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
 - [OpenAI Codex usage with ChatGPT plans](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
 - [Kimi Code membership and usage](https://www.kimi.com/code/docs/en/kimi-code/membership.html)
 - [Kimi Code slash commands](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/slash-commands.html)
+- [Kimi Code error reference](https://www.kimi.com/code/docs/en/kimi-code/error-reference.html)
+- [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code) (official
+  open-source CLI; managed usage endpoint in `packages/oauth/src/managed-usage.ts`)
+- [Kimi usage spike](spikes/kimi-spike.md) — verified `/coding/v1/usages`
+  surface, OAuth session reuse, and the implement decision.
 - [Ollama pricing and cloud limits](https://ollama.com/pricing)
 - [Ollama cloud](https://docs.ollama.com/cloud) (future hosted-provider
   evidence only)

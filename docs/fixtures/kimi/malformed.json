@@ -1,0 +1,27 @@
+{
+  "_description": "Redacted fixture: schema drift. The response is success-shaped but does not match the /usages contract: usage.used and limits[].detail.limit are non-numeric, resetTime is not a string, and no parseable row remains. The adapter returns freshness=unavailable with error.code=schema_drift.",
+  "_source": "GET https://api.kimi.com/coding/v1/usages (malformed)",
+  "_capturedAt": "2026-08-05T00:00:00Z",
+  "usage": {
+    "used": "not-a-number",
+    "limit": {},
+    "remaining": null,
+    "resetTime": 1786400000
+  },
+  "limits": [
+    {
+      "window": {
+        "duration": "300",
+        "timeUnit": "SOMETIMES_MINUTE"
+      },
+      "detail": {
+        "used": [],
+        "limit": "oops"
+      }
+    }
+  ],
+  "_error": {
+    "code": "schema_drift",
+    "message": "Response failed schema validation: usage.used must be a decimal string; limits[].window.timeUnit unknown."
+  }
+}
