@@ -17,9 +17,8 @@ authoritative.
 
 Revised after the Codex evidence spike (#2). The Codex-specific mapping is
 now backed by a real response. Field names and value semantics are frozen
-for adapter work. The Grok consumer mapping is also verified; Kimi remains a
-planning note, while the hosted Ollama Pro totals source is now verified in
-spike #4.
+for adapter work. The Grok consumer and Kimi mappings are verified; hosted
+Ollama Pro totals are verified in spike #4.
 
 ## Guiding rules
 
@@ -209,7 +208,7 @@ renders each independently. Examples:
 ## Per-provider notes
 
 These are planning notes, not fixtures. Real field semantics are recorded by
-the evidence spikes (#2-#5) and then folded back here.
+the evidence spikes (#2-#6) and then folded back here.
 
 - **Codex**: plan-dependent shared agentic pool. The verified source is
   the Codex CLI app-server (`codex app-server --listen stdio://`), JSON-RPC
@@ -222,8 +221,14 @@ the evidence spikes (#2-#5) and then folded back here.
   a separate snapshot with `metric_kind=credits`. See
   [codex-spike.md](spikes/codex-spike.md) for the full evidence.
 - **Kimi**: rolling 5-hour and weekly limits plus membership/credit cycle.
-  Expect `metric_kind=quota` and `metric_kind=credits` snapshots. The
-  evidence spike (#3) must confirm which surface exposes each.
+  `metric_kind=quota` snapshots come from the managed
+  `GET https://api.kimi.com/coding/v1/usages` endpoint (the surface behind
+  the CLI `/usage` command), reusing the CLI OAuth session at
+  `~/.kimi-code/credentials/kimi-code.json`; an Extra Usage wallet, when
+  present, is a separate `metric_kind=credits` snapshot (unit `cents`).
+  Values arrive as decimal strings and the weekly window is 7 days from the
+  subscription date (`resetTime` is authoritative; never a calendar-week
+  boundary). See [kimi-spike.md](spikes/kimi-spike.md).
 - **Ollama Pro/cloud**: authenticated `GET /api/usage` is the primary source
   for separate session and weekly hosted quota fractions. Map them to separate
   `quota` snapshots (`rolling`/`session` and `weekly`/`weekly`) for one
@@ -246,7 +251,7 @@ the evidence spikes (#2-#5) and then folded back here.
 ## Fixture shape
 
 Fixtures are redacted JSON files, one provider per directory, one file per
-state. The evidence spikes (#2-#5) must produce at least:
+state. The evidence spikes (#2-#6) must produce at least:
 
 - `normal.json` - a successful response with all reported fields;
 - `multiple_windows.json` - two or more windows for the same provider;
@@ -319,17 +324,18 @@ This draft is the first step on #1, not the close. #1 closes when:
 - [ ] The contract is linked from architecture.md and README.md.
 - [ ] The state and value semantics above are reviewed.
 - [ ] At least one redacted fixture shape is specified per planned provider
-      (done above as a required list; actual fixtures come from #2-#5).
+      (done above as a required list; actual fixtures come from #2-#6).
 - [ ] Unit, property-based, and invariant test cases are listed before
       implementation (done above).
 - [x] The contract is revised once after the Codex evidence spike (#2)
       captures the first real response, then frozen for adapter work.
 
-The Codex revision is complete. The Grok consumer surface is verified in
-[grok-spike.md](spikes/grok-spike.md). Kimi remains planning; hosted Ollama Pro
-totals are verified in [ollama-spike.md](spikes/ollama-spike.md). The current
-API response still lacks reset timestamps, so the shell provides a direct link
-to the settings page while upstream issue
+The Codex revision is complete. The Grok consumer and Kimi surfaces are
+verified in [grok-spike.md](spikes/grok-spike.md) and
+[kimi-spike.md](spikes/kimi-spike.md). Hosted Ollama Pro totals are verified
+in [ollama-spike.md](spikes/ollama-spike.md). The current Ollama API response
+still lacks reset timestamps, so the shell provides a direct link to the
+settings page while upstream issue
 [ollama/ollama#12532](https://github.com/ollama/ollama/issues/12532) is monitored
 through local tracking issue [#35](https://github.com/ferminquant/ai-usage-bar/issues/35).
 ~~~

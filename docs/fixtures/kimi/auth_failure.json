@@ -1,0 +1,9 @@
+{
+  "_description": "Redacted fixture: auth failure. The /usages call was rejected with HTTP 401. The adapter returns freshness=unavailable with error.code=auth_expired (or not_configured when no credential file exists at all).",
+  "_source": "GET https://api.kimi.com/coding/v1/usages (HTTP 401)",
+  "_capturedAt": "2026-08-05T00:00:00Z",
+  "_error": {
+    "code": "auth_expired",
+    "message": "Authorization failed. Please check your API key (try /login)."
+  }
+}

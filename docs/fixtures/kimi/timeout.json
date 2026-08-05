@@ -1,0 +1,9 @@
+{
+  "_description": "Redacted fixture: timeout. No /usages response received within the adapter deadline. The adapter returns freshness=unavailable with error.code=timeout. No raw payload.",
+  "_source": "GET https://api.kimi.com/coding/v1/usages (no response within deadline)",
+  "_capturedAt": "2026-08-05T00:00:00Z",
+  "_error": {
+    "code": "timeout",
+    "message": "Usage request timed out."
+  }
+}

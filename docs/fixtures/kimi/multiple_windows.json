@@ -1,0 +1,39 @@
+{
+  "_description": "Redacted fixture: multiple windows. Weekly plan summary plus two limit rows (rolling 5-hour and a second rolling window), no Extra Usage wallet present. The adapter emits one snapshot per row.",
+  "_source": "GET https://api.kimi.com/coding/v1/usages (official Kimi Code CLI managed endpoint)",
+  "_capturedAt": "2026-08-05T00:00:00Z",
+  "_evidence": "docs/spikes/kimi-spike.md",
+  "usage": {
+    "used": "40",
+    "limit": "100",
+    "remaining": "60",
+    "resetTime": "2026-08-10T09:20:45.248979Z"
+  },
+  "limits": [
+    {
+      "window": {
+        "duration": 300,
+        "timeUnit": "TIME_UNIT_MINUTE"
+      },
+      "detail": {
+        "used": "1",
+        "limit": "100",
+        "remaining": "99",
+        "resetTime": "2026-08-05T11:20:45.248979Z"
+      }
+    },
+    {
+      "name": "highspeed",
+      "window": {
+        "duration": 300,
+        "timeUnit": "TIME_UNIT_MINUTE"
+      },
+      "detail": {
+        "used": "0",
+        "limit": "100",
+        "remaining": "100",
+        "resetTime": "2026-08-05T11:20:45.248979Z"
+      }
+    }
+  ]
+}
