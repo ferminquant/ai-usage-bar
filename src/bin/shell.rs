@@ -10,8 +10,8 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_tray_view_focused, load_registry, provider_display_name, Provider, RefreshPolicy,
-        RefreshService, UsageSnapshot,
+        build_tray_view_focused_window, load_registry, provider_display_name, Provider,
+        RefreshPolicy, RefreshService, UsageSnapshot,
     };
     use std::ffi::c_void;
     use std::ptr::null_mut;
@@ -54,6 +54,8 @@ mod windows_shell {
     /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
     const MENU_SHOW_PROVIDER_BASE: usize = 1100;
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
+    const MENU_SHOW_WINDOW_BASE: usize = 1200;
+    const MENU_SHOW_WINDOW_MAX: usize = 8;
     const STATUS_TIMER_ID: usize = 4;
     const STATUS_INTERVAL_MS: u32 = 2_500;
     const CF_UNICODETEXT_FORMAT: u32 = 13;
@@ -79,6 +81,9 @@ mod windows_shell {
         pill_status: String,
         /// Which provider drives the compact pill (None = auto first).
         focus_provider: Option<Provider>,
+        /// Optional quota window for the focused provider (Ollama supports
+        /// `session` and `weekly`; other providers use their default window).
+        focus_window: Option<String>,
         switchable_providers: Vec<Provider>,
         tooltip: String,
         tooltip_hwnd: Option<HWND>,
@@ -100,6 +105,7 @@ mod windows_shell {
                 used_percent: None,
                 pill_status: "Loading…".to_string(),
                 focus_provider: None,
+                focus_window: None,
                 switchable_providers: Vec::new(),
                 tooltip: "AI Usage Bar — loading…".to_string(),
                 tooltip_hwnd: None,
@@ -482,7 +488,7 @@ mod windows_shell {
     }
 
     /// Wide enough for multi-provider lines with day-countdown reset strings
-    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 UTC`).
+    /// without mid-date wrapping (e.g. `3d 5h left · Tue 13:28 EDT`).
     const TOOLTIP_MAX_WIDTH_PX: i32 = 640;
     /// Gap between the tooltip bottom edge and the pill top edge.
     const TOOLTIP_PILL_GAP_PX: i32 = 8;
@@ -881,8 +887,12 @@ mod windows_shell {
         unsafe {
             let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
         }
-        let current_view =
-            build_tray_view_focused(&state.snapshots, state.focus_provider.as_ref(), chrono::Utc::now());
+        let current_view = build_tray_view_focused_window(
+            &state.snapshots,
+            state.focus_provider.as_ref(),
+            state.focus_window.as_deref(),
+            chrono::Utc::now(),
+        );
         state.tooltip = if state.snapshots.is_empty() {
             "AI Usage Bar — refreshing…".to_string()
         } else {
@@ -922,18 +932,20 @@ mod windows_shell {
 
         match payload.result {
             Ok(snapshots) => {
-                let view = build_tray_view_focused(
+                let view = build_tray_view_focused_window(
                     &snapshots,
                     state.focus_provider.as_ref(),
+                    state.focus_window.as_deref(),
                     chrono::Utc::now(),
                 );
                 state.snapshots = snapshots;
                 state.apply_view(view);
             }
             Err(error) => {
-                let view = build_tray_view_focused(
+                let view = build_tray_view_focused_window(
                     &state.snapshots,
                     state.focus_provider.as_ref(),
+                    state.focus_window.as_deref(),
                     chrono::Utc::now(),
                 );
                 state.tooltip = if state.snapshots.is_empty() {
@@ -961,9 +973,33 @@ mod windows_shell {
             let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
         }
         state.focus_provider = Some(provider);
-        let view = build_tray_view_focused(
+        state.focus_window = None;
+        let view = build_tray_view_focused_window(
             &state.snapshots,
             state.focus_provider.as_ref(),
+            state.focus_window.as_deref(),
+            chrono::Utc::now(),
+        );
+        state.apply_view(view);
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+
+    fn set_focus_window(hwnd: HWND, window: &str) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        state.status = None;
+        unsafe {
+            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+        }
+        state.focus_window = Some(window.to_string());
+        let view = build_tray_view_focused_window(
+            &state.snapshots,
+            state.focus_provider.as_ref(),
+            state.focus_window.as_deref(),
             chrono::Utc::now(),
         );
         state.apply_view(view);
@@ -1010,6 +1046,7 @@ mod windows_shell {
 
             // Keep wide strings alive until TrackPopupMenu returns.
             let mut provider_labels: Vec<Vec<u16>> = Vec::new();
+            let mut window_labels: Vec<Vec<u16>> = Vec::new();
             let switchable = app_state_ref(hwnd)
                 .map(|s| s.switchable_providers.clone())
                 .unwrap_or_default();
@@ -1035,6 +1072,66 @@ mod windows_shell {
                         flags,
                         MENU_SHOW_PROVIDER_BASE + index,
                         PCWSTR(provider_labels[index].as_ptr()),
+                    );
+                }
+            }
+
+            let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
+            let available_windows = if ollama_focused {
+                app_state_ref(hwnd)
+                    .map(|state| {
+                        let mut labels = Vec::new();
+                        for snapshot in &state.snapshots {
+                            if snapshot.provider != Provider::OllamaCloud
+                                || snapshot.unit != "percent"
+                                || snapshot.used.is_none()
+                            {
+                                continue;
+                            }
+                            let Some(label) = snapshot.window_label.as_deref() else {
+                                continue;
+                            };
+                            if !matches!(label, "session" | "weekly")
+                                || labels.iter().any(|existing| existing == label)
+                            {
+                                continue;
+                            }
+                            labels.push(label.to_string());
+                        }
+                        labels.sort_by_key(|label| if label == "session" { 0 } else { 1 });
+                        labels
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !available_windows.is_empty() {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                let selected_window = app_state_ref(hwnd)
+                    .and_then(|state| state.focus_window.clone())
+                    .unwrap_or_else(|| "session".to_string());
+                for (index, window) in available_windows
+                    .iter()
+                    .take(MENU_SHOW_WINDOW_MAX)
+                    .enumerate()
+                {
+                    let checked = selected_window.as_str() == window.as_str();
+                    let flags = if checked {
+                        MF_STRING | MF_CHECKED
+                    } else {
+                        MF_STRING
+                    };
+                    let label = match window.as_str() {
+                        "session" => "5-hour session".to_string(),
+                        "weekly" => "7-day weekly".to_string(),
+                        other => other.to_string(),
+                    };
+                    window_labels.push(to_wide(&label));
+                    let _ = AppendMenuW(
+                        menu,
+                        flags,
+                        MENU_SHOW_WINDOW_BASE + index,
+                        PCWSTR(window_labels[index].as_ptr()),
                     );
                 }
             }
@@ -1080,6 +1177,7 @@ mod windows_shell {
             let _ = DestroyMenu(menu);
             // Keep labels live until here.
             let _ = provider_labels;
+            let _ = window_labels;
 
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
@@ -1094,6 +1192,13 @@ mod windows_shell {
                     let index = id - MENU_SHOW_PROVIDER_BASE;
                     if let Some(provider) = switchable.get(index).cloned() {
                         set_focus_provider(hwnd, provider);
+                    }
+                }
+                id if (MENU_SHOW_WINDOW_BASE..MENU_SHOW_WINDOW_BASE + MENU_SHOW_WINDOW_MAX)
+                    .contains(&id) =>
+                {
+                    if let Some(window) = available_windows.get(id - MENU_SHOW_WINDOW_BASE) {
+                        set_focus_window(hwnd, window);
                     }
                 }
                 _ => {}

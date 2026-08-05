@@ -2,7 +2,7 @@ mod common;
 
 use ai_usage_bar::{
     AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, SnapshotValidationError,
-    Source, UsageSnapshot, WindowKind,
+    Source, UsageSnapshot, WindowKind, parse_usage_response,
 };
 use chrono::{Duration, TimeZone, Utc};
 use common::{instant, metric_snapshot};
@@ -38,6 +38,28 @@ fn contract_snapshot_round_trip_preserves_state_and_timestamps() {
     assert_eq!(decoded.observed_at, observed_at);
     assert_eq!(decoded.resets_at, Some(reset_at));
     assert!(decoded.validate().is_ok());
+}
+
+#[test]
+fn contract_ollama_fixture_normalizes_both_hosted_windows() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/fixtures/ollama_cloud/normal.json");
+    let raw: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("Ollama fixture should be readable"),
+    )
+    .expect("Ollama fixture should be JSON");
+
+    let snapshots = parse_usage_response(&raw, instant(), "ollama-contract", None)
+        .expect("Ollama totals should satisfy the adapter contract");
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].provider, Provider::OllamaCloud);
+    assert_eq!(snapshots[0].window_label.as_deref(), Some("session"));
+    assert_eq!(snapshots[1].window_label.as_deref(), Some("weekly"));
+    assert!(snapshots.iter().all(|snapshot| {
+        snapshot.source == Source::Api
+            && snapshot.metric_kind == MetricKind::Quota
+            && snapshot.validate().is_ok()
+    }));
 }
 
 #[test]

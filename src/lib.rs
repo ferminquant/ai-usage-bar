@@ -2,6 +2,7 @@ pub mod codex;
 pub mod config;
 pub mod daemon;
 pub mod grok;
+pub mod ollama;
 pub mod model;
 pub mod viewmodel;
 
@@ -17,6 +18,10 @@ pub use grok::{
     account_id_from_identity as grok_account_id_from_identity, error_snapshot as grok_error_snapshot,
     fetch_grok_consumer_snapshots, parse_billing_response, GrokAdapterError, GrokConsumerAdapter,
 };
+pub use ollama::{
+    error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_settings_resets,
+    parse_usage_response, OllamaAdapterError, OllamaCloudAdapter, ResetTimes,
+};
 pub use daemon::{
     Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,
     RegistryError, SharedAdapter, SnapshotCache, StoreLiveReject, StoreLiveResult, SystemClock,
@@ -26,6 +31,6 @@ pub use model::{
     SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
 pub use viewmodel::{
-    build_tray_view, build_tray_view_focused, format_reset_label, provider_display_name, MetricCard,
-    ProviderCard, TrayViewModel,
+    build_tray_view, build_tray_view_focused, build_tray_view_focused_window, format_reset_label,
+    provider_display_name, MetricCard, ProviderCard, TrayViewModel,
 };
