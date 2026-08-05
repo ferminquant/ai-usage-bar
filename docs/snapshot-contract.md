@@ -227,12 +227,11 @@ the evidence spikes (#2-#5) and then folded back here.
 - **Ollama Pro/cloud**: authenticated `GET /api/usage` is the primary source
   for separate session and weekly hosted quota fractions. Map them to separate
   `quota` snapshots (`rolling`/`session` and `weekly`/`weekly`) for one
-  provider/account, scaling the reported fraction by 100. An optional
-  authenticated settings fetch may enrich those snapshots with `resets_at`
-  from the page's ISO `data-time` attributes. If that enrichment is unavailable,
-  keep the API totals live and leave `resets_at` absent; never infer it from the
-  documented five-hour/seven-day durations. Session is the default UI focus;
-  model-level request rows are detail-only and deferred. See
+  provider/account, scaling the reported fraction by 100. The response
+  currently omits reset metadata, so leave `resets_at` absent and never infer
+  it from the documented five-hour/seven-day durations. The shell offers a
+  direct settings-page link as a manual fallback. Session is the default UI
+  focus; model-level request rows are detail-only and deferred. See
   [ollama-spike.md](spikes/ollama-spike.md).
 - **Grok consumer**: shared weekly SuperGrok pool across products.
   `metric_kind=quota`, `window_kind=weekly`, `unit="percent"`, store
@@ -328,6 +327,9 @@ This draft is the first step on #1, not the close. #1 closes when:
 
 The Codex revision is complete. The Grok consumer surface is verified in
 [grok-spike.md](spikes/grok-spike.md). Kimi remains planning; hosted Ollama Pro
-totals are verified in [ollama-spike.md](spikes/ollama-spike.md), with reset
-timestamps still absent from the current API response.
+totals are verified in [ollama-spike.md](spikes/ollama-spike.md). The current
+API response still lacks reset timestamps, so the shell provides a direct link
+to the settings page while upstream issue
+[ollama/ollama#12532](https://github.com/ollama/ollama/issues/12532) is monitored
+through local tracking issue [#35](https://github.com/ferminquant/ai-usage-bar/issues/35).
 ~~~

@@ -2,14 +2,14 @@
 
 ## Decision status
 
-**Totals source found; a hybrid adapter is now unblocked for the first slice.**
+**Totals source found; reset metadata remains an upstream dependency.**
 The Ollama Pro account API exposes the two percentages this product needs
 without scraping the settings page. Reset timestamps are still absent from the
-API response, so the adapter must not invent them. The implementation plan is
-to use the API as the primary totals source and make an authenticated settings
-fetch an optional reset-time enrichment. This spike records the live sources,
-their authentication boundaries, and the fallback behavior; it does not add
-runtime code or model-specific detail.
+API response, so the adapter must not invent them. The runtime uses the API as
+the primary totals source and the shell offers a link to the settings page in
+the user's normal browser. This spike records the live sources and the
+authentication boundary; it does not add model-specific detail or a browser
+scraper.
 
 ## Product scope
 
@@ -19,12 +19,12 @@ The first Ollama slice is intentionally narrow:
 - session usage is the default compact window because it is the practical
   short-term limiter;
 - weekly usage is selectable from the detail/context-menu path;
-- provider plan/authentication state, reset timestamps, stale data, timeout,
-  malformed response, and unavailable states;
+- provider plan/authentication state, reset metadata when Ollama exposes it,
+  stale data, timeout, malformed response, and unavailable states;
 - model-specific request usage is deferred until a separate decision and issue.
 
 The provider identifier remains `ollama_cloud` in the normalized model, with
-the user-facing name Ollama Pro/cloud.
+the user-facing name Ollama.
 
 ## Observed account surface
 
@@ -91,25 +91,19 @@ headers.
 The [documented API](https://docs.ollama.com/api) covers model operations and
 request responses. Its [Usage page](https://docs.ollama.com/api/usage) documents
 per-request timing/token metrics, not this account-level `/api/usage` response.
-The upstream requests [#12532](https://github.com/ollama/ollama/issues/12532)
-and [#15663](https://github.com/ollama/ollama/issues/15663) are historical
-evidence that this surface was missing or undiscoverable; the live endpoint
-now exists even though the CLI and public API documentation have not caught up.
-The settings page remains useful for validating semantics and is the only
-observed source for exact reset timestamps. A current independent implementation
-extracts ISO timestamps from `data-time` attributes on the reset elements; see
-[its parser](https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Providers/Ollama/OllamaUsageParser.swift)
-and [provider notes](https://github.com/steipete/CodexBar/blob/main/docs/ollama.md).
-That is evidence of a workable HTML contract, not an Ollama-supported API
-guarantee. The implementation should make one authenticated page request and
-parse the machine-readable attribute, not crawl the site or parse the rounded
-countdown text.
+Ollama issue [#12532](https://github.com/ollama/ollama/issues/12532) remains the
+upstream tracking point for exposing account usage in a supported, digestible
+API shape; local issue [#35](https://github.com/ferminquant/ai-usage-bar/issues/35)
+tracks when reset metadata becomes available. The live endpoint now provides
+totals, but still omits reset timestamps and reset headers. The settings page is
+therefore a useful manual fallback only; the application does not scrape it or
+copy browser credentials.
 
 ## Candidate source decision
 
 | Source | Provides totals/reset | Auth boundary | Decision |
 | --- | --- | --- | --- |
-| Account settings page | Yes, visibly shows session and weekly totals plus countdowns; current HTML carries reset timestamps in `data-time` attributes | Browser session/cookies; HTML can change and requires a parser | Use only as optional reset-time enrichment; preserve totals when it is unavailable |
+| Account settings page | Yes, visibly shows session and weekly totals plus countdowns | User's normal browser session; no app-side cookie or HTML access | Open from the Ollama context menu as a manual fallback |
 | `ollama launch` CLI | No usage command | CLI integration setup only | Reject as a usage source; use the API directly |
 | `GET https://ollama.com/api/usage` | Yes, session and weekly percentages; no reset timestamps | Ollama self-signed key from the signed-in CLI | Primary totals source; treat the undocumented response as a guarded contract |
 | Model request responses | Per-request token counters | Request authentication | Insufficient for account windows and reset times |
@@ -126,11 +120,9 @@ The adapter should emit two `UsageSnapshot` values for the same hosted account:
 For each snapshot, the API fraction maps to `used = fraction * 100` with
 `limit=100` and `remaining = 100 - used`. The API's `usage` field is the
 provider-reported utilization, so this conversion is exact for the current
-response contract. An optional authenticated settings fetch may fill
-`resets_at` from the page's ISO `data-time` attribute. If that fetch is
-unavailable or the HTML contract changes, the adapter keeps the live API totals
-and leaves `resets_at` absent. It must not infer a session reset from the
-5-hour description or a weekly reset from a guessed calendar boundary.
+response contract. `resets_at` remains absent until Ollama exposes a supported
+machine-readable reset field. The adapter must not infer a session reset from
+the 5-hour description or a weekly reset from a guessed calendar boundary.
 
 The runtime adapter and shell/view-model implementation make `session` the
 default focused window and expose `weekly` through the context menu without
@@ -138,28 +130,21 @@ aggregating the two windows.
 
 ## Adapter admission gate
 
-Issue #9 can proceed with totals and optional reset enrichment once all of the
-following are covered:
+Issue #9 is complete for totals. Reset enrichment remains deferred until all of
+the following are true:
 
 1. the live `GET /api/usage` response is treated as an explicitly reviewed,
    non-scraping account source, even though it is not in the public API docs;
 2. the self-signed Ollama key boundary is documented and the key never enters
    logs or fixtures;
-3. the settings reset parser is limited to the authenticated settings page,
-   extracts `data-time` timestamps rather than display text, and never logs or
-   stores the session cookie;
+3. Ollama documents a stable reset timestamp or reset-header contract;
 4. redacted fixtures or deterministic mocks cover both API windows and the
-   reset-enrichment states;
+   reset metadata;
 5. mappings cover plan/auth state, timeout, stale cache, malformed data, and
    signed-out/unavailable results;
 6. missing reset timestamps are represented honestly, rather than inferred;
 7. model-specific request detail stays out of the initial UI.
 
-The totals and reset-enrichment design are now implemented in issue #9. The
-spike remains the source and contract record.
-
-The runtime bridge accepts the browser cookie explicitly through the local
-`OLLAMA_SESSION_COOKIE` environment variable. It makes one settings-page
-request when present, never persists or logs the cookie, and treats missing or
-expired cookies as a normal totals-only fallback. Automatic browser-cookie
-discovery can be added later without changing the API-primary contract.
+The totals implementation is complete. Until the upstream contract changes,
+the shell's **Open Ollama usage page** action is the supported reset-time
+workaround; no extension, cookie import, or HTML parser is part of the product.

@@ -19,8 +19,8 @@ pub use grok::{
     fetch_grok_consumer_snapshots, parse_billing_response, GrokAdapterError, GrokConsumerAdapter,
 };
 pub use ollama::{
-    error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_settings_resets,
-    parse_usage_response, OllamaAdapterError, OllamaCloudAdapter, ResetTimes,
+    error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_usage_response,
+    OllamaAdapterError, OllamaCloudAdapter,
 };
 pub use daemon::{
     Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,
