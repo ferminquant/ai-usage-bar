@@ -338,7 +338,7 @@ fn load_wsl_auth() -> Option<OllamaAuth> {
 
 fn wsl_auth_fallback_allowed() -> bool {
     cfg!(windows)
-        && env_value(&["OLLAMA_ID", "OLLAMA_HOME"]).is_none()
+        && env_value(&["OLLAMA_API_KEY", "OLLAMA_KEY", "OLLAMA_ID", "OLLAMA_HOME"]).is_none()
 }
 
 /// Return the base64 payload Ollama's official client uses in its

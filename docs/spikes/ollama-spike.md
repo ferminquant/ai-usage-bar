@@ -105,7 +105,8 @@ though the local daemon reports the signed-in account. The adapter first uses
 the native Windows key and, after an upstream authentication rejection, retries
 with the default WSL key through `wsl.exe`; it does not sign out, copy the key,
 or interrupt the daemon's active sessions. An explicit `OLLAMA_ID` or
-`OLLAMA_HOME` remains authoritative and disables that automatic fallback.
+`OLLAMA_HOME` (or API key environment variable) remains authoritative and
+disables that automatic fallback.
 
 ## Candidate source decision
 
