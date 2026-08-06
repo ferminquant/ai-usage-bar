@@ -11,7 +11,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use signature::Signer;
-use ssh_key::PrivateKey;
+use ssh_key::{PrivateKey, PublicKey};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -96,7 +96,7 @@ enum OllamaAuth {
     },
     SignedKey {
         private_key: Box<PrivateKey>,
-        public_key_blob: Vec<u8>,
+        public_key_authorization: String,
         account_id: String,
     },
 }
@@ -113,7 +113,7 @@ impl OllamaAuth {
             Self::ApiKey { value, .. } => Ok(format!("Bearer {value}")),
             Self::SignedKey {
                 private_key,
-                public_key_blob,
+                public_key_authorization,
                 ..
             } => {
                 let challenge = format!("GET,/api/usage?ts={timestamp}");
@@ -125,7 +125,7 @@ impl OllamaAuth {
                     .map_err(|_| OllamaAdapterError::AuthExpired)?;
                 Ok(format!(
                     "{}:{}",
-                    BASE64.encode(public_key_blob),
+                    public_key_authorization,
                     BASE64.encode(signature.as_bytes())
                 ))
             }
@@ -277,16 +277,32 @@ fn load_auth() -> Result<OllamaAuth, OllamaAdapterError> {
     if private_key.is_encrypted() || !private_key.key_data().is_ed25519() {
         return Err(OllamaAdapterError::AuthExpired);
     }
-    let public_key_blob = private_key
-        .public_key()
+    let public_key = private_key.public_key();
+    let public_key_blob = public_key
         .to_bytes()
         .map_err(|_| OllamaAdapterError::AuthExpired)?;
+    let public_key_authorization = public_key_authorization(&public_key)?;
     let account_id = format!("ollama-{:016x}", simple_hash(&public_key_blob));
     Ok(OllamaAuth::SignedKey {
         private_key: Box::new(private_key),
-        public_key_blob,
+        public_key_authorization,
         account_id,
     })
+}
+
+/// Return the base64 payload Ollama's official client uses in its
+/// `<public-key>:<signature>` authorization header. The payload must include
+/// both the algorithm name and the key data; `PublicKey::to_bytes()` contains
+/// only the latter.
+fn public_key_authorization(public_key: &PublicKey) -> Result<String, OllamaAdapterError> {
+    public_key
+        .to_openssh()
+        .map_err(|_| OllamaAdapterError::AuthExpired)?
+        .split_whitespace()
+        .nth(1)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(OllamaAdapterError::AuthExpired)
 }
 
 fn parse_private_key(raw: &[u8]) -> Result<PrivateKey, OllamaAdapterError> {
@@ -471,5 +487,23 @@ mod tests {
         };
         assert!(auth.account_id().starts_with("ollama-api-"));
         assert!(!auth.account_id().contains("secret-value"));
+    }
+
+    #[test]
+    fn signed_authorization_uses_the_full_ssh_public_key_payload() {
+        let public_key = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti foo@bar.com",
+        )
+        .unwrap();
+        let encoded = public_key_authorization(&public_key).unwrap();
+        let decoded = BASE64.decode(encoded).unwrap();
+
+        assert_eq!(&decoded[..4], 11u32.to_be_bytes());
+        assert_eq!(&decoded[4..15], b"ssh-ed25519");
+        assert_eq!(
+            &decoded[15..19],
+            32u32.to_be_bytes(),
+            "the key data must follow the algorithm name"
+        );
     }
 }
