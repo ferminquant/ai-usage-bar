@@ -10,8 +10,8 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_tray_view_focused_window, load_registry, provider_display_name, Provider,
-        RefreshPolicy, RefreshService, UsageSnapshot,
+        build_tray_view_focused_window, load_registry, provider_display_name, window_display_name,
+        Provider, RefreshPolicy, RefreshService, UsageSnapshot,
     };
     use std::ffi::c_void;
     use std::ptr::null_mut;
@@ -53,6 +53,7 @@ mod windows_shell {
     const MENU_COPY_DETAILS: usize = 1002;
     const MENU_QUIT: usize = 1003;
     const MENU_OPEN_OLLAMA_USAGE: usize = 1004;
+    const MENU_OPEN_KIMI_CONSOLE: usize = 1005;
     /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
     const MENU_SHOW_PROVIDER_BASE: usize = 1100;
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
@@ -64,6 +65,7 @@ mod windows_shell {
 
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
     const OLLAMA_USAGE_URL: &str = "https://ollama.com/settings";
+    const KIMI_CONSOLE_URL: &str = "https://www.kimi.com/code/console";
 
     const COLOR_BACKGROUND: COLORREF = COLORREF(0x002a2a2a);
     const COLOR_OUTER: COLORREF = COLORREF(0x00141414);
@@ -84,8 +86,9 @@ mod windows_shell {
         pill_status: String,
         /// Which provider drives the compact pill (None = auto first).
         focus_provider: Option<Provider>,
-        /// Optional quota window for the focused provider (Ollama supports
-        /// `session` and `weekly`; other providers use their default window).
+        /// Optional quota window for the focused provider. Ollama exposes
+        /// `session`/`weekly`; Kimi exposes `5-hour`/`weekly` and an optional
+        /// `total` when the managed endpoint reports it.
         focus_window: Option<String>,
         switchable_providers: Vec<Provider>,
         tooltip: String,
@@ -1054,6 +1057,51 @@ mod windows_shell {
         }
     }
 
+    fn open_kimi_console(hwnd: HWND) {
+        let url = to_wide(KIMI_CONSOLE_URL);
+        let launched = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                w!("open"),
+                PCWSTR(url.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if launched.0 as usize <= 32 {
+            if let Some(state) = app_state(hwnd) {
+                set_status(hwnd, state, "Could not open Kimi Console");
+            }
+        }
+    }
+
+    fn canonical_window_key(provider: &Provider, label: &str) -> Option<&'static str> {
+        match provider {
+            Provider::OllamaCloud => match label {
+                "session" => Some("session"),
+                "weekly" => Some("weekly"),
+                _ => None,
+            },
+            Provider::Kimi => match label {
+                "5-hour" => Some("5-hour"),
+                "weekly" | "primary" => Some("weekly"),
+                "total" | "monthly" => Some("total"),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn window_sort_key(window: &str) -> u8 {
+        match window {
+            "session" | "5-hour" => 0,
+            "weekly" => 1,
+            "total" => 2,
+            _ => 3,
+        }
+    }
+
     fn show_context_menu(hwnd: HWND) {
         // Dismiss hover tip first so the menu is not stacked under/over it.
         if let Some(state) = app_state(hwnd) {
@@ -1098,13 +1146,13 @@ mod windows_shell {
                 }
             }
 
-            let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
-            let available_windows = if ollama_focused {
-                app_state_ref(hwnd)
-                    .map(|state| {
+            let available_windows = focused
+                .as_ref()
+                .and_then(|provider| {
+                    app_state_ref(hwnd).map(|state| {
                         let mut labels = Vec::new();
                         for snapshot in &state.snapshots {
-                            if snapshot.provider != Provider::OllamaCloud
+                            if &snapshot.provider != provider
                                 || snapshot.unit != "percent"
                                 || snapshot.used.is_none()
                             {
@@ -1113,25 +1161,36 @@ mod windows_shell {
                             let Some(label) = snapshot.window_label.as_deref() else {
                                 continue;
                             };
-                            if !matches!(label, "session" | "weekly")
-                                || labels.iter().any(|existing| existing == label)
-                            {
+                            let Some(canonical) = canonical_window_key(provider, label) else {
                                 continue;
+                            };
+                            if !labels.iter().any(|existing| existing == canonical) {
+                                labels.push(canonical.to_string());
                             }
-                            labels.push(label.to_string());
                         }
-                        labels.sort_by_key(|label| if label == "session" { 0 } else { 1 });
+                        labels.sort_by_key(|label| window_sort_key(label));
                         labels
                     })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+                })
+                .unwrap_or_default();
             if !available_windows.is_empty() {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
-                let selected_window = app_state_ref(hwnd)
-                    .and_then(|state| state.focus_window.clone())
-                    .unwrap_or_else(|| "session".to_string());
+                let selected_window = focused
+                    .as_ref()
+                    .and_then(|provider| {
+                        app_state_ref(hwnd).and_then(|state| {
+                            state.focus_window.as_deref().and_then(|window| {
+                                canonical_window_key(provider, window).map(str::to_string)
+                            })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        if focused.as_ref() == Some(&Provider::Kimi) {
+                            "5-hour".to_string()
+                        } else {
+                            "session".to_string()
+                        }
+                    });
                 for (index, window) in available_windows
                     .iter()
                     .take(MENU_SHOW_WINDOW_MAX)
@@ -1143,11 +1202,10 @@ mod windows_shell {
                     } else {
                         MF_STRING
                     };
-                    let label = match window.as_str() {
-                        "session" => "5-hour session".to_string(),
-                        "weekly" => "7-day weekly".to_string(),
-                        other => other.to_string(),
-                    };
+                    let label = focused
+                        .as_ref()
+                        .map(|provider| window_display_name(provider, window))
+                        .unwrap_or_else(|| window.to_string());
                     window_labels.push(to_wide(&label));
                     let _ = AppendMenuW(
                         menu,
@@ -1158,14 +1216,26 @@ mod windows_shell {
                 }
             }
 
-            if ollama_focused {
+            let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
+            let kimi_focused = focused.as_ref() == Some(&Provider::Kimi);
+            if ollama_focused || kimi_focused {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
-                let _ = AppendMenuW(
-                    menu,
-                    MF_STRING,
-                    MENU_OPEN_OLLAMA_USAGE,
-                    w!("Open Ollama usage page"),
-                );
+                if ollama_focused {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING,
+                        MENU_OPEN_OLLAMA_USAGE,
+                        w!("Open Ollama usage page"),
+                    );
+                }
+                if kimi_focused {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING,
+                        MENU_OPEN_KIMI_CONSOLE,
+                        w!("Open Kimi Console"),
+                    );
+                }
             }
 
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
@@ -1214,6 +1284,7 @@ mod windows_shell {
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
                 MENU_OPEN_OLLAMA_USAGE => open_ollama_usage_page(hwnd),
+                MENU_OPEN_KIMI_CONSOLE => open_kimi_console(hwnd),
                 MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);

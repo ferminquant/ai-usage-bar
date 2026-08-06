@@ -139,5 +139,5 @@ fn scenario_ollama_session_is_default_and_weekly_is_selectable() {
         now,
     );
     assert_eq!(weekly_view.used_percent, Some(18.4));
-    assert!(weekly_view.tooltip.contains("weekly"));
+    assert!(weekly_view.tooltip.contains("Weekly"));
 }
