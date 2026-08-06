@@ -1,0 +1,15 @@
+{
+  "_description": "Synthetic auth failure for a missing, expired, or revoked OpenCode Go API key. No credential value is included.",
+  "_source": "GET https://opencode.ai/zen/go/v1/usage",
+  "_capturedAt": "2026-08-06T00:00:00Z",
+  "_httpStatus": 401,
+  "type": "error",
+  "error": {
+    "type": "AuthError",
+    "message": "Unauthorized"
+  },
+  "_expected": {
+    "no_local_key": "not_configured",
+    "key_rejected": "auth_expired"
+  }
+}

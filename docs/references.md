@@ -37,6 +37,16 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
   evidence only)
 - [Ollama usage spike](spikes/ollama-spike.md) — session/weekly semantics,
   authenticated `/api/usage` evidence, and the deferred reset-metadata plan.
+- [OpenCode Go documentation](https://opencode.ai/docs/go/) — plan windows,
+  dollar-weighted semantics, Go gateway endpoints, and the console link.
+- [OpenCode provider documentation](https://opencode.ai/docs/providers) —
+  `/connect` flow and local `auth.json` credential boundary.
+- [OpenCode CLI documentation](https://dev.opencode.ai/docs/cli/) — provider
+  auth commands and local session `stats` (not subscription quota).
+- [OpenCode Console usage guide](https://console.opencode.ai/guides/usage) —
+  service-account-only historical CSV export; not Go remaining allowance.
+- [OpenCode Go usage spike](spikes/opencode-go-spike.md) — issue #33 evidence,
+  upstream API tracking, admission gate, and redacted deterministic fixtures.
 - [Grok FAQ](https://docs.x.ai/grok/faq) (weekly SuperGrok pool semantics)
 - [Grok overview](https://docs.x.ai/grok/overview)
 - [Grok Build CLI](https://x.ai/news/grok-build-cli) / [xai-org/grok-build](https://github.com/xai-org/grok-build) (open-source client; billing path)

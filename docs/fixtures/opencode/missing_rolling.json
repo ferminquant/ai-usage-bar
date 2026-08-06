@@ -1,0 +1,16 @@
+{
+  "_description": "Deterministic mock with weekly and monthly windows present but rolling usage absent. The five-hour window is unknown, not zero.",
+  "_source": "https://github.com/anomalyco/opencode/pull/16513",
+  "_status": "unreleased",
+  "_capturedAt": "2026-08-06T00:00:00Z",
+  "weeklyUsage": {
+    "status": "ok",
+    "resetInSec": 432000,
+    "usagePercent": 24
+  },
+  "monthlyUsage": {
+    "status": "ok",
+    "resetInSec": 1900800,
+    "usagePercent": 11
+  }
+}

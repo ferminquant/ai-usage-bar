@@ -1,0 +1,22 @@
+{
+  "_description": "Synthetic schema-drift response. Usage fields have invalid types and no valid window remains.",
+  "_source": "GET https://opencode.ai/zen/go/v1/usage",
+  "_status": "unreleased",
+  "_capturedAt": "2026-08-06T00:00:00Z",
+  "useBalance": "sometimes",
+  "rollingUsage": {
+    "status": "ok",
+    "resetInSec": "later",
+    "usagePercent": null
+  },
+  "weeklyUsage": [],
+  "monthlyUsage": {
+    "status": 200,
+    "resetInSec": -1,
+    "usagePercent": "unknown"
+  },
+  "_expected": {
+    "error_code": "schema_drift",
+    "freshness": "unavailable"
+  }
+}
