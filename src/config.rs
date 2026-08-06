@@ -6,7 +6,7 @@
 
 use crate::{
     CodexAdapter, GrokConsumerAdapter, KimiAdapter, OllamaCloudAdapter, Provider,
-    ProviderRegistry, RegistryError,
+    ProviderRegistry, RegistryError, session_available,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -177,7 +177,7 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
     registry.register(OllamaCloudAdapter)?;
     // Kimi reuses the CLI OAuth session: with a session it is a live adapter;
     // without one it registers as not configured (never zero usage).
-    if KimiAdapter::session_available() {
+    if session_available() {
         registry.register(KimiAdapter)?;
     } else {
         registry.register_not_configured(Provider::Kimi)?;

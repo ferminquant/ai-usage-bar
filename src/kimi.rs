@@ -18,7 +18,7 @@
 //! The adapter itself never initiates the device-code flow.
 
 use crate::model::*;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
