@@ -533,8 +533,18 @@ fn parse_limit_row(
     account_id: &str,
 ) -> Option<UsageSnapshot> {
     let detail = row.detail.as_ref()?;
-    let used = parse_decimal(detail.used.as_ref())?;
     let limit = parse_decimal(detail.limit.as_ref())?;
+    // Kimi omits `used` for a freshly reset 5-hour window (the live response
+    // contains `remaining`, `limit`, and `resetTime` only). Conversely, an
+    // exhausted window may omit `remaining`. Keep the window visible in both
+    // cases by deriving whichever side is absent instead of dropping the row.
+    let remaining = parse_decimal(detail.remaining.as_ref());
+    let used = match (parse_decimal(detail.used.as_ref()), remaining) {
+        (Some(used), _) => used,
+        (None, Some(remaining)) => limit - remaining,
+        (None, None) => return None,
+    };
+    let remaining = remaining.or(Some(limit - used));
     let window_kind = window_kind_from_window(row.window.as_ref());
     let label = row.name.clone().or_else(|| match window_kind {
         // The current Kimi Code response leaves the 300-minute row unnamed.
@@ -550,7 +560,7 @@ fn parse_limit_row(
     percent_window_snapshot(
         used,
         limit,
-        parse_decimal(detail.remaining.as_ref()),
+        remaining,
         parse_iso8601(detail.reset_time.as_ref()),
         label,
         window_kind,
@@ -940,6 +950,56 @@ mod tests {
         let snapshots = parse_usages_response(&raw, fixture_time(), "kimi-test").unwrap();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].window_label.as_deref(), Some(WEEKLY_LABEL));
+    }
+
+    #[test]
+    fn missing_limit_row_used_is_derived_from_remaining() {
+        // The live endpoint omits `used` when a rolling window has just
+        // reset, while retaining the full remaining value and reset time.
+        let raw = serde_json::json!({
+            "usage": { "used": "33", "limit": "100", "remaining": "67" },
+            "limits": [{
+                "window": { "duration": 300, "timeUnit": "TIME_UNIT_MINUTE" },
+                "detail": {
+                    "limit": "100",
+                    "remaining": "100",
+                    "resetTime": "2026-08-06T23:11:59.695717Z"
+                }
+            }]
+        });
+        let snapshots = parse_usages_response(&raw, fixture_time(), "kimi-test").unwrap();
+        let five_hour = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window_label.as_deref() == Some(FIVE_HOUR_LABEL))
+            .expect("reset 5-hour window should remain visible");
+        assert_eq!(five_hour.used, Some(0.0));
+        assert_eq!(five_hour.remaining, Some(100.0));
+        assert!(five_hour.resets_at.is_some());
+    }
+
+    #[test]
+    fn missing_limit_row_remaining_is_derived_from_used() {
+        // Preserve the exhausted 5-hour window when Kimi omits `remaining`
+        // but reports the used and limit values.
+        let raw = serde_json::json!({
+            "usage": { "used": "33", "limit": "100", "remaining": "67" },
+            "limits": [{
+                "window": { "duration": 300, "timeUnit": "TIME_UNIT_MINUTE" },
+                "detail": {
+                    "used": "100",
+                    "limit": "100",
+                    "resetTime": "2026-08-06T23:11:59.695717Z"
+                }
+            }]
+        });
+        let snapshots = parse_usages_response(&raw, fixture_time(), "kimi-test").unwrap();
+        let five_hour = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window_label.as_deref() == Some(FIVE_HOUR_LABEL))
+            .expect("exhausted 5-hour window should remain visible");
+        assert_eq!(five_hour.used, Some(100.0));
+        assert_eq!(five_hour.remaining, Some(0.0));
+        assert!(five_hour.resets_at.is_some());
     }
 
     #[test]
