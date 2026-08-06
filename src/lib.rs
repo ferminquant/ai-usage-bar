@@ -37,5 +37,5 @@ pub use model::{
 };
 pub use viewmodel::{
     build_tray_view, build_tray_view_focused, build_tray_view_focused_window, format_reset_label,
-    provider_display_name, MetricCard, ProviderCard, TrayViewModel,
+    provider_display_name, window_display_name, MetricCard, ProviderCard, TrayViewModel,
 };

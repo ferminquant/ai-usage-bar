@@ -36,6 +36,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 const FIXED_POINT_CENTS: f64 = 1_000_000.0;
 const WEEKLY_LABEL: &str = "primary";
+const FIVE_HOUR_LABEL: &str = "5-hour";
+const TOTAL_LABEL: &str = "total";
 const CREDITS_LABEL: &str = "extra usage";
 
 #[derive(Debug, Clone, Default)]
@@ -311,6 +313,11 @@ fn map_ureq_error(error: ureq::Error) -> KimiAdapterError {
 struct UsagesResponse {
     #[serde(default)]
     usage: Option<UsageSummary>,
+    /// Some account responses expose the shared monthly membership pool as a
+    /// separate object. It is absent (or `{}`) for accounts that do not
+    /// receive that field, so parsing it must remain optional.
+    #[serde(default)]
+    total_quota: Option<UsageSummary>,
     #[serde(default)]
     limits: Option<Vec<LimitRow>>,
     #[serde(default)]
@@ -528,13 +535,52 @@ fn parse_limit_row(
     let detail = row.detail.as_ref()?;
     let used = parse_decimal(detail.used.as_ref())?;
     let limit = parse_decimal(detail.limit.as_ref())?;
+    let window_kind = window_kind_from_window(row.window.as_ref());
+    let label = row.name.clone().or_else(|| match window_kind {
+        // The current Kimi Code response leaves the 300-minute row unnamed.
+        // Give that evidenced window a stable product label, but do not call
+        // an arbitrary future rolling duration "5-hour".
+        WindowKind::Rolling if is_five_hour_window(row.window.as_ref()) => {
+            Some(FIVE_HOUR_LABEL.to_string())
+        }
+        WindowKind::Monthly => Some(TOTAL_LABEL.to_string()),
+        WindowKind::Weekly => Some("weekly".to_string()),
+        _ => None,
+    });
     percent_window_snapshot(
         used,
         limit,
         parse_decimal(detail.remaining.as_ref()),
         parse_iso8601(detail.reset_time.as_ref()),
-        row.name.clone(),
-        window_kind_from_window(row.window.as_ref()),
+        label,
+        window_kind,
+        observed_at,
+        account_id,
+    )
+}
+
+fn is_five_hour_window(window: Option<&LimitWindow>) -> bool {
+    let Some(window) = window else {
+        return false;
+    };
+    parse_i64(window.duration.as_ref()) == Some(300)
+        && window.time_unit.as_deref() == Some("TIME_UNIT_MINUTE")
+}
+
+fn parse_total_quota(
+    total_quota: &UsageSummary,
+    observed_at: DateTime<Utc>,
+    account_id: &str,
+) -> Option<UsageSnapshot> {
+    let used = parse_decimal(total_quota.used.as_ref())?;
+    let limit = parse_decimal(total_quota.limit.as_ref())?;
+    percent_window_snapshot(
+        used,
+        limit,
+        parse_decimal(total_quota.remaining.as_ref()),
+        parse_iso8601(total_quota.reset_time.as_ref()),
+        Some(TOTAL_LABEL.to_string()),
+        WindowKind::Monthly,
         observed_at,
         account_id,
     )
@@ -584,11 +630,12 @@ fn parse_wallet(
 
 /// Parse a `/usages` JSON body into provider-neutral snapshots.
 ///
-/// Emits the weekly plan summary as the primary quota, one quota snapshot
-/// per parseable `limits[]` row, and the Extra Usage wallet as a credits
-/// snapshot when present. Rows with non-numeric values are skipped; a
-/// response with no parseable row is schema drift. Error-shaped bodies map
-/// to `auth_expired` / `timeout` / `schema_drift`.
+/// Emits one quota snapshot per parseable `limits[]` row, the weekly plan
+/// summary, and an optional shared monthly (`totalQuota`) snapshot. The Extra
+/// Usage wallet remains a separate credits snapshot when present. Rows with
+/// non-numeric values are skipped; a response with no parseable row is schema
+/// drift. Error-shaped bodies map to `auth_expired` / `timeout` /
+/// `schema_drift`.
 pub fn parse_usages_response(
     raw: &serde_json::Value,
     observed_at: DateTime<Utc>,
@@ -596,6 +643,7 @@ pub fn parse_usages_response(
 ) -> Result<Vec<UsageSnapshot>, KimiAdapterError> {
     let error_field = raw.get("error").or_else(|| raw.get("_error"));
     let has_usage_shape = raw.get("usage").is_some()
+        || raw.get("totalQuota").is_some()
         || raw.get("limits").is_some()
         || raw.get("boosterWallet").is_some();
     if let Some(error) = error_field {
@@ -618,16 +666,21 @@ pub fn parse_usages_response(
         .map_err(|error| KimiAdapterError::SchemaDrift(error.to_string()))?;
 
     let mut snapshots = Vec::new();
-    if let Some(usage) = &response.usage {
-        if let Some(snapshot) = parse_usage_summary(usage, observed_at, account_id) {
-            snapshots.push(snapshot);
-        }
-    }
     if let Some(rows) = &response.limits {
         for row in rows {
             if let Some(snapshot) = parse_limit_row(row, observed_at, account_id) {
                 snapshots.push(snapshot);
             }
+        }
+    }
+    if let Some(total_quota) = &response.total_quota {
+        if let Some(snapshot) = parse_total_quota(total_quota, observed_at, account_id) {
+            snapshots.push(snapshot);
+        }
+    }
+    if let Some(usage) = &response.usage {
+        if let Some(snapshot) = parse_usage_summary(usage, observed_at, account_id) {
+            snapshots.push(snapshot);
         }
     }
     if let Some(wallet) = &response.booster_wallet {
@@ -825,13 +878,12 @@ mod tests {
         assert_eq!(highspeed.used, Some(0.0));
         assert_eq!(highspeed.window_kind, WindowKind::Rolling);
 
-        let unnamed = snapshots
+        let five_hour = snapshots
             .iter()
-            .filter(|snapshot| snapshot.window_label.is_none())
-            .collect::<Vec<_>>();
-        assert_eq!(unnamed.len(), 1);
-        assert_eq!(unnamed[0].used, Some(1.0));
-        assert_eq!(unnamed[0].window_kind, WindowKind::Rolling);
+            .find(|snapshot| snapshot.window_label.as_deref() == Some(FIVE_HOUR_LABEL))
+            .unwrap();
+        assert_eq!(five_hour.used, Some(1.0));
+        assert_eq!(five_hour.window_kind, WindowKind::Rolling);
     }
 
     #[test]
@@ -894,6 +946,28 @@ mod tests {
         assert_eq!(weekly.used, Some(4.0));
         assert_eq!(weekly.remaining, Some(96.0));
         assert_eq!(weekly.limit, Some(100.0));
+    }
+
+    #[test]
+    fn parse_optional_total_quota_when_backend_reports_it() {
+        let raw = serde_json::json!({
+            "usage": { "used": "33", "limit": "100", "remaining": "67" },
+            "totalQuota": {
+                "used": "12",
+                "limit": "100",
+                "remaining": "88",
+                "resetTime": "2026-09-01T00:00:00Z"
+            }
+        });
+        let snapshots = parse_usages_response(&raw, fixture_time(), "kimi-test").unwrap();
+        let total = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window_label.as_deref() == Some(TOTAL_LABEL))
+            .expect("optional total quota should be preserved");
+        assert_eq!(total.window_kind, WindowKind::Monthly);
+        assert_eq!(total.used, Some(12.0));
+        assert_eq!(total.remaining, Some(88.0));
+        assert!(total.resets_at.is_some());
     }
 
     #[test]

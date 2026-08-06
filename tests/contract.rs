@@ -130,6 +130,29 @@ fn contract_kimi_fixture_failures_map_to_redacted_codes() {
 }
 
 #[test]
+fn contract_kimi_optional_total_quota_stays_a_monthly_window() {
+    let raw = serde_json::json!({
+        "usage": { "used": "33", "limit": "100", "remaining": "67" },
+        "totalQuota": {
+            "used": "12",
+            "limit": "100",
+            "remaining": "88",
+            "resetTime": "2026-09-01T00:00:00Z"
+        }
+    });
+    let snapshots = parse_usages_response(&raw, instant(), "kimi-contract")
+        .expect("optional Kimi total should satisfy the adapter contract");
+    let total = snapshots
+        .iter()
+        .find(|snapshot| snapshot.window_label.as_deref() == Some("total"))
+        .expect("monthly total window present");
+    assert_eq!(total.window_kind, WindowKind::Monthly);
+    assert_eq!(total.metric_kind, MetricKind::Quota);
+    assert_eq!(total.used, Some(12.0));
+    assert!(total.validate().is_ok());
+}
+
+#[test]
 fn contract_distinguishes_missing_zero_and_unlimited_values() {
     let missing = metric_snapshot(
         Provider::Codex,

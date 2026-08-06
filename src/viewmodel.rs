@@ -87,7 +87,24 @@ impl ProviderCard {
             });
             card.metrics.push(MetricCard::from_snapshot(s));
         }
+        for card in providers.values_mut() {
+            let provider = card.provider.clone();
+            card.metrics
+                .sort_by_key(|metric| metric_sort_priority(&provider, metric));
+        }
         providers.into_values().collect()
+    }
+}
+
+fn metric_sort_priority(provider: &str, metric: &MetricCard) -> u8 {
+    let label = metric.label.to_ascii_lowercase();
+    match provider {
+        "Ollama" if label == "session" => 0,
+        "Kimi" if label == "5-hour" => 0,
+        "Kimi" if matches!(label.as_str(), "total" | "monthly") => 1,
+        _ if matches!(label.as_str(), "primary" | "weekly") => 2,
+        _ if metric.metric_kind == MetricKind::Credits => 10,
+        _ => 5,
     }
 }
 
@@ -119,28 +136,54 @@ fn tooltip_metric_value(metric: &MetricCard) -> String {
     format!("{value}{unit_display}")
 }
 
-fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
-    if provider == "Ollama" && metric.label == "session" {
-        return "5-hour session".to_string();
-    }
+fn tooltip_metric_name(_provider: &str, metric: &MetricCard) -> String {
+    let label = metric.label.trim();
+    let window_kind = metric.window_kind.as_str();
 
-    if metric.label == "primary" {
-        return match metric.window_kind.as_str() {
-            "weekly" => "Weekly".to_string(),
-            "rolling" => "Rolling".to_string(),
-            "daily" => "Daily".to_string(),
-            "monthly" => "Monthly".to_string(),
-            "session" => "Session".to_string(),
-            other => other.to_string(),
-        };
+    // Keep provider-specific aliases out of the UI. In particular, Ollama's
+    // `session` and Kimi's unnamed rolling row both mean the same 5-hour
+    // window, while `primary` is the provider-neutral weekly summary used by
+    // Codex/Grok/Kimi.
+    if label.eq_ignore_ascii_case("session") || label.eq_ignore_ascii_case("5-hour") {
+        return "5-hour".to_string();
+    }
+    if label.eq_ignore_ascii_case("total") {
+        return "Total".to_string();
+    }
+    if label.eq_ignore_ascii_case("weekly") || label.eq_ignore_ascii_case("primary") {
+        return "Weekly".to_string();
+    }
+    if label.eq_ignore_ascii_case("monthly") {
+        return "Total".to_string();
     }
 
     // A provider-native label can already include the window name. Avoid
     // rendering redundant text such as "weekly weekly" in that case.
-    if metric.label.eq_ignore_ascii_case(&metric.window_kind) {
-        metric.label.clone()
-    } else {
-        format!("{} {}", metric.label, metric.window_kind)
+    if label.eq_ignore_ascii_case(window_kind) {
+        return match window_kind {
+            "weekly" => "Weekly".to_string(),
+            "monthly" => "Total".to_string(),
+            "rolling" => "Rolling".to_string(),
+            "daily" => "Daily".to_string(),
+            "session" => "5-hour".to_string(),
+            other => other.to_string(),
+        };
+    }
+
+    format!("{label} {window_kind}")
+}
+
+/// Canonical label used by the Windows context menu for provider windows.
+/// This intentionally accepts the stored/provider-native aliases so cached
+/// snapshots from an older build remain selectable.
+pub fn window_display_name(provider: &Provider, window: &str) -> String {
+    match (provider, window.to_ascii_lowercase().as_str()) {
+        (Provider::OllamaCloud, "session") | (Provider::Kimi, "5-hour") => "5-hour".into(),
+        (_, "weekly") | (_, "primary") => "Weekly".into(),
+        (_, "total") | (_, "monthly") => "Total".into(),
+        (_, "rolling") => "Rolling".into(),
+        (_, "daily") => "Daily".into(),
+        _ => window.to_string(),
     }
 }
 
@@ -192,9 +235,14 @@ fn is_compact_candidate(s: &UsageSnapshot) -> bool {
         s.metric_kind,
         MetricKind::Quota | MetricKind::Credits | MetricKind::Requests
     ) && s.unit == "percent"
-        && (s.window_label.as_deref() == Some("primary")
-            || (s.provider == Provider::OllamaCloud
-                && s.window_label.as_deref() == Some("session")))
+        && match s.provider {
+            Provider::OllamaCloud => matches!(s.window_label.as_deref(), Some("session" | "weekly")),
+            Provider::Kimi => matches!(
+                s.window_label.as_deref(),
+                Some("5-hour" | "weekly" | "primary")
+            ),
+            _ => s.window_label.as_deref() == Some("primary"),
+        }
         && s.used.is_some()
 }
 
@@ -207,11 +255,42 @@ fn is_window_candidate(s: &UsageSnapshot, window: &str) -> bool {
         MetricKind::Quota | MetricKind::Credits | MetricKind::Requests
     ) && s.unit == "percent"
         && s.used.is_some()
-        && if s.provider == Provider::OllamaCloud {
-            matches!(window, "session" | "weekly") && s.window_label.as_deref() == Some(window)
-        } else {
-            window == "primary" && s.window_label.as_deref() == Some("primary")
+        && window_matches_snapshot(s, window)
+}
+
+fn window_matches_snapshot(snapshot: &UsageSnapshot, window: &str) -> bool {
+    match snapshot.provider {
+        Provider::OllamaCloud => {
+            matches!(window, "session" | "weekly")
+                && snapshot.window_label.as_deref() == Some(window)
         }
+        Provider::Kimi => match window {
+            "5-hour" => snapshot.window_label.as_deref() == Some("5-hour"),
+            "weekly" => matches!(snapshot.window_label.as_deref(), Some("weekly" | "primary")),
+            "total" => matches!(snapshot.window_label.as_deref(), Some("total" | "monthly")),
+            _ => false,
+        },
+        _ => window == "primary" && snapshot.window_label.as_deref() == Some("primary"),
+    }
+}
+
+fn compact_priority(snapshot: &UsageSnapshot) -> u8 {
+    match snapshot.provider {
+        Provider::OllamaCloud if snapshot.window_label.as_deref() == Some("session") => 0,
+        Provider::Kimi if snapshot.window_label.as_deref() == Some("5-hour") => 0,
+        _ => 1,
+    }
+}
+
+fn first_compact_candidate<'a>(
+    snapshots: &'a [UsageSnapshot],
+    provider: Option<&Provider>,
+) -> Option<&'a UsageSnapshot> {
+    snapshots
+        .iter()
+        .filter(|snapshot| provider.is_none_or(|wanted| &snapshot.provider == wanted))
+        .filter(|snapshot| is_compact_candidate(snapshot))
+        .min_by_key(|snapshot| compact_priority(snapshot))
 }
 
 /// Compact tray view using the first eligible default percentage window.
@@ -230,8 +309,9 @@ pub fn build_tray_view_focused(
 
 /// Compact tray view with an optional focused provider and quota window.
 ///
-/// Ollama's session window is the default candidate; callers can pass
-/// `Some("weekly")` to select the weekly cloud quota without changing the
+/// Ollama's 5-hour session and Kimi's 5-hour rolling window are the default
+/// candidates; callers can pass a canonical window label such as `weekly` or
+/// `total` to select another reported quota without changing the
 /// provider-neutral snapshot model.
 pub fn build_tray_view_focused_window(
     snapshots: &[UsageSnapshot],
@@ -266,20 +346,12 @@ pub fn build_tray_view_focused_window(
         .and_then(|wanted| {
             focus_window.and_then(|window| {
                 snapshots.iter().find(|s| {
-                    is_window_candidate(s, window)
-                        && &s.provider == wanted
-                        && s.window_label.as_deref() == Some(window)
+                    is_window_candidate(s, window) && &s.provider == wanted
                 })
             })
         })
-        .or_else(|| {
-            focus.and_then(|wanted| {
-                snapshots
-                    .iter()
-                    .find(|s| is_compact_candidate(s) && &s.provider == wanted)
-            })
-        })
-        .or_else(|| snapshots.iter().find(|s| is_compact_candidate(s)));
+        .or_else(|| first_compact_candidate(snapshots, focus))
+        .or_else(|| first_compact_candidate(snapshots, None));
 
     let (icon_text, used_percent, status_label, focus_provider) = match primary {
         Some(s) => {
@@ -528,10 +600,47 @@ mod tests {
         let view = build_tray_view(&[session, weekly]);
         assert!(view.tooltip.contains("Ollama"));
         assert!(!view.tooltip.contains("Ollama cloud"));
-        assert!(view.tooltip.contains("5-hour session: 28% left"));
-        assert!(view.tooltip.contains("weekly: 69% left"));
+        assert!(view.tooltip.contains("5-hour: 28% left"));
+        assert!(view.tooltip.contains("Weekly: 69% left"));
         assert!(!view.tooltip.contains("session rolling"));
         assert!(!view.tooltip.contains("weekly weekly"));
+    }
+
+    #[test]
+    fn kimi_defaults_to_five_hour_and_can_focus_total() {
+        let mut five_hour = make_snapshot(Some(58.0), Freshness::Live, Some("5-hour"));
+        five_hour.provider = Provider::Kimi;
+        five_hour.account_id = "kimi-test".into();
+        five_hour.window_kind = WindowKind::Rolling;
+        let mut weekly = five_hour.clone();
+        weekly.used = Some(40.0);
+        weekly.remaining = Some(60.0);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("primary".into());
+        let mut total = five_hour.clone();
+        total.used = Some(12.0);
+        total.remaining = Some(88.0);
+        total.window_kind = WindowKind::Monthly;
+        total.window_label = Some("total".into());
+
+        let snapshots = vec![weekly.clone(), total.clone(), five_hour.clone()];
+        let default_view = build_tray_view(&snapshots);
+        assert_eq!(default_view.used_percent, Some(58.0));
+        let five_hour_at = default_view.tooltip.find("5-hour:").unwrap();
+        let total_at = default_view.tooltip.find("Total:").unwrap();
+        let weekly_at = default_view.tooltip.find("Weekly:").unwrap();
+        assert!(five_hour_at < total_at && total_at < weekly_at);
+        assert!(default_view.tooltip.contains("5-hour: 42% left"));
+        assert!(default_view.tooltip.contains("Weekly: 60% left"));
+        assert!(default_view.tooltip.contains("Total: 88% left"));
+
+        let total_view = build_tray_view_focused_window(
+            &snapshots,
+            Some(&Provider::Kimi),
+            Some("total"),
+            Utc::now(),
+        );
+        assert_eq!(total_view.used_percent, Some(12.0));
     }
 
     #[test]

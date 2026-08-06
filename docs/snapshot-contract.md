@@ -226,6 +226,10 @@ the evidence spikes (#2-#6) and then folded back here.
   the CLI `/usage` command), reusing the CLI OAuth session at
   `~/.kimi-code/credentials/kimi-code.json`; an Extra Usage wallet, when
   present, is a separate `metric_kind=credits` snapshot (unit `cents`).
+  When the response includes a numeric shared monthly quota (`totalQuota` or
+  an explicitly monthly `limits[]` row), it remains a separate
+  `window_kind=monthly` quota rendered as **Total**; an empty/missing field is
+  not synthesized.
   Values arrive as decimal strings and the weekly window is 7 days from the
   subscription date (`resetTime` is authoritative; never a calendar-week
   boundary). See [kimi-spike.md](spikes/kimi-spike.md).
