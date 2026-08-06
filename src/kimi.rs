@@ -317,7 +317,7 @@ struct UsagesResponse {
     /// separate object. It is absent (or `{}`) for accounts that do not
     /// receive that field, so parsing it must remain optional.
     #[serde(default)]
-    total_quota: Option<UsageSummary>,
+    total_quota: Option<serde_json::Value>,
     #[serde(default)]
     limits: Option<Vec<LimitRow>>,
     #[serde(default)]
@@ -674,8 +674,14 @@ pub fn parse_usages_response(
         }
     }
     if let Some(total_quota) = &response.total_quota {
-        if let Some(snapshot) = parse_total_quota(total_quota, observed_at, account_id) {
-            snapshots.push(snapshot);
+        // `totalQuota` is optional and has not been populated on every live
+        // account. A future shape change in this field must not hide valid
+        // weekly/rolling siblings, so decode it independently and skip only
+        // the optional row when it is not an object with numeric fields.
+        if let Ok(summary) = serde_json::from_value::<UsageSummary>(total_quota.clone()) {
+            if let Some(snapshot) = parse_total_quota(&summary, observed_at, account_id) {
+                snapshots.push(snapshot);
+            }
         }
     }
     if let Some(usage) = &response.usage {
@@ -968,6 +974,25 @@ mod tests {
         assert_eq!(total.used, Some(12.0));
         assert_eq!(total.remaining, Some(88.0));
         assert!(total.resets_at.is_some());
+    }
+
+    #[test]
+    fn malformed_optional_total_does_not_hide_valid_windows() {
+        let raw = serde_json::json!({
+            "usage": { "used": "33", "limit": "100", "remaining": "67" },
+            "limits": [{
+                "window": { "duration": 300, "timeUnit": "TIME_UNIT_MINUTE" },
+                "detail": { "used": "2", "limit": "100", "remaining": "98" }
+            }],
+            "totalQuota": ["schema changed"]
+        });
+        let snapshots = parse_usages_response(&raw, fixture_time(), "kimi-test").unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| snapshot.window_label.as_deref() != Some(TOTAL_LABEL)));
+        assert!(snapshots.iter().any(|snapshot| snapshot.window_kind == WindowKind::Rolling));
+        assert!(snapshots.iter().any(|snapshot| snapshot.window_kind == WindowKind::Weekly));
     }
 
     #[test]
