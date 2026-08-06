@@ -412,8 +412,12 @@ pub fn build_tray_view_focused_window(
             }
         }
     }
-    let tooltip = if lines.len() > 8 {
-        format!("{}\n...", lines[..8].join("\n"))
+    // Keep all currently supported providers (and several future additions)
+    // visible in the hover text. A bounded fallback still protects the tray
+    // from an unexpectedly huge provider/metric response.
+    const MAX_TOOLTIP_LINES: usize = 32;
+    let tooltip = if lines.len() > MAX_TOOLTIP_LINES {
+        format!("{}\n...", lines[..MAX_TOOLTIP_LINES].join("\n"))
     } else {
         lines.join("\n")
     };
@@ -648,6 +652,42 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(total_view.used_percent, Some(12.0));
+    }
+
+    #[test]
+    fn tooltip_keeps_later_provider_cards_visible() {
+        let codex = make_snapshot(Some(20.0), Freshness::Live, Some("primary"));
+        let mut codex_secondary = codex.clone();
+        codex_secondary.window_label = Some("secondary".into());
+
+        let mut grok = codex.clone();
+        grok.provider = Provider::GrokConsumer;
+        grok.account_id = "grok-test".into();
+        let mut grok_secondary = grok.clone();
+        grok_secondary.window_label = Some("secondary".into());
+
+        let mut kimi = codex.clone();
+        kimi.provider = Provider::Kimi;
+        kimi.account_id = "kimi-test".into();
+        let mut kimi_secondary = kimi.clone();
+        kimi_secondary.window_label = Some("secondary".into());
+
+        let mut ollama = codex.clone();
+        ollama.provider = Provider::OllamaCloud;
+        ollama.account_id = "ollama-test".into();
+        ollama.window_label = Some("session".into());
+
+        let view = build_tray_view(&[
+            codex,
+            codex_secondary,
+            grok,
+            grok_secondary,
+            kimi,
+            kimi_secondary,
+            ollama,
+        ]);
+        assert!(view.tooltip.contains("Ollama"));
+        assert!(!view.tooltip.ends_with("\n..."));
     }
 
     #[test]
