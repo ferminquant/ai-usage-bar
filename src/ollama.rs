@@ -4,7 +4,10 @@
 //! totals. Ollama does not currently include reset timestamps in that JSON, so
 //! the adapter leaves `resets_at` empty. The Windows shell offers a direct link
 //! to the authenticated settings page as the low-friction fallback until
-//! Ollama exposes reset metadata through a supported API.
+//! Ollama exposes reset metadata through a supported API. On Windows, a
+//! signed-in Ollama daemon may be running inside WSL while the tray process is
+//! native Windows; if the native key is rejected, the adapter retries with the
+//! default WSL Ollama key without changing either session.
 
 use crate::model::*;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -14,6 +17,8 @@ use signature::Signer;
 use ssh_key::{PrivateKey, PublicKey};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(windows)]
+use std::process::Command;
 use std::time::Duration;
 
 const OLLAMA_PROVIDER: Provider = Provider::OllamaCloud;
@@ -135,9 +140,24 @@ impl OllamaAuth {
 
 /// Fetch the live session and weekly cloud quota snapshots.
 pub fn fetch_ollama_cloud_snapshots() -> Result<Vec<UsageSnapshot>, OllamaAdapterError> {
-    let auth = load_auth()?;
     let observed_at = Utc::now();
-    let body = http_get_usage(&auth, observed_at.timestamp())?;
+    let timestamp = observed_at.timestamp();
+    let auth = match load_auth() {
+        Ok(auth) => auth,
+        Err(OllamaAdapterError::AuthExpired) if wsl_auth_fallback_allowed() => {
+            load_wsl_auth().ok_or(OllamaAdapterError::AuthExpired)?
+        }
+        Err(error) => return Err(error),
+    };
+    let body = match http_get_usage(&auth, timestamp) {
+        Ok(body) => body,
+        Err(OllamaAdapterError::AuthExpired) if wsl_auth_fallback_allowed() => {
+            let wsl_auth = load_wsl_auth().ok_or(OllamaAdapterError::AuthExpired)?;
+            let body = http_get_usage(&wsl_auth, timestamp)?;
+            return parse_usage_response(&body, observed_at, wsl_auth.account_id());
+        }
+        Err(error) => return Err(error),
+    };
 
     parse_usage_response(&body, observed_at, auth.account_id())
 }
@@ -273,7 +293,10 @@ fn load_auth() -> Result<OllamaAuth, OllamaAdapterError> {
 
     let path = private_key_path();
     let raw = fs::read(&path).map_err(|_| OllamaAdapterError::AuthExpired)?;
-    let private_key = parse_private_key(&raw)?;
+    auth_from_private_key(parse_private_key(&raw)?)
+}
+
+fn auth_from_private_key(private_key: PrivateKey) -> Result<OllamaAuth, OllamaAdapterError> {
     if private_key.is_encrypted() || !private_key.key_data().is_ed25519() {
         return Err(OllamaAdapterError::AuthExpired);
     }
@@ -288,6 +311,34 @@ fn load_auth() -> Result<OllamaAuth, OllamaAdapterError> {
         public_key_authorization,
         account_id,
     })
+}
+
+#[cfg(windows)]
+fn load_wsl_auth() -> Option<OllamaAuth> {
+    let output = Command::new("wsl.exe")
+        .args([
+            "--exec",
+            "sh",
+            "-c",
+            "cat \"$HOME/.ollama/id_ed25519\"",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let private_key = parse_private_key(&output.stdout).ok()?;
+    auth_from_private_key(private_key).ok()
+}
+
+#[cfg(not(windows))]
+fn load_wsl_auth() -> Option<OllamaAuth> {
+    None
+}
+
+fn wsl_auth_fallback_allowed() -> bool {
+    cfg!(windows)
+        && env_value(&["OLLAMA_ID", "OLLAMA_HOME"]).is_none()
 }
 
 /// Return the base64 payload Ollama's official client uses in its

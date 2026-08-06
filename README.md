@@ -29,6 +29,10 @@ copying, or manual setup is required. Reset metadata is tracked in
 [issue #35](https://github.com/ferminquant/ai-usage-bar/issues/35) while
 Ollama works on a supported API surface.
 
+On Windows, the adapter also handles the common WSL setup: if the native
+Windows Ollama key is rejected, it retries with the default WSL Ollama key
+without signing out, copying credentials, or interrupting active sessions.
+
 ## Product direction
 
 The widget should answer one question quickly: “What is the state of each AI
