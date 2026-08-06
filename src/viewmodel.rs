@@ -286,11 +286,18 @@ fn first_compact_candidate<'a>(
     snapshots: &'a [UsageSnapshot],
     provider: Option<&Provider>,
 ) -> Option<&'a UsageSnapshot> {
-    snapshots
+    let mut candidates = snapshots
         .iter()
         .filter(|snapshot| provider.is_none_or(|wanted| &snapshot.provider == wanted))
-        .filter(|snapshot| is_compact_candidate(snapshot))
-        .min_by_key(|snapshot| compact_priority(snapshot))
+        .filter(|snapshot| is_compact_candidate(snapshot));
+    if provider.is_some() {
+        candidates.min_by_key(|snapshot| compact_priority(snapshot))
+    } else {
+        // Preserve registry/adapter order for the global auto-selected pill.
+        // Provider-specific defaults (Kimi/Ollama 5-hour) apply only after a
+        // user focuses that provider.
+        candidates.next()
+    }
 }
 
 /// Compact tray view using the first eligible default percentage window.
@@ -623,7 +630,7 @@ mod tests {
         total.window_kind = WindowKind::Monthly;
         total.window_label = Some("total".into());
 
-        let snapshots = vec![weekly.clone(), total.clone(), five_hour.clone()];
+        let snapshots = vec![five_hour.clone(), total.clone(), weekly.clone()];
         let default_view = build_tray_view(&snapshots);
         assert_eq!(default_view.used_percent, Some(58.0));
         let five_hour_at = default_view.tooltip.find("5-hour:").unwrap();
