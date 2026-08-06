@@ -304,7 +304,7 @@ fn auth_from_private_key(private_key: PrivateKey) -> Result<OllamaAuth, OllamaAd
     let public_key_blob = public_key
         .to_bytes()
         .map_err(|_| OllamaAdapterError::AuthExpired)?;
-    let public_key_authorization = public_key_authorization(&public_key)?;
+    let public_key_authorization = public_key_authorization(public_key)?;
     let account_id = format!("ollama-{:016x}", simple_hash(&public_key_blob));
     Ok(OllamaAuth::SignedKey {
         private_key: Box::new(private_key),
