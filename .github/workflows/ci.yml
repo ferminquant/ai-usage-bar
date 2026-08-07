@@ -61,6 +61,35 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  security:
+    name: Security scans and dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Scan tracked files for high-confidence secrets
+        run: python scripts/check_secrets.py
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit Rust dependencies
+        run: cargo audit --json > cargo-audit.json
+      - name: Add dependency audit to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Dependency audit'
+            echo '```json'
+            cat cargo-audit.json 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
 # Keep these first gates on GitHub-hosted runners. Issue #15 tracks the
 # separate registration, labels, isolation, and cleanup policy needed before
 # any public pull request can execute on a Budget workspace runner.

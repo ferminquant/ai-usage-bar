@@ -1,8 +1,9 @@
 # Quality engineering contract
 
-This repository is documentation-only at creation time. No implementation
-coverage or test pass rate is claimed yet. The following is the proposed
-quality contract to be implemented through the GitHub backlog.
+This document records the quality contract and its current executable gates.
+Coverage and mutation targets remain roadmap items; the implemented test,
+secret-scan, lint, and dependency-audit jobs are evidence, not a claim that
+all targets are complete.
 
 The guiding reference is
 [the requested Uncle Bob post](https://x.com/i/status/2080257779395154409),
@@ -40,7 +41,7 @@ The CI workflow should eventually publish or retain:
 - coverage and per-file threshold data;
 - mutation-test summary for the policy core;
 - test counts by marker;
-- dependency and secret-scan summaries;
+- dependency and secret-scan summaries (the `security` CI job);
 - UI/package smoke results;
 - job duration and cache/freshness fixture evidence;
 - a dated Markdown baseline under docs/generated/.

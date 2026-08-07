@@ -657,6 +657,8 @@ fn fallback(
     now: DateTime<Utc>,
     error: AdapterError,
 ) -> ProviderRun {
+    // Preserve only the stable code. Adapter messages may contain paths,
+    // command arguments, or provider payload text.
     let safe_error = AdapterError {
         code: error.code.clone(),
         message: None,
@@ -731,7 +733,10 @@ fn unavailable_snapshot(
         unlimited: false,
         resets_at: None,
         window_label: None,
-        error: Some(error),
+        error: Some(AdapterError {
+            code: error.code,
+            message: None,
+        }),
     }
 }
 

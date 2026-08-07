@@ -1,4 +1,5 @@
 pub mod codex;
+pub mod browser;
 pub mod config;
 pub mod daemon;
 pub mod grok;
@@ -6,7 +7,10 @@ pub mod kimi;
 pub mod ollama;
 pub mod opencode;
 pub mod model;
+pub mod security;
 pub mod viewmodel;
+
+pub use browser::{is_allowed_browser_url, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL};
 
 pub use codex::{
     account_id_from_email, error_snapshot, fetch_codex_snapshots, parse_account_response,
@@ -39,6 +43,7 @@ pub use model::{
     AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, ProviderAdapter,
     SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
+pub use security::{redact_sensitive_text, safe_identifier};
 pub use viewmodel::{
     build_tray_view, build_tray_view_focused, build_tray_view_focused_window, format_reset_label,
     provider_display_name, window_display_name, MetricCard, ProviderCard, TrayViewModel,

@@ -11,8 +11,9 @@ fn main() {
 mod windows_shell {
     use ai_usage_bar::{
         build_registry, build_tray_view_focused_window, default_config_path, provider_display_name,
-        window_display_name, AppConfig, OpenCodeResetSettings, Provider, RefreshPolicy,
-        RefreshService, UsageSnapshot,
+        window_display_name, is_allowed_browser_url, AppConfig, KIMI_CONSOLE_URL,
+        OLLAMA_USAGE_URL, OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService,
+        UsageSnapshot,
     };
     use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
@@ -69,8 +70,6 @@ mod windows_shell {
     const CF_UNICODETEXT_FORMAT: u32 = 13;
 
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
-    const OLLAMA_USAGE_URL: &str = "https://ollama.com/settings";
-    const KIMI_CONSOLE_URL: &str = "https://www.kimi.com/code/console";
     const OPENCODE_RESET_DIALOG_CLASS: PCWSTR = w!("AIUsageBarOpenCodeResetDialog");
     const RESET_DIALOG_SAVE: usize = 1;
     const RESET_DIALOG_CANCEL: usize = 2;
@@ -972,12 +971,13 @@ mod windows_shell {
                     state.focus_window.as_deref(),
                     chrono::Utc::now(),
                 );
+                let safe_error = ai_usage_bar::redact_sensitive_text(&error.to_string());
                 state.tooltip = if state.snapshots.is_empty() {
-                    format!("AI Usage Bar — refresh failed: {error}")
+                    format!("AI Usage Bar — refresh failed: {safe_error}")
                 } else {
-                    format!("{}\nRefresh failed: {error}", view.tooltip)
+                    format!("{}\nRefresh failed: {safe_error}", view.tooltip)
                 };
-                eprintln!("refresh error: {error}");
+                eprintln!("refresh error: {safe_error}");
             }
         }
 
@@ -1520,7 +1520,10 @@ mod windows_shell {
                 }
             }
             Err(error) => {
-                eprintln!("OpenCode reset settings failed: {error}");
+                eprintln!(
+                    "OpenCode reset settings failed: {}",
+                    ai_usage_bar::redact_sensitive_text(&error)
+                );
                 if let Some(state) = app_state(hwnd) {
                     set_status(hwnd, state, "Could not save OpenCode reset settings");
                 }
@@ -1537,8 +1540,14 @@ mod windows_shell {
         }
     }
 
-    fn open_ollama_usage_page(hwnd: HWND) {
-        let url = to_wide(OLLAMA_USAGE_URL);
+    fn open_allowed_browser_url(hwnd: HWND, url: &str, failure_status: &str) {
+        if !is_allowed_browser_url(url) {
+            if let Some(state) = app_state(hwnd) {
+                set_status(hwnd, state, "Blocked unallowlisted browser destination");
+            }
+            return;
+        }
+        let url = to_wide(url);
         let launched = unsafe {
             ShellExecuteW(
                 Some(hwnd),
@@ -1551,28 +1560,17 @@ mod windows_shell {
         };
         if launched.0 as usize <= 32 {
             if let Some(state) = app_state(hwnd) {
-                set_status(hwnd, state, "Could not open Ollama usage page");
+                set_status(hwnd, state, failure_status);
             }
         }
     }
 
+    fn open_ollama_usage_page(hwnd: HWND) {
+        open_allowed_browser_url(hwnd, OLLAMA_USAGE_URL, "Could not open Ollama usage page");
+    }
+
     fn open_kimi_console(hwnd: HWND) {
-        let url = to_wide(KIMI_CONSOLE_URL);
-        let launched = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                w!("open"),
-                PCWSTR(url.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        if launched.0 as usize <= 32 {
-            if let Some(state) = app_state(hwnd) {
-                set_status(hwnd, state, "Could not open Kimi Console");
-            }
-        }
+        open_allowed_browser_url(hwnd, KIMI_CONSOLE_URL, "Could not open Kimi Console");
     }
 
     fn canonical_window_key(provider: &Provider, label: &str) -> Option<&'static str> {
@@ -1997,14 +1995,20 @@ mod windows_shell {
             let config = match AppConfig::load(&config_path) {
                 Ok(config) => config,
                 Err(error) => {
-                    eprintln!("failed to load provider configuration: {error}");
+                    eprintln!(
+                        "failed to load provider configuration: {}",
+                        ai_usage_bar::redact_sensitive_text(&error.to_string())
+                    );
                     return;
                 }
             };
             let registry = match build_registry(&config) {
                 Ok(registry) => registry,
                 Err(error) => {
-                    eprintln!("failed to build provider registry: {error}");
+                    eprintln!(
+                        "failed to build provider registry: {}",
+                        ai_usage_bar::redact_sensitive_text(&error.to_string())
+                    );
                     return;
                 }
             };
