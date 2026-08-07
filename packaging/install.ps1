@@ -4,7 +4,9 @@ param(
     [string]$InstallRoot = "",
     [string]$StartupValueName = "AI Usage Bar",
     [switch]$SkipStartup,
-    [switch]$Force
+    [switch]$Force,
+    # Test-only fault injection used by smoke-test.ps1 to exercise rollback.
+    [string]$TestFailureMode = ""
 )
 
 Set-StrictMode -Version Latest
@@ -30,6 +32,9 @@ $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 
 if ([string]::IsNullOrWhiteSpace($StartupValueName)) {
     throw "StartupValueName cannot be empty"
+}
+if ($TestFailureMode -notin @("", "after-swap", "after-swap-cleanup-blocked")) {
+    throw "Unsupported TestFailureMode: $TestFailureMode"
 }
 
 $manifestPath = Join-Path $PackageRoot "package-manifest.json"
@@ -175,6 +180,7 @@ $newInstallMoved = $false
 $startupChanged = $false
 $rollbackRestored = $false
 $backupCleanupAllowed = $false
+$installSucceeded = $false
 
 try {
     Stop-InstalledShell -Root $InstallRoot
@@ -192,6 +198,10 @@ try {
     }
     Move-Item -LiteralPath $stagingRoot -Destination $InstallRoot
     $newInstallMoved = $true
+    if ($TestFailureMode -eq "after-swap" -or
+        $TestFailureMode -eq "after-swap-cleanup-blocked") {
+        throw "Synthetic install failure after swap: $TestFailureMode"
+    }
 
     if (-not $SkipStartup) {
         Set-RunValue -Name $StartupValueName -Value $expectedStartup
@@ -210,24 +220,30 @@ try {
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $InstallRoot "install-state.json") -Encoding UTF8
 
-    if ($oldInstallMoved -and (Test-Path -LiteralPath $backupRoot)) {
-        Remove-Item -LiteralPath $backupRoot -Recurse -Force
-    }
+    $installSucceeded = $true
     Write-Output ("Installed AI Usage Bar {0} to {1}" -f $manifest.version, $InstallRoot)
     if (-not $SkipStartup) {
         Write-Output ("Startup registration: HKCU Run/{0}" -f $StartupValueName)
     }
 } catch {
+    $originalError = $_
     if ($startupChanged) {
-        if ([string]::IsNullOrWhiteSpace($previousStartup)) {
-            Remove-RunValue -Name $StartupValueName
-        } else {
-            Set-RunValue -Name $StartupValueName -Value $previousStartup
+        try {
+            if ([string]::IsNullOrWhiteSpace($previousStartup)) {
+                Remove-RunValue -Name $StartupValueName
+            } else {
+                Set-RunValue -Name $StartupValueName -Value $previousStartup
+            }
+        } catch {
+            Write-Warning ("Could not restore startup registration; manual recovery may be required: {0}" -f $_.Exception.Message)
         }
     }
     $newInstallGone = -not $newInstallMoved -or -not (Test-Path -LiteralPath $InstallRoot)
     if (-not $newInstallGone) {
         try {
+            if ($TestFailureMode -eq "after-swap-cleanup-blocked") {
+                throw "Synthetic locked partial install"
+            }
             Remove-Item -LiteralPath $InstallRoot -Recurse -Force
             $newInstallGone = -not (Test-Path -LiteralPath $InstallRoot)
         } catch {
@@ -256,12 +272,27 @@ try {
         $rollbackRestored = $true
     }
     $backupCleanupAllowed = -not $oldInstallMoved -or $rollbackRestored
-    throw
+    throw $originalError
 } finally {
     if (Test-Path -LiteralPath $stagingRoot) {
-        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+        try {
+            Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+        } catch {
+            Write-Warning ("Could not remove staging directory; manual cleanup may be required: {0}" -f $_.Exception.Message)
+        }
     }
-    if ($backupCleanupAllowed -and (Test-Path -LiteralPath $backupRoot)) {
-        Remove-Item -LiteralPath $backupRoot -Recurse -Force
+    if ($installSucceeded -and $oldInstallMoved -and (Test-Path -LiteralPath $backupRoot)) {
+        try {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        } catch {
+            Write-Warning ("Install succeeded but the previous-version backup could not be removed: {0}" -f $_.Exception.Message)
+        }
+    } elseif (-not $installSucceeded -and $backupCleanupAllowed -and
+        (Test-Path -LiteralPath $backupRoot)) {
+        try {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        } catch {
+            Write-Warning ("Could not remove temporary backup; manual cleanup may be required: {0}" -f $_.Exception.Message)
+        }
     }
 }

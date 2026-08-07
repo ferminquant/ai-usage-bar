@@ -31,6 +31,14 @@ if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -and
     throw "Refusing to remove a directory without an AI Usage Bar installation marker: $InstallRoot"
 }
 
+$manifest = $null
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.product -ne "AI Usage Bar" -or [int]$manifest.schema_version -ne 1) {
+        throw "Package manifest does not belong to AI Usage Bar"
+    }
+}
+
 $state = $null
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
     $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json

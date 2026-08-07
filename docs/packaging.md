@@ -75,10 +75,12 @@ profile and verifies:
 1. install and startup registration;
 2. the installed CLI reads the isolated configuration path;
 3. the shell process stays alive through its initial startup window;
-4. reinstall/upgrade installs a new manifest version while preserving a
+4. failed swaps restore the previous version, including a locked-cleanup
+   quarantine path;
+5. reinstall/upgrade installs a new manifest version while preserving a
    sentinel user configuration;
-5. uninstall removes the package and startup value; and
-6. configuration and provider-owned sentinel data remain unchanged.
+6. uninstall removes the package and startup value; and
+7. configuration and provider-owned sentinel data remain unchanged.
 
 The Windows CI workflow runs this smoke test on `windows-latest` and uploads
 the ZIP, manifest, and checksums as a retained artifact. It uses no provider

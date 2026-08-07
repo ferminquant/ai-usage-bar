@@ -88,6 +88,26 @@ function Invoke-PackageScript {
     Write-Verbose ("{0}: {1}" -f [IO.Path]::GetFileName($ScriptPath), ($output -join [Environment]::NewLine))
 }
 
+function Invoke-ExpectedPackageFailure {
+    param(
+        [string]$ScriptPath,
+        [hashtable]$Parameters,
+        [string]$ExpectedMessage
+    )
+    $failure = $null
+    try {
+        Invoke-PackageScript -ScriptPath $ScriptPath -Parameters $Parameters
+    } catch {
+        $failure = $_
+    }
+    if ($null -eq $failure) {
+        throw "Expected package script to fail: $ExpectedMessage"
+    }
+    if ($failure.Exception.Message -notmatch [regex]::Escape($ExpectedMessage)) {
+        throw "Package script failed for an unexpected reason: $($failure.Exception.Message)"
+    }
+}
+
 $environmentNames = @("APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "XDG_CONFIG_HOME")
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -177,6 +197,40 @@ try {
         }
     }
     $upgradeChecksumLines | Set-Content -LiteralPath $upgradeChecksumsPath -Encoding ASCII
+
+    Invoke-ExpectedPackageFailure -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
+        TestFailureMode = "after-swap"
+    } -ExpectedMessage "Synthetic install failure after swap"
+    $afterRollbackState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
+        ConvertFrom-Json
+    if ($afterRollbackState.version -cne $beforeUpgradeState.version) {
+        throw "Rollback did not restore the previous package version"
+    }
+    $summary.checks.rollback_recovery = "passed"
+
+    Invoke-ExpectedPackageFailure -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
+        TestFailureMode = "after-swap-cleanup-blocked"
+    } -ExpectedMessage "Synthetic install failure after swap"
+    $afterQuarantineState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
+        ConvertFrom-Json
+    if ($afterQuarantineState.version -cne $beforeUpgradeState.version) {
+        throw "Quarantine recovery did not restore the previous package version"
+    }
+    $installParent = Split-Path -Parent $installRoot
+    $installLeaf = Split-Path -Leaf $installRoot
+    $failedRoots = @(Get-ChildItem -LiteralPath $installParent -Directory -Filter ("{0}.__failed_*" -f $installLeaf))
+    if ($failedRoots.Count -ne 1) {
+        throw "Expected one quarantined failed install directory"
+    }
+    Remove-Item -LiteralPath $failedRoots[0].FullName -Recurse -Force
+    $summary.checks.quarantine_recovery = "passed"
+
     Invoke-PackageScript -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
         PackageRoot = $upgradePackageRoot
         InstallRoot = $installRoot
