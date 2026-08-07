@@ -38,6 +38,7 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", self.install)
         self.assertIn("__staging_", self.install)
         self.assertIn("__backup_", self.install)
+        self.assertIn("__failed_", self.install)
         self.assertIn("APPDATA", self.install)
         self.assertIn("provider_data_is_outside_install_root", self.install)
 

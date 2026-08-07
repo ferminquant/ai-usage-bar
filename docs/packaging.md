@@ -52,7 +52,10 @@ provider-owned data are never copied into or removed from the install root.
 An upgrade stages the new package, stops only a running shell whose executable
 path matches this installation, swaps the application directory, and removes
 the temporary backup after success. If staging or registration fails, the
-previous directory and startup value are restored.
+previous directory and startup value are restored. If a locked file prevents
+cleanup of a failed swap, the partial directory is quarantined under a
+`.__failed_<run-id>` suffix while the previous installation remains available
+for recovery.
 
 Uninstall removes the startup value only when it still points to this
 installation, then removes the application directory. It deliberately leaves

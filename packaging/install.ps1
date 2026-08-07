@@ -169,6 +169,7 @@ New-Item -ItemType Directory -Path $parentRoot -Force | Out-Null
 $runId = [Guid]::NewGuid().ToString("N")
 $stagingRoot = "$InstallRoot.__staging_$runId"
 $backupRoot = "$InstallRoot.__backup_$runId"
+$failedRoot = "$InstallRoot.__failed_$runId"
 $oldInstallMoved = $false
 $newInstallMoved = $false
 $startupChanged = $false
@@ -232,7 +233,14 @@ try {
         } catch {
             # Keep the backup below if a transient lock prevents cleanup. It
             # is the only recoverable copy of the previous installation.
-            $newInstallGone = $false
+            try {
+                Move-Item -LiteralPath $InstallRoot -Destination $failedRoot -Force
+                $newInstallGone = -not (Test-Path -LiteralPath $InstallRoot)
+            } catch {
+                # If the quarantine move is also blocked, leave both the
+                # partial install and backup in place for manual recovery.
+                $newInstallGone = $false
+            }
         }
     }
     if ($oldInstallMoved -and $newInstallGone -and (Test-Path -LiteralPath $backupRoot)) {
