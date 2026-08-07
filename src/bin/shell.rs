@@ -14,7 +14,7 @@ mod windows_shell {
         window_display_name, AppConfig, OpenCodeResetSettings, Provider, RefreshPolicy,
         RefreshService, UsageSnapshot,
     };
-    use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+    use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
     use std::ffi::c_void;
     use std::path::PathBuf;
@@ -1073,29 +1073,99 @@ mod windows_shell {
         }
     }
 
-    fn format_reset_anchor(value: Option<DateTime<Utc>>) -> String {
-        value
-            .map(|instant| {
-                instant
-                    .with_timezone(&Toronto)
-                    .format("%Y-%m-%d %H:%M")
+    fn format_reset_countdown(value: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+        let Some(value) = value else {
+            return String::new();
+        };
+        let total_minutes = value
+            .signed_duration_since(now)
+            .num_minutes()
+            .max(0);
+        let days = total_minutes / (24 * 60);
+        let hours = (total_minutes / 60) % 24;
+        let minutes = total_minutes % 60;
+        if days > 0 {
+            format!("{days} days {hours} hours")
+        } else {
+            format!("{hours} hours {minutes} minutes")
+        }
+    }
+
+    fn parse_reset_countdown(
+        value: &str,
+        now: DateTime<Utc>,
+    ) -> std::result::Result<Option<DateTime<Utc>>, String> {
+        let lower = value.trim().to_ascii_lowercase();
+        let countdown = lower
+            .strip_prefix("resets in ")
+            .unwrap_or(lower.as_str())
+            .trim();
+        let tokens: Vec<&str> = countdown.split_whitespace().collect();
+        if tokens.len() < 2 || tokens.len() % 2 != 0 {
+            return Err(
+                "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\""
+                    .to_string(),
+            );
+        }
+
+        let mut total_seconds = 0_i64;
+        for pair in tokens.chunks_exact(2) {
+            let amount = pair[0].parse::<i64>().map_err(|_| {
+                "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\""
                     .to_string()
-            })
-            .unwrap_or_default()
+            })?;
+            if amount < 0 {
+                return Err("Countdown values cannot be negative".to_string());
+            }
+            let seconds_per_unit = match pair[1] {
+                "day" | "days" => 24 * 60 * 60,
+                "hour" | "hours" => 60 * 60,
+                "minute" | "minutes" => 60,
+                _ => {
+                    return Err(
+                        "Use days, hours, and minutes, for example \"2 days 10 hours\""
+                            .to_string(),
+                    )
+                }
+            };
+            let seconds = amount
+                .checked_mul(seconds_per_unit)
+                .and_then(|seconds| total_seconds.checked_add(seconds))
+                .ok_or_else(|| "That countdown is too large".to_string())?;
+            total_seconds = seconds;
+        }
+
+        Ok(Some(now + ChronoDuration::seconds(total_seconds)))
     }
 
     fn parse_reset_anchor(
         raw: &str,
+        now: DateTime<Utc>,
     ) -> std::result::Result<Option<DateTime<Utc>>, String> {
         let value = raw.trim();
         if value.is_empty() {
             return Ok(None);
         }
+        // OpenCode displays reset values as a relative countdown. Accept the
+        // whole copied line as well as just its value.
+        let lower = value.to_ascii_lowercase();
+        let countdown = lower
+            .strip_prefix("resets in ")
+            .unwrap_or(lower.as_str())
+            .trim();
+        if countdown
+            .split_whitespace()
+            .next()
+            .and_then(|token| token.parse::<i64>().ok())
+            .is_some()
+        {
+            return parse_reset_countdown(value, now);
+        }
         if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
             return Ok(Some(parsed.with_timezone(&Utc)));
         }
         let local = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M")
-            .map_err(|_| "Use YYYY-MM-DD HH:MM (Eastern) or an RFC3339 value such as 2026-08-10T15:00:00Z".to_string())?;
+            .map_err(|_| "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\"; RFC3339 UTC is also accepted".to_string())?;
         Toronto
             .from_local_datetime(&local)
             .single()
@@ -1146,7 +1216,8 @@ mod windows_shell {
                     let Some(state) = reset_dialog_state(hwnd) else {
                         return LRESULT(0);
                     };
-                    let weekly = match parse_reset_anchor(&window_text(state.weekly_edit)) {
+                    let now = Utc::now();
+                    let weekly = match parse_reset_anchor(&window_text(state.weekly_edit), now) {
                         Ok(value) => value,
                         Err(error) => {
                             let text = to_wide(&error);
@@ -1159,7 +1230,7 @@ mod windows_shell {
                             return LRESULT(0);
                         }
                     };
-                    let monthly = match parse_reset_anchor(&window_text(state.monthly_edit)) {
+                    let monthly = match parse_reset_anchor(&window_text(state.monthly_edit), now) {
                         Ok(value) => value,
                         Err(error) => {
                             let text = to_wide(&error);
@@ -1245,8 +1316,8 @@ mod windows_shell {
 
             let mut parent_rect = RECT::default();
             let _ = GetWindowRect(parent, &mut parent_rect);
-            let width = 480;
-            let height = 250;
+            let width = 500;
+            let height = 290;
             let x = parent_rect.left + ((parent_rect.right - parent_rect.left - width) / 2);
             let y = (parent_rect.top - height - 8).max(0);
             let dialog = CreateWindowExW(
@@ -1277,15 +1348,16 @@ mod windows_shell {
             let label_style = WS_CHILD | WS_VISIBLE;
             let edit_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
             let button_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+            let now = Utc::now();
             let _ = create_reset_dialog_control(
                 dialog,
                 w!("STATIC"),
-                "Weekly next reset (YYYY-MM-DD HH:MM Eastern or RFC3339 UTC):",
+                "Weekly reset countdown (paste from OpenCode):",
                 label_style,
                 WINDOW_EX_STYLE(0),
                 18,
                 20,
-                430,
+                460,
                 22,
                 0,
                 hinst,
@@ -1293,12 +1365,12 @@ mod windows_shell {
             let Some(weekly_edit) = create_reset_dialog_control(
                 dialog,
                 w!("EDIT"),
-                &format_reset_anchor(settings.weekly_reset_at),
+                &format_reset_countdown(settings.weekly_reset_at, now),
                 edit_style,
                 WS_EX_CLIENTEDGE,
                 18,
                 45,
-                430,
+                460,
                 24,
                 RESET_DIALOG_WEEKLY_EDIT,
                 hinst,
@@ -1310,12 +1382,12 @@ mod windows_shell {
             let _ = create_reset_dialog_control(
                 dialog,
                 w!("STATIC"),
-                "Monthly next reset (YYYY-MM-DD HH:MM Eastern or RFC3339 UTC):",
+                "Monthly reset countdown (paste from OpenCode):",
                 label_style,
                 WINDOW_EX_STYLE(0),
                 18,
                 82,
-                430,
+                460,
                 22,
                 0,
                 hinst,
@@ -1323,12 +1395,12 @@ mod windows_shell {
             let Some(monthly_edit) = create_reset_dialog_control(
                 dialog,
                 w!("EDIT"),
-                &format_reset_anchor(settings.monthly_reset_at),
+                &format_reset_countdown(settings.monthly_reset_at, now),
                 edit_style,
                 WS_EX_CLIENTEDGE,
                 18,
                 107,
-                430,
+                460,
                 24,
                 RESET_DIALOG_MONTHLY_EDIT,
                 hinst,
@@ -1340,12 +1412,38 @@ mod windows_shell {
             let _ = create_reset_dialog_control(
                 dialog,
                 w!("STATIC"),
-                "Leave either field blank to use the built-in default.",
+                "Examples: \"2 days 10 hours\" or \"5 hours 0 minutes\".",
                 label_style,
                 WINDOW_EX_STYLE(0),
                 18,
                 140,
-                430,
+                460,
+                22,
+                0,
+                hinst,
+            );
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("STATIC"),
+                "Blank restores the built-in weekly/monthly defaults.",
+                label_style,
+                WINDOW_EX_STYLE(0),
+                18,
+                163,
+                460,
+                22,
+                0,
+                hinst,
+            );
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("STATIC"),
+                "The rolling 5-hour reset is derived from local activity.",
+                label_style,
+                WINDOW_EX_STYLE(0),
+                18,
+                186,
+                460,
                 22,
                 0,
                 hinst,
@@ -1357,7 +1455,7 @@ mod windows_shell {
                 button_style | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
                 WINDOW_EX_STYLE(0),
                 270,
-                178,
+                220,
                 85,
                 28,
                 RESET_DIALOG_SAVE,
@@ -1370,7 +1468,7 @@ mod windows_shell {
                 button_style,
                 WINDOW_EX_STYLE(0),
                 363,
-                178,
+                220,
                 85,
                 28,
                 RESET_DIALOG_CANCEL,
@@ -1995,6 +2093,43 @@ mod windows_shell {
         #[test]
         fn clipboard_payload_uses_the_same_detail_renderer_as_the_menu_action() {
             assert_eq!(render_detail_text(&[]), "No provider data");
+        }
+
+        #[test]
+        fn reset_dialog_accepts_dashboard_countdowns() {
+            let now = Utc.timestamp_opt(1_786_000_000, 0).unwrap();
+            assert_eq!(
+                parse_reset_anchor("5 hours 0 minutes", now).unwrap(),
+                Some(now + ChronoDuration::hours(5))
+            );
+            assert_eq!(
+                parse_reset_anchor("Resets in 2 days 10 hours", now).unwrap(),
+                Some(now + ChronoDuration::days(2) + ChronoDuration::hours(10))
+            );
+            assert_eq!(
+                parse_reset_anchor("29 days 0 hours", now).unwrap(),
+                Some(now + ChronoDuration::days(29))
+            );
+        }
+
+        #[test]
+        fn reset_dialog_displays_copyable_dashboard_countdowns() {
+            let now = Utc.timestamp_opt(1_786_000_000, 0).unwrap();
+            assert_eq!(
+                format_reset_countdown(Some(now + ChronoDuration::hours(5)), now),
+                "5 hours 0 minutes"
+            );
+            assert_eq!(
+                format_reset_countdown(
+                    Some(now + ChronoDuration::days(2) + ChronoDuration::hours(10)),
+                    now,
+                ),
+                "2 days 10 hours"
+            );
+            assert_eq!(
+                format_reset_countdown(Some(now + ChronoDuration::days(29)), now),
+                "29 days 0 hours"
+            );
         }
     }
 }
