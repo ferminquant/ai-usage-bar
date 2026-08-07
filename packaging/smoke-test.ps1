@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PackagePath,
     [string]$SandboxPath = "",
+    [string]$SummaryPath = "",
     [switch]$KeepSandbox
 )
 
@@ -44,7 +45,12 @@ $configPath = Join-Path $testAppData "AI Usage Bar\config.json"
 $credentialSentinel = Join-Path $testProfile "provider-credentials-sentinel.txt"
 $installScript = Join-Path $packageRoot "install.ps1"
 $uninstallScript = Join-Path $packageRoot "uninstall.ps1"
+$cliPath = Join-Path $installRoot "ai-usage-bar.exe"
 $shellPath = Join-Path $installRoot "ai-usage-bar-shell.exe"
+$cliStdoutPath = Join-Path $SandboxPath "cli.stdout.log"
+$cliStderrPath = Join-Path $SandboxPath "cli.stderr.log"
+$shellStdoutPath = Join-Path $SandboxPath "shell.stdout.log"
+$shellStderrPath = Join-Path $SandboxPath "shell.stderr.log"
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 
 foreach ($directory in @(
@@ -78,14 +84,8 @@ function Invoke-PackageScript {
         [string]$ScriptPath,
         [hashtable]$Parameters
     )
-    & $ScriptPath @Parameters
-    $exitCode = 0
-    if (Test-Path variable:LASTEXITCODE) {
-        $exitCode = [int]$LASTEXITCODE
-    }
-    if ($exitCode -ne 0) {
-        throw "$([IO.Path]::GetFileName($ScriptPath)) failed with exit code $exitCode"
-    }
+    $output = @(& $ScriptPath @Parameters)
+    Write-Verbose ("{0}: {1}" -f [IO.Path]::GetFileName($ScriptPath), ($output -join [Environment]::NewLine))
 }
 
 $environmentNames = @("APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "XDG_CONFIG_HOME")
@@ -126,18 +126,59 @@ try {
     }
     $summary.checks.install_and_startup = "passed"
 
-    $runningProcess = Start-Process -FilePath $shellPath -PassThru -WindowStyle Hidden
+    Set-Content -LiteralPath $configPath -Value "{`n" -Encoding ASCII
+    Remove-Item -LiteralPath $cliStdoutPath, $cliStderrPath -Force -ErrorAction SilentlyContinue
+    $cliProcess = Start-Process -FilePath $cliPath -PassThru -Wait `
+        -RedirectStandardOutput $cliStdoutPath -RedirectStandardError $cliStderrPath
+    $cliError = if (Test-Path -LiteralPath $cliStderrPath) {
+        (Get-Content -LiteralPath $cliStderrPath -Raw).Trim()
+    } else {
+        ""
+    }
+    if ($cliProcess.ExitCode -eq 0 -or $cliError -notmatch "provider config is invalid JSON") {
+        throw "The installed CLI did not read the isolated config path"
+    }
+    Set-Content -LiteralPath $configPath -Value $configContents -Encoding ASCII
+    $summary.checks.config_path_is_read = "passed"
+
+    Remove-Item -LiteralPath $shellStdoutPath, $shellStderrPath -Force -ErrorAction SilentlyContinue
+    $runningProcess = Start-Process -FilePath $shellPath -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput $shellStdoutPath -RedirectStandardError $shellStderrPath
     Start-Sleep -Seconds 4
     if ($runningProcess.HasExited) {
-        throw "Installed shell exited during startup smoke test with code $($runningProcess.ExitCode)"
+        $stderr = if (Test-Path -LiteralPath $shellStderrPath) {
+            (Get-Content -LiteralPath $shellStderrPath -Raw).Trim()
+        } else {
+            ""
+        }
+        throw "Installed shell exited during startup smoke test with code $($runningProcess.ExitCode); stderr: $stderr"
     }
     Stop-Process -Id $runningProcess.Id -Force
     $runningProcess = $null
     $summary.checks.shell_startup = "passed"
 
     $beforeUpgradeConfig = (Get-Content -LiteralPath $configPath -Raw).Trim()
-    Invoke-PackageScript -ScriptPath $installScript -Parameters @{
-        PackageRoot = $packageRoot
+    $beforeUpgradeState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
+        ConvertFrom-Json
+    $upgradePackageRoot = Join-Path $SandboxPath "upgrade-package"
+    Copy-Item -LiteralPath $packageRoot -Destination $upgradePackageRoot -Recurse -Force
+    $upgradeManifestPath = Join-Path $upgradePackageRoot "package-manifest.json"
+    $upgradeManifest = Get-Content -LiteralPath $upgradeManifestPath -Raw | ConvertFrom-Json
+    $upgradeVersion = "{0}-upgrade" -f $upgradeManifest.version
+    $upgradeManifest.version = $upgradeVersion
+    $upgradeManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $upgradeManifestPath -Encoding UTF8
+    $upgradeManifestHash = (Get-FileHash -LiteralPath $upgradeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $upgradeChecksumsPath = Join-Path $upgradePackageRoot "checksums.sha256"
+    $upgradeChecksumLines = foreach ($line in Get-Content -LiteralPath $upgradeChecksumsPath) {
+        if ($line -match "^\s*[0-9a-fA-F]{64}\s+package-manifest\.json\s*$") {
+            "{0}  package-manifest.json" -f $upgradeManifestHash
+        } else {
+            $line
+        }
+    }
+    $upgradeChecksumLines | Set-Content -LiteralPath $upgradeChecksumsPath -Encoding ASCII
+    Invoke-PackageScript -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
         InstallRoot = $installRoot
         StartupValueName = $startupValueName
     }
@@ -145,7 +186,15 @@ try {
     if ($afterUpgradeConfig -cne $beforeUpgradeConfig) {
         throw "Upgrade changed the user configuration"
     }
-    $summary.checks.upgrade_preserves_config = "passed"
+    $afterUpgradeState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
+        ConvertFrom-Json
+    if ($afterUpgradeState.version -ne $upgradeVersion -or
+        $afterUpgradeState.version -eq $beforeUpgradeState.version -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "ai-usage-bar-shell.exe") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "ai-usage-bar.exe") -PathType Leaf)) {
+        throw "Upgrade did not install the new package version"
+    }
+    $summary.checks.upgrade_preserves_config = $upgradeVersion
 
     Invoke-PackageScript -ScriptPath $uninstallScript -Parameters @{
         InstallRoot = $installRoot
@@ -165,7 +214,15 @@ try {
     }
     $summary.checks.uninstall_preserves_user_data = "passed"
     $summary.result = "passed"
-    $summary | ConvertTo-Json -Depth 8
+    $summaryJson = $summary | ConvertTo-Json -Depth 8
+    if (-not [string]::IsNullOrWhiteSpace($SummaryPath)) {
+        $summaryParent = Split-Path -Parent $SummaryPath
+        if (-not [string]::IsNullOrWhiteSpace($summaryParent)) {
+            New-Item -ItemType Directory -Path $summaryParent -Force | Out-Null
+        }
+        $summaryJson | Set-Content -LiteralPath $SummaryPath -Encoding UTF8
+    }
+    $summaryJson
 } finally {
     if ($null -ne $runningProcess) {
         try {

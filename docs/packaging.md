@@ -37,6 +37,10 @@ pwsh -File packaging/package.ps1 `
   -CertificateThumbprint "<certificate-thumbprint>"
 ```
 
+The thumbprint may be the certificate-store SHA-1 (40 hexadecimal characters)
+or SHA-256 (64 hexadecimal characters); the package script selects the
+corresponding `signtool` selector.
+
 ## Install, upgrade, and uninstall behavior
 
 The installer defaults to `%LOCALAPPDATA%\AI Usage Bar` and registers the
@@ -66,10 +70,12 @@ tests.
 profile and verifies:
 
 1. install and startup registration;
-2. the shell process stays alive through its initial startup window;
-3. reinstall/upgrade preserves a sentinel user configuration;
-4. uninstall removes the package and startup value; and
-5. configuration and provider-owned sentinel data remain unchanged.
+2. the installed CLI reads the isolated configuration path;
+3. the shell process stays alive through its initial startup window;
+4. reinstall/upgrade installs a new manifest version while preserving a
+   sentinel user configuration;
+5. uninstall removes the package and startup value; and
+6. configuration and provider-owned sentinel data remain unchanged.
 
 The Windows CI workflow runs this smoke test on `windows-latest` and uploads
 the ZIP, manifest, and checksums as a retained artifact. It uses no provider

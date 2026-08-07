@@ -58,7 +58,9 @@ function Stop-InstalledShell {
         if (-not [string]::IsNullOrWhiteSpace($processPath) -and
             [IO.Path]::GetFullPath($processPath) -ieq $shellPath) {
             Stop-Process -Id $process.Id -Force
-            Start-Sleep -Milliseconds 250
+            if (-not $process.WaitForExit(10000)) {
+                throw "The installed shell did not exit within 10 seconds"
+            }
         }
     }
 }

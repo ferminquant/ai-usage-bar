@@ -50,6 +50,9 @@ class PackagingContractTests(unittest.TestCase):
     def test_smoke_covers_startup_upgrade_and_preservation(self):
         for marker in (
             "Start-Process",
+            "SummaryPath",
+            "shell.stderr.log",
+            "config_path_is_read",
             "upgrade_preserves_config",
             "uninstall_preserves_user_data",
             "startup_value_name",

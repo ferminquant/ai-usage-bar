@@ -154,23 +154,19 @@ jobs:
             -Version "0.1.0-ci.${{ github.run_number }}" `
             -OutputDirectory $output `
             -SkipBuild
-          if ($LASTEXITCODE -ne 0) {
-            throw "Package assembly failed with exit code $LASTEXITCODE"
-          }
       - name: Run clean-profile packaging smoke test
         shell: pwsh
         run: |
           $output = Join-Path $env:GITHUB_WORKSPACE "package-output"
-          $package = Get-ChildItem -LiteralPath $output -Filter "*.zip" | Select-Object -First 1
+          $packagePath = Join-Path $output "ai-usage-bar-0.1.0-ci.${{ github.run_number }}-windows-x64.zip"
+          $package = Get-Item -LiteralPath $packagePath -ErrorAction SilentlyContinue
           if ($null -eq $package) {
-            throw "Package ZIP was not produced"
+            throw "Expected package ZIP was not produced: $packagePath"
           }
           $summary = Join-Path $output "smoke-summary.json"
           & "$env:GITHUB_WORKSPACE\packaging\smoke-test.ps1" `
-            -PackagePath $package.FullName *>&1 | Tee-Object -FilePath $summary
-          if ($LASTEXITCODE -ne 0) {
-            throw "Packaging smoke test failed with exit code $LASTEXITCODE"
-          }
+            -PackagePath $package.FullName `
+            -SummaryPath $summary
       - name: Upload Windows package evidence
         if: always()
         uses: actions/upload-artifact@v4

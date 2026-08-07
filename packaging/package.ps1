@@ -80,6 +80,17 @@ if (($SignToolPath -and -not $CertificateThumbprint) -or
     ($CertificateThumbprint -and -not $SignToolPath)) {
     throw "SignToolPath and CertificateThumbprint must be supplied together"
 }
+$signingThumbprint = ($CertificateThumbprint -replace "\s", "").ToLowerInvariant()
+$signingThumbprintOption = $null
+if (-not [string]::IsNullOrWhiteSpace($signingThumbprint)) {
+    if ($signingThumbprint -match "^[0-9a-f]{40}$") {
+        $signingThumbprintOption = "/sha1"
+    } elseif ($signingThumbprint -match "^[0-9a-f]{64}$") {
+        $signingThumbprintOption = "/sha256"
+    } else {
+        throw "CertificateThumbprint must be a 40-character SHA-1 or 64-character SHA-256 thumbprint"
+    }
+}
 
 if (-not $SkipBuild) {
     Push-Location $repoRoot
@@ -117,7 +128,7 @@ $signedFiles = @()
 if (-not [string]::IsNullOrWhiteSpace($SignToolPath)) {
     foreach ($binaryName in $binaryNames) {
         $binaryPath = Join-Path $stageRoot $binaryName
-        & $SignToolPath sign /sha1 $CertificateThumbprint /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 $binaryPath
+        & $SignToolPath sign $signingThumbprintOption $signingThumbprint /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 $binaryPath
         if ($LASTEXITCODE -ne 0) {
             throw "Authenticode signing failed for $binaryName with exit code $LASTEXITCODE"
         }

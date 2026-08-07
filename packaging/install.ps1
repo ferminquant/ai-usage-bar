@@ -63,7 +63,9 @@ function Stop-InstalledShell {
         if (-not [string]::IsNullOrWhiteSpace($processPath) -and
             [IO.Path]::GetFullPath($processPath) -ieq $shellPath) {
             Stop-Process -Id $process.Id -Force
-            Start-Sleep -Milliseconds 250
+            if (-not $process.WaitForExit(10000)) {
+                throw "The installed shell did not exit within 10 seconds"
+            }
         }
     }
 }
@@ -127,14 +129,22 @@ foreach ($relativePath in $copyFiles) {
     }
 }
 $checksumPath = Join-Path $PackageRoot "checksums.sha256"
-$manifestChecksumLine = Get-Content -LiteralPath $checksumPath |
-    Where-Object { $_ -match "^\s*([0-9a-fA-F]{64})\s+package-manifest\.json\s*$" } |
-    Select-Object -First 1
-if ($null -eq $manifestChecksumLine -or $manifestChecksumLine -notmatch "^\s*([0-9a-fA-F]{64})\s+package-manifest\.json\s*$") {
-    throw "checksums.sha256 does not record package-manifest.json"
+$checksumByPath = @{}
+foreach ($line in Get-Content -LiteralPath $checksumPath) {
+    if ($line -match "^\s*([0-9a-fA-F]{64})\s+(.+?)\s*$") {
+        $checksumByPath[$matches[2].Replace("\", "/")] = $matches[1].ToLowerInvariant()
+    }
 }
-$manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
-if ($manifestHash -ine $matches[1]) {
+foreach ($entry in @($manifest.files)) {
+    $relativePath = ([string]$entry.path).Replace("\", "/")
+    if (-not $checksumByPath.ContainsKey($relativePath) -or
+        $checksumByPath[$relativePath] -ne ([string]$entry.sha256).ToLowerInvariant()) {
+        throw "checksums.sha256 does not match manifest entry: $relativePath"
+    }
+}
+$manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not $checksumByPath.ContainsKey("package-manifest.json") -or
+    $manifestHash -ne $checksumByPath["package-manifest.json"]) {
     throw "package-manifest.json does not match checksums.sha256"
 }
 
