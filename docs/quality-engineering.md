@@ -61,7 +61,9 @@ pre-1.0 target is 80%.
 Every file emitted by `cargo-llvm-cov` must either be in the enforced scope or
 have an issue-linked entry in `quality/thresholds.json`. Adding a Rust source
 file therefore requires classifying it in that policy in the same change; an
-unclassified file intentionally fails the quality job.
+unclassified file intentionally fails the quality job. A source file with no
+instrumented executable lines may be an explicit dated exclusion (as with
+`src/lib.rs`), even when it is absent from the coverage report.
 
 ## Required evidence artifacts
 

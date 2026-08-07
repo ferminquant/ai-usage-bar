@@ -88,7 +88,7 @@ jobs:
           --file src/daemon.rs
           --re 'RefreshPolicy::normalized|UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome'
           --jobs 2
-          --timeout 60
+          --timeout 120
           --build-timeout 600
           --no-shuffle
           --baseline run

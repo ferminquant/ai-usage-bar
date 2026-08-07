@@ -1,7 +1,7 @@
 # AI Usage Bar executable quality baseline
 
 - Date: 2026-08-07
-- Repository state: `fbbdba4` (`security: add redaction and audit gates (#41)`)
+- Repository state: `2d74245` (`Harden quality ratchet execution`)
 - Rust: `rustc 1.95.0 (59807616e 2026-04-14)`
 - Coverage tool: `cargo-llvm-cov 0.8.7`
 - Mutation tool: `cargo-mutants 27.1.0`
@@ -13,7 +13,7 @@ provider-specific or native Windows smoke coverage is complete.
 
 ## Test collection
 
-`cargo test --all-targets --all-features` collected and passed 127 tests across
+`cargo test --all-targets --all-features` collected and passed 128 tests across
 the unit target and the contract, invariant, acceptance, and shell integration
 targets. The dedicated contract, invariant, and acceptance commands also
 passed.
@@ -39,6 +39,10 @@ The complete per-file report is retained as the CI `quality-evidence`
 artifact. The alpha gate is 90% for the scope and for each listed core file;
 the pre-1.0 target is 95%.
 
+The current headroom watch list is `src/viewmodel.rs` at 90.1316% and
+`src/daemon.rs` at 90.8333%; changes adding uncovered lines there should add
+tests in the same change.
+
 ## Mutation testing
 
 The bounded mutation command targeted snapshot validation and normalization,
@@ -54,6 +58,7 @@ invariant tests, and the checked-in regex matched every emitted mutant.
 | Missed | 6 |
 | Timed out | 0 |
 | Unviable | 7 |
+| Succeeded | 0 |
 | Viable denominator | 44 |
 | Mutation score | **86.3636%** |
 
@@ -69,8 +74,10 @@ so invariant-killed mutants remain inspectable.
 
 Provider adapters, configuration, browser hand-off, and native Windows
 entrypoints are reported but excluded from the alpha policy-core coverage
-scope. View-model mutation is outside the first bounded mutation file list
-because its presentation branches need a UI-focused mutation budget. Coverage
+scope. The crate-root `src/lib.rs` is an explicit dated exclusion because it
+has no instrumented executable lines. View-model mutation is outside the
+first bounded mutation file list because its presentation branches need a
+UI-focused mutation budget. Coverage
 exceptions are recorded with issue #13 and a 2026-10-31 review date in
 [`quality/thresholds.json`](../../quality/thresholds.json). The review must
 either extend the evidence or replace each exception before that date.

@@ -30,6 +30,12 @@
         "review_by": "2026-10-31"
       },
       {
+        "path": "src/lib.rs",
+        "reason": "Crate module and re-export declarations have no instrumented executable lines; module behavior is measured in the scoped source files.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
         "path": "src/codex.rs",
         "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
         "issue": 13,

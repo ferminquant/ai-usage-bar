@@ -87,6 +87,8 @@ def _validate_exclusions(
 
 def load_coverage_report(path: Path, root: Path, policy: dict[str, Any]) -> dict[str, Any]:
     report = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise QualityError("coverage report must be a JSON object")
     data = report.get("data")
     if not isinstance(data, list) or not data:
         raise QualityError("coverage report has no data entries")
@@ -123,10 +125,14 @@ def load_coverage_report(path: Path, root: Path, policy: dict[str, Any]) -> dict
             "coverage files must be scoped or explicitly excluded: "
             + ", ".join(unclassified)
         )
-    unknown_exclusions = sorted(excluded_set - report_set)
+    unknown_exclusions = sorted(
+        path
+        for path in excluded_set - report_set
+        if not (root / path).is_file()
+    )
     if unknown_exclusions:
         raise QualityError(
-            "coverage exclusions are absent from the report: "
+            "coverage exclusions are absent from the report and filesystem: "
             + ", ".join(unknown_exclusions)
         )
 
@@ -169,7 +175,19 @@ def load_coverage_report(path: Path, root: Path, policy: dict[str, Any]) -> dict
         "scoped": scoped,
         "scope_files": {path: files[path] for path in scope},
         "excluded_files": [
-            exclusions[path] | {"coverage": files[path]} for path in sorted(exclusions)
+            exclusions[path]
+            | {
+                "coverage": files.get(
+                    path,
+                    {
+                        "count": 0,
+                        "covered": 0,
+                        "percent": None,
+                        "instrumented": False,
+                    },
+                )
+            }
+            for path in sorted(exclusions)
         ],
         "all_files": files,
         "gates": gates,
@@ -178,20 +196,27 @@ def load_coverage_report(path: Path, root: Path, policy: dict[str, Any]) -> dict
 
 def load_mutation_report(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
     report = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise QualityError("mutation report must be a JSON object")
     mutation_policy = policy.get("mutation")
     if not isinstance(mutation_policy, dict):
         raise QualityError("policy has no mutation section")
     values = {}
-    for key in ("total_mutants", "caught", "missed", "timeout", "unviable"):
+    for key in ("total_mutants", "caught", "missed", "timeout", "unviable", "success"):
         value = report.get(key)
         if not isinstance(value, int) or value < 0:
             raise QualityError(f"mutation report has invalid {key}")
         values[key] = value
-    if values["caught"] + values["missed"] + values["timeout"] + values["unviable"] != values[
-        "total_mutants"
-    ]:
+    if (
+        values["caught"]
+        + values["missed"]
+        + values["timeout"]
+        + values["unviable"]
+        + values["success"]
+        != values["total_mutants"]
+    ):
         raise QualityError("mutation outcome counts do not add up to total_mutants")
-    viable = values["caught"] + values["missed"] + values["timeout"]
+    viable = values["caught"] + values["missed"] + values["timeout"] + values["success"]
     if viable == 0:
         raise QualityError("mutation report has no viable mutants")
     score = values["caught"] / viable * 100.0
@@ -287,6 +312,7 @@ def write_summary(
                 "missed",
                 "timeout",
                 "unviable",
+                "success",
                 "viable",
                 "score_percent",
                 "alpha_threshold",
@@ -316,6 +342,8 @@ def main() -> int:
     root = args.root.resolve()
     try:
         policy = json.loads(args.thresholds.read_text(encoding="utf-8"))
+        if not isinstance(policy, dict):
+            raise QualityError("quality policy must be a JSON object")
         coverage = load_coverage_report(args.coverage, root, policy)
         mutation = load_mutation_report(args.mutants, policy)
         gates = evaluate(coverage, mutation)

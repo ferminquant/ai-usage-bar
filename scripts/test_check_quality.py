@@ -37,6 +37,7 @@ class QualityEvidenceTests(unittest.TestCase):
         }
 
     def test_coverage_scope_is_aggregated_and_gated(self) -> None:
+        import copy
         report = {
             "data": [
                 {
@@ -58,9 +59,24 @@ class QualityEvidenceTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "lib.rs").write_text("pub mod model;\n", encoding="utf-8")
+            for file_entry in report["data"][0]["files"]:
+                relative = Path(file_entry["filename"]).relative_to("/repo")
+                file_entry["filename"] = str(root / relative)
+            policy = copy.deepcopy(self.policy)
+            policy["coverage"]["excluded"].append(
+                {
+                    "path": "src/lib.rs",
+                    "reason": "no instrumented executable lines",
+                    "issue": 13,
+                    "review_by": (dt.date.today() + dt.timedelta(days=1)).isoformat(),
+                }
+            )
             path = Path(directory) / "coverage.json"
             path.write_text(json.dumps(report), encoding="utf-8")
-            result = check_quality.load_coverage_report(path, Path("/repo"), self.policy)
+            result = check_quality.load_coverage_report(path, root, policy)
         self.assertEqual(result["scoped"]["percent"], 100.0)
         self.assertTrue(result["gates"][0]["passed"])
         self.assertEqual(result["full"]["percent"], 83.3333)
@@ -75,6 +91,7 @@ class QualityEvidenceTests(unittest.TestCase):
             "missed": 1,
             "timeout": 0,
             "unviable": 1,
+            "success": 0,
             "cargo_mutants_version": "test",
             "outcomes": [
                 {"scenario": {"Baseline": {}}, "summary": "Success"},
@@ -99,6 +116,49 @@ class QualityEvidenceTests(unittest.TestCase):
         self.assertEqual(result["viable"], 4)
         self.assertEqual(result["score_percent"], 75.0)
         self.assertTrue(result["gate"]["passed"])
+
+    def test_mutation_successes_are_viable(self) -> None:
+        import json
+        import tempfile
+
+        report = {
+            "total_mutants": 2,
+            "caught": 1,
+            "missed": 0,
+            "timeout": 0,
+            "unviable": 0,
+            "success": 1,
+            "outcomes": [
+                {"scenario": {"Baseline": {}}, "summary": "Success"},
+                *[
+                    {
+                        "scenario": {
+                            "Mutant": {
+                                "name": "src/model.rs:1: model mutation",
+                                "file": "src/model.rs",
+                            }
+                        },
+                        "summary": "CaughtMutant",
+                    },
+                    {
+                        "scenario": {
+                            "Mutant": {
+                                "name": "src/model.rs:2: model survivor",
+                                "file": "src/model.rs",
+                            }
+                        },
+                        "summary": "Success",
+                    },
+                ],
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "outcomes.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            result = check_quality.load_mutation_report(path, self.policy)
+        self.assertEqual(result["viable"], 2)
+        self.assertEqual(result["score_percent"], 50.0)
+        self.assertFalse(result["gate"]["passed"])
 
     def test_coverage_rejects_unclassified_files(self) -> None:
         import json
@@ -170,6 +230,7 @@ class QualityEvidenceTests(unittest.TestCase):
             "missed": 0,
             "timeout": 0,
             "unviable": 0,
+            "success": 0,
             "outcomes": [],
         }
         with tempfile.TemporaryDirectory() as directory:
