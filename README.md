@@ -11,10 +11,12 @@ The initial provider set is:
 - Kimi
 - Ollama Pro/cloud (hosted)
 - Grok
+- OpenCode Go (inferred local ledger estimate)
 
-The MVP core is implemented: Codex, Grok consumer, Kimi, and opt-in Ollama
-Pro/cloud adapters, cached freshness states, contract/invariant tests, a
-Windows shell, and hosted-provider configuration. The Kimi usage source was
+The MVP core is implemented: Codex, Grok consumer, Kimi, Ollama Pro/cloud, and
+an explicitly inferred OpenCode Go local-ledger estimator, cached freshness
+states, contract/invariant tests, a Windows shell, and hosted-provider
+configuration. The Kimi usage source was
 validated in [spike #3](https://github.com/ferminquant/ai-usage-bar/issues/3)
 and implemented in [#17](https://github.com/ferminquant/ai-usage-bar/issues/17).
 
@@ -46,6 +48,19 @@ percentages. Kimi is registered but opt-in until enabled in
 the config file; a missing CLI login shows as "not configured", never zero
 usage, and the user is pointed at `kimi login` and the
 [Kimi Code Console](https://www.kimi.com/code/console).
+
+OpenCode Go reports inferred five-hour, weekly, and monthly percentages from
+the local OpenCode SQLite ledger. It applies the current published model
+Usage-tier multipliers to raw Go costs, so it is useful for this machine but
+is not account-authoritative and cannot include other devices or workspaces.
+The rolling reset is estimated from the latest local Go event. Weekly and
+monthly reset anchors are editable from the OpenCode right-click menu; leaving
+either field blank restores the built-in Monday/first-of-month defaults. The
+editor accepts the same countdown text shown by the dashboard, such as
+`2 days 10 hours` or `29 days 0 hours` (and also a copied `Resets in ...`
+line), so no timezone conversion is needed. The rolling five-hour reset is
+derived from local activity and is not edited there. The
+exact account usage endpoint remains tracked upstream and is not scraped.
 
 ## Product direction
 
@@ -104,8 +119,9 @@ credentials are sent to a project server.
 
 On Windows, copy that example to %APPDATA%\AI Usage Bar\config.json and set
 enabled to false for any hosted provider you want to opt out of. A missing
-file uses the default Codex and Grok configuration; Ollama Pro/cloud and Kimi
-are registered but opt-in until enabled in that file.
+file enables Codex, Grok, and OpenCode Go when its local database is present;
+Ollama Pro/cloud and Kimi remain registered but opt-in until enabled in that
+file.
 
 ## Proposed first release
 

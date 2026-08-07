@@ -1,0 +1,22 @@
+{
+  "_description": "Synthetic usage response in which the provider supplies percentages but no reset metadata. Reset times stay empty; no five-hour, weekly, or monthly boundary is inferred.",
+  "_source": "future supported OpenCode Go usage source (not currently available)",
+  "_status": "reset-unknown",
+  "_capturedAt": "2026-08-06T00:00:00Z",
+  "rollingUsage": {
+    "status": "ok",
+    "usagePercent": 14
+  },
+  "weeklyUsage": {
+    "status": "ok",
+    "usagePercent": 9
+  },
+  "monthlyUsage": {
+    "status": "ok",
+    "usagePercent": 3
+  },
+  "_expected": {
+    "resets_at": null,
+    "note": "missing reset metadata is unknown, not a guessed timestamp"
+  }
+}

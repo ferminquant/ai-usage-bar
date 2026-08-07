@@ -5,9 +5,11 @@
 //! own local login/session surface.
 
 use crate::{
-    CodexAdapter, GrokConsumerAdapter, KimiAdapter, OllamaCloudAdapter, Provider,
-    ProviderRegistry, RegistryError, session_available,
+    opencode_data_available, CodexAdapter, GrokConsumerAdapter, KimiAdapter, OllamaCloudAdapter,
+    OpenCodeGoAdapter, OpenCodeResetSettings, Provider, ProviderRegistry, RegistryError,
+    session_available,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -33,11 +35,21 @@ pub struct ProviderSettings {
     /// Whether this provider should be scheduled and rendered.
     #[serde(default = "default_provider_enabled")]
     pub enabled: bool,
+    /// Optional next weekly reset anchor for OpenCode Go, in UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_reset_at: Option<DateTime<Utc>>,
+    /// Optional next monthly reset anchor for OpenCode Go, in UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_reset_at: Option<DateTime<Utc>>,
 }
 
 impl Default for ProviderSettings {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            weekly_reset_at: None,
+            monthly_reset_at: None,
+        }
     }
 }
 
@@ -116,7 +128,30 @@ impl AppConfig {
     /// Update one provider's persisted enablement setting.
     pub fn set_provider_enabled(&mut self, provider: &Provider, enabled: bool) {
         self.providers
-            .insert(provider.as_str().to_string(), ProviderSettings { enabled });
+            .entry(provider.as_str().to_string())
+            .or_default()
+            .enabled = enabled;
+    }
+
+    /// Return the user-configured OpenCode Go reset anchors.
+    pub fn opencode_reset_settings(&self) -> OpenCodeResetSettings {
+        self.providers
+            .get(Provider::OpenCodeGo.as_str())
+            .map(|settings| OpenCodeResetSettings {
+                weekly_reset_at: settings.weekly_reset_at,
+                monthly_reset_at: settings.monthly_reset_at,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Persist OpenCode Go reset anchors without changing provider enablement.
+    pub fn set_opencode_reset_settings(&mut self, settings: OpenCodeResetSettings) {
+        let provider = self
+            .providers
+            .entry(Provider::OpenCodeGo.as_str().to_string())
+            .or_default();
+        provider.weekly_reset_at = settings.weekly_reset_at;
+        provider.monthly_reset_at = settings.monthly_reset_at;
     }
 
     fn validate_version(&self) -> Result<(), ConfigError> {
@@ -128,7 +163,10 @@ impl AppConfig {
 }
 
 fn default_enabled_provider(provider: &Provider) -> bool {
-    matches!(provider, Provider::Codex | Provider::GrokConsumer)
+    matches!(
+        provider,
+        Provider::Codex | Provider::GrokConsumer | Provider::OpenCodeGo
+    )
 }
 
 /// Return the platform-specific per-user configuration path.
@@ -175,6 +213,11 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
     registry.register(CodexAdapter)?;
     registry.register(GrokConsumerAdapter)?;
     registry.register(OllamaCloudAdapter)?;
+    if opencode_data_available() {
+        registry.register(OpenCodeGoAdapter::new(config.opencode_reset_settings()))?;
+    } else {
+        registry.register_not_configured(Provider::OpenCodeGo)?;
+    }
     // Kimi reuses the CLI OAuth session: with a session it is a live adapter;
     // without one it registers as not configured (never zero usage).
     if session_available() {
@@ -188,6 +231,7 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
         Provider::GrokConsumer,
         Provider::OllamaCloud,
         Provider::Kimi,
+        Provider::OpenCodeGo,
     ] {
         registry.set_enabled(&provider, config.provider_enabled(&provider))?;
     }
@@ -227,6 +271,7 @@ mod tests {
 
         assert!(config.provider_enabled(&Provider::Codex));
         assert!(config.provider_enabled(&Provider::GrokConsumer));
+        assert!(config.provider_enabled(&Provider::OpenCodeGo));
         assert!(!config.provider_enabled(&Provider::Kimi));
         assert!(!config.provider_enabled(&Provider::OllamaCloud));
     }
@@ -292,6 +337,35 @@ mod tests {
     }
 
     #[test]
+    fn opencode_reset_anchors_round_trip_without_credentials() {
+        let path = std::env::temp_dir().join(format!(
+            "ai-usage-bar-opencode-reset-config-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        let weekly = DateTime::parse_from_rfc3339("2026-08-10T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let monthly = DateTime::parse_from_rfc3339("2026-09-06T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut config = AppConfig::default();
+        config.set_opencode_reset_settings(OpenCodeResetSettings {
+            weekly_reset_at: Some(weekly),
+            monthly_reset_at: Some(monthly),
+        });
+        config.save(&path).unwrap();
+        assert_eq!(AppConfig::load(&path).unwrap().opencode_reset_settings(), OpenCodeResetSettings {
+            weekly_reset_at: Some(weekly),
+            monthly_reset_at: Some(monthly),
+        });
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("token"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn bootstrap_registers_only_the_compiled_hosted_adapters() {
         let registry = build_registry(&AppConfig::default()).unwrap();
         assert_eq!(
@@ -300,6 +374,7 @@ mod tests {
                 Provider::Codex,
                 Provider::GrokConsumer,
                 Provider::OllamaCloud,
+                Provider::OpenCodeGo,
                 Provider::Kimi
             ]
         );
