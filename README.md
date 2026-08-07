@@ -28,6 +28,10 @@ copying, or manual setup is required. Reset metadata is tracked in
 [issue #35](https://github.com/ferminquant/ai-usage-bar/issues/35) while
 Ollama works on a supported API surface.
 
+On Windows, the adapter also handles the common WSL setup: if the native
+Windows Ollama key is rejected, it retries with the default WSL Ollama key
+without signing out, copying credentials, or interrupting active sessions.
+
 Kimi reports the weekly plan window (7 days from the subscription date), each
 reported rate window (with the rolling 5-hour window shown first), and the
 Extra Usage balance as a separate credits snapshot. If the managed endpoint

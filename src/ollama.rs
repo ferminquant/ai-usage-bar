@@ -4,16 +4,21 @@
 //! totals. Ollama does not currently include reset timestamps in that JSON, so
 //! the adapter leaves `resets_at` empty. The Windows shell offers a direct link
 //! to the authenticated settings page as the low-friction fallback until
-//! Ollama exposes reset metadata through a supported API.
+//! Ollama exposes reset metadata through a supported API. On Windows, a
+//! signed-in Ollama daemon may be running inside WSL while the tray process is
+//! native Windows; if the native key is rejected, the adapter retries with the
+//! default WSL Ollama key without changing either session.
 
 use crate::model::*;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use signature::Signer;
-use ssh_key::PrivateKey;
+use ssh_key::{PrivateKey, PublicKey};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(windows)]
+use std::process::Command;
 use std::time::Duration;
 
 const OLLAMA_PROVIDER: Provider = Provider::OllamaCloud;
@@ -96,7 +101,7 @@ enum OllamaAuth {
     },
     SignedKey {
         private_key: Box<PrivateKey>,
-        public_key_blob: Vec<u8>,
+        public_key_authorization: String,
         account_id: String,
     },
 }
@@ -113,7 +118,7 @@ impl OllamaAuth {
             Self::ApiKey { value, .. } => Ok(format!("Bearer {value}")),
             Self::SignedKey {
                 private_key,
-                public_key_blob,
+                public_key_authorization,
                 ..
             } => {
                 let challenge = format!("GET,/api/usage?ts={timestamp}");
@@ -125,7 +130,7 @@ impl OllamaAuth {
                     .map_err(|_| OllamaAdapterError::AuthExpired)?;
                 Ok(format!(
                     "{}:{}",
-                    BASE64.encode(public_key_blob),
+                    public_key_authorization,
                     BASE64.encode(signature.as_bytes())
                 ))
             }
@@ -135,9 +140,24 @@ impl OllamaAuth {
 
 /// Fetch the live session and weekly cloud quota snapshots.
 pub fn fetch_ollama_cloud_snapshots() -> Result<Vec<UsageSnapshot>, OllamaAdapterError> {
-    let auth = load_auth()?;
     let observed_at = Utc::now();
-    let body = http_get_usage(&auth, observed_at.timestamp())?;
+    let timestamp = observed_at.timestamp();
+    let auth = match load_auth() {
+        Ok(auth) => auth,
+        Err(OllamaAdapterError::AuthExpired) if wsl_auth_fallback_allowed() => {
+            load_wsl_auth().ok_or(OllamaAdapterError::AuthExpired)?
+        }
+        Err(error) => return Err(error),
+    };
+    let body = match http_get_usage(&auth, timestamp) {
+        Ok(body) => body,
+        Err(OllamaAdapterError::AuthExpired) if wsl_auth_fallback_allowed() => {
+            let wsl_auth = load_wsl_auth().ok_or(OllamaAdapterError::AuthExpired)?;
+            let body = http_get_usage(&wsl_auth, timestamp)?;
+            return parse_usage_response(&body, observed_at, wsl_auth.account_id());
+        }
+        Err(error) => return Err(error),
+    };
 
     parse_usage_response(&body, observed_at, auth.account_id())
 }
@@ -273,20 +293,67 @@ fn load_auth() -> Result<OllamaAuth, OllamaAdapterError> {
 
     let path = private_key_path();
     let raw = fs::read(&path).map_err(|_| OllamaAdapterError::AuthExpired)?;
-    let private_key = parse_private_key(&raw)?;
+    auth_from_private_key(parse_private_key(&raw)?)
+}
+
+fn auth_from_private_key(private_key: PrivateKey) -> Result<OllamaAuth, OllamaAdapterError> {
     if private_key.is_encrypted() || !private_key.key_data().is_ed25519() {
         return Err(OllamaAdapterError::AuthExpired);
     }
-    let public_key_blob = private_key
-        .public_key()
+    let public_key = private_key.public_key();
+    let public_key_blob = public_key
         .to_bytes()
         .map_err(|_| OllamaAdapterError::AuthExpired)?;
+    let public_key_authorization = public_key_authorization(public_key)?;
     let account_id = format!("ollama-{:016x}", simple_hash(&public_key_blob));
     Ok(OllamaAuth::SignedKey {
         private_key: Box::new(private_key),
-        public_key_blob,
+        public_key_authorization,
         account_id,
     })
+}
+
+#[cfg(windows)]
+fn load_wsl_auth() -> Option<OllamaAuth> {
+    let output = Command::new("wsl.exe")
+        .args([
+            "--exec",
+            "sh",
+            "-c",
+            "cat \"$HOME/.ollama/id_ed25519\"",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let private_key = parse_private_key(&output.stdout).ok()?;
+    auth_from_private_key(private_key).ok()
+}
+
+#[cfg(not(windows))]
+fn load_wsl_auth() -> Option<OllamaAuth> {
+    None
+}
+
+fn wsl_auth_fallback_allowed() -> bool {
+    cfg!(windows)
+        && env_value(&["OLLAMA_API_KEY", "OLLAMA_KEY", "OLLAMA_ID", "OLLAMA_HOME"]).is_none()
+}
+
+/// Return the base64 payload Ollama's official client uses in its
+/// `<public-key>:<signature>` authorization header. The payload must include
+/// both the algorithm name and the key data; `PublicKey::to_bytes()` contains
+/// only the latter.
+fn public_key_authorization(public_key: &PublicKey) -> Result<String, OllamaAdapterError> {
+    public_key
+        .to_openssh()
+        .map_err(|_| OllamaAdapterError::AuthExpired)?
+        .split_whitespace()
+        .nth(1)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(OllamaAdapterError::AuthExpired)
 }
 
 fn parse_private_key(raw: &[u8]) -> Result<PrivateKey, OllamaAdapterError> {
@@ -471,5 +538,23 @@ mod tests {
         };
         assert!(auth.account_id().starts_with("ollama-api-"));
         assert!(!auth.account_id().contains("secret-value"));
+    }
+
+    #[test]
+    fn signed_authorization_uses_the_full_ssh_public_key_payload() {
+        let public_key = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti foo@bar.com",
+        )
+        .unwrap();
+        let encoded = public_key_authorization(&public_key).unwrap();
+        let decoded = BASE64.decode(encoded).unwrap();
+
+        assert_eq!(&decoded[..4], 11u32.to_be_bytes());
+        assert_eq!(&decoded[4..15], b"ssh-ed25519");
+        assert_eq!(
+            &decoded[15..19],
+            32u32.to_be_bytes(),
+            "the key data must follow the algorithm name"
+        );
     }
 }
