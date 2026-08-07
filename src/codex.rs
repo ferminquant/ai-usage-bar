@@ -29,12 +29,12 @@ impl From<CodexAdapterError> for AdapterError {
             CodexAdapterError::SchemaDrift(_) => ErrorCode::SchemaDrift,
             CodexAdapterError::Io(_) => ErrorCode::Network,
         };
-        let message = match &e {
-            CodexAdapterError::Io(msg) => Some(msg.clone()),
-            CodexAdapterError::SchemaDrift(msg) => Some(msg.clone()),
-            _ => None,
-        };
-        AdapterError { code, message }
+        // Preserve only the stable code. Raw subprocess and parser messages
+        // can contain paths, command arguments, or provider payload text.
+        AdapterError {
+            code,
+            message: None,
+        }
     }
 }
 
@@ -590,6 +590,17 @@ mod tests {
         assert!(snap.used.is_none());
         assert!(snap.error.is_some());
         assert_eq!(snap.error.unwrap().code, ErrorCode::Timeout);
+    }
+
+    #[test]
+    fn adapter_error_drops_raw_subprocess_text() {
+        let error: AdapterError = CodexAdapterError::Io(
+            "Authorization: Bearer short-token and parser payload".into(),
+        )
+        .into();
+
+        assert_eq!(error.code, ErrorCode::Network);
+        assert_eq!(error.message, None);
     }
 
     #[test]

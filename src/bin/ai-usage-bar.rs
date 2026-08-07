@@ -1,13 +1,16 @@
 use ai_usage_bar::{
-    load_registry, provider_display_name, Freshness, Provider, RefreshPolicy, RefreshService,
-    UsageSnapshot,
+    load_registry, provider_display_name, redact_sensitive_text, Freshness, Provider,
+    RefreshPolicy, RefreshService, UsageSnapshot,
 };
 
 fn main() {
     let registry = match load_registry() {
         Ok(registry) => registry,
         Err(error) => {
-            eprintln!("failed to load provider configuration: {error}");
+            eprintln!(
+                "failed to load provider configuration: {}",
+                redact_sensitive_text(&error.to_string())
+            );
             std::process::exit(1);
         }
     };
@@ -50,7 +53,11 @@ fn print_provider(name: &str, snapshots: &[UsageSnapshot]) {
             .unwrap_or_default()
     );
     for s in snapshots {
-        let label = s.window_label.as_deref().unwrap_or("—");
+        let label = s
+            .window_label
+            .as_deref()
+            .map(redact_sensitive_text)
+            .unwrap_or_else(|| "—".to_string());
         let used = s.used.map(|u| format!("{u:.0}")).unwrap_or_else(|| "—".into());
         let limit = s
             .limit
@@ -64,7 +71,7 @@ fn print_provider(name: &str, snapshots: &[UsageSnapshot]) {
             .resets_at
             .map(|r| r.to_rfc3339())
             .unwrap_or_else(|| "—".to_string());
-        let unit = &s.unit;
+        let unit = redact_sensitive_text(&s.unit);
 
         println!(
             "  [{label}] {kind:?} {window:?} — used {used}/{limit} {unit}, remaining {remaining}, resets {resets}",
@@ -78,7 +85,10 @@ fn print_provider(name: &str, snapshots: &[UsageSnapshot]) {
             println!(
                 "    error: {} ({})",
                 err.code.as_str(),
-                err.message.as_deref().unwrap_or("")
+                err.message
+                    .as_deref()
+                    .map(redact_sensitive_text)
+                    .unwrap_or_default()
             );
         }
     }

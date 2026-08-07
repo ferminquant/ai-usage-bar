@@ -1,0 +1,6 @@
+# `ssh-key` keeps optional RSA support in its lock metadata even though this
+# application enables only Ed25519 signing. The advisory applies to that
+# unused optional dependency; there is no fixed upstream release. Keep the
+# exception documented in the repository while avoiding a false CI failure.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

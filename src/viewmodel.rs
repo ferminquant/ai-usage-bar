@@ -1,4 +1,5 @@
 use crate::model::{Freshness, MetricKind, Provider, UsageSnapshot};
+use crate::security::{redact_sensitive_text, safe_identifier};
 use chrono::{DateTime, Utc};
 use chrono_tz::America::Toronto;
 
@@ -51,13 +52,13 @@ impl MetricCard {
                 _ => "usage".into(),
             });
         MetricCard {
-            label,
+            label: redact_sensitive_text(&label),
             metric_kind: s.metric_kind,
             window_kind: format!("{:?}", s.window_kind).to_lowercase(),
             used: s.used.map(|v| format!("{v:.0}")),
             remaining: s.remaining.map(|v| format!("{v:.0}")),
             limit: s.limit.map(|v| format!("{v:.0}")),
-            unit: s.unit.clone(),
+            unit: redact_sensitive_text(&s.unit),
             unlimited: s.unlimited,
             resets_at: s.resets_at.map(|t| t.to_rfc3339()),
             observed_at: s.observed_at.to_rfc3339(),
@@ -67,7 +68,10 @@ impl MetricCard {
                 format!(
                     "{}: {}",
                     e.code.as_str(),
-                    e.message.as_deref().unwrap_or("")
+                    e.message
+                        .as_deref()
+                        .map(redact_sensitive_text)
+                        .unwrap_or_default()
                 )
             }),
         }
@@ -81,7 +85,7 @@ impl ProviderCard {
             let key = format!("{}-{}", s.provider, s.account_id);
             let card = providers.entry(key.clone()).or_insert(ProviderCard {
                 provider: provider_display_name(&s.provider).to_string(),
-                account_id: s.account_id.clone(),
+                account_id: safe_identifier(&s.account_id),
                 freshness: s.freshness,
                 metrics: Vec::new(),
             });
@@ -527,6 +531,30 @@ mod tests {
         let vm = build_tray_view(&snaps);
         assert_eq!(vm.icon_text, "⛔");
         assert!(vm.tooltip.contains("timeout"));
+    }
+
+    #[test]
+    fn diagnostic_view_redacts_account_and_error_metadata() {
+        let mut snapshot = make_snapshot(None, Freshness::Unavailable, None);
+        snapshot.account_id = "person@example.com".into();
+        snapshot.error = Some(AdapterError {
+            code: ErrorCode::Network,
+            message: Some("Authorization: Bearer short-token".into()),
+        });
+
+        let cards = ProviderCard::from_snapshots(&[snapshot]);
+
+        assert!(cards[0].account_id.starts_with("account-"));
+        assert!(!cards[0].account_id.contains("person@example.com"));
+        assert!(cards[0].metrics[0]
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("[REDACTED]")));
+        assert!(!cards[0].metrics[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("short-token"));
     }
 
     #[test]

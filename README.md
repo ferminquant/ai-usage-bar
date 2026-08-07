@@ -108,6 +108,8 @@ credentials are sent to a project server.
 - [Quality engineering](docs/quality-engineering.md) — measurable gates,
   evidence artifacts, and the “constraints around agent-generated code”
   approach.
+- [Security boundaries](docs/security.md) — redaction, safe diagnostics,
+  dependency/secret gates, and the allowlisted browser hand-off.
 - [Initial quality baseline](docs/generated/quality-baseline-20260731.md) —
   the honest docs-only starting point for future ratchets.
 - [Testing strategy](docs/testing-strategy.md) — unit, contract, invariant,

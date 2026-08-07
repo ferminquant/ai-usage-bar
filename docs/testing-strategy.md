@@ -65,9 +65,10 @@ should assert accessible names and state labels, not screenshot pixels alone.
 
 ### Security tests
 
-Add secret-pattern fixtures, log-capture tests, permission checks for browser
-bridges, dependency audits, and a check that test artifacts contain no raw
-provider payloads.
+The security gate runs the tracked-file secret scanner and dependency audit.
+Unit/invariant tests cover redaction at adapter, daemon, and view-model
+boundaries; browser destination tests verify the fixed HTTPS allowlist. Test
+artifacts must never contain raw provider payloads or personal credentials.
 
 ### Mutation and property-based tests
 
@@ -97,7 +98,6 @@ The remaining markers stay reserved for the corresponding future suites:
 - integration
 - ui
 - packaging
-- security
 - diagnostic
 
 The deterministic CI job runs the three implemented integration binaries on
