@@ -133,6 +133,53 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  windows-package:
+    name: Windows packaging and smoke tests
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Build release entrypoints
+        run: cargo build --release --locked --bin ai-usage-bar --bin ai-usage-bar-shell
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE "package-output"
+          & "$env:GITHUB_WORKSPACE\packaging\package.ps1" `
+            -Version "0.1.0-ci.${{ github.run_number }}" `
+            -OutputDirectory $output `
+            -SkipBuild
+          if ($LASTEXITCODE -ne 0) {
+            throw "Package assembly failed with exit code $LASTEXITCODE"
+          }
+      - name: Run clean-profile packaging smoke test
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE "package-output"
+          $package = Get-ChildItem -LiteralPath $output -Filter "*.zip" | Select-Object -First 1
+          if ($null -eq $package) {
+            throw "Package ZIP was not produced"
+          }
+          $summary = Join-Path $output "smoke-summary.json"
+          & "$env:GITHUB_WORKSPACE\packaging\smoke-test.ps1" `
+            -PackagePath $package.FullName *>&1 | Tee-Object -FilePath $summary
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaging smoke test failed with exit code $LASTEXITCODE"
+          }
+      - name: Upload Windows package evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: package-output/
+          if-no-files-found: warn
+          retention-days: 14
+
   security:
     name: Security scans and dependency audit
     runs-on: ubuntu-latest

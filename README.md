@@ -89,6 +89,24 @@ The current implementation is Windows-first. Provider adapters run locally and
 use each service's existing session or credential surface; no provider
 credentials are sent to a project server.
 
+## Build and package on Windows
+
+The shell can be built directly from a Windows checkout:
+
+```powershell
+cargo build --release --locked --bin ai-usage-bar --bin ai-usage-bar-shell
+```
+
+To create the portable, per-user ZIP package with install, upgrade, uninstall,
+manifest, and checksum files:
+
+```powershell
+pwsh -File packaging/package.ps1 -OutputDirectory .\dist
+```
+
+The package lifecycle and clean-machine smoke contract are documented in
+[Windows packaging](docs/packaging.md).
+
 ## Documentation
 
 - [Product brief](docs/product-brief.md) — problem, users, goals, and
@@ -116,6 +134,8 @@ credentials are sent to a project server.
   integration, UI, packaging, security, and mutation-test plans.
 - [Runner strategy](docs/runner-strategy.md) — whether the existing Budget
   self-hosted runners can be reused safely.
+- [Windows packaging](docs/packaging.md) — the portable package format,
+  startup/upgrade/uninstall behavior, signing, and smoke test.
 - [References](docs/references.md) — design inspiration, prior art, and
   primary provider documentation.
 
