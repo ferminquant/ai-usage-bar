@@ -66,6 +66,20 @@ is not a supported production contract today. A later probe must be repeated
 after the upstream issue/PR changes state; do not treat a transient 404 page,
 an HTML dashboard, or a model response as quota data.
 
+### Workspace dashboard route
+
+The authenticated dashboard route has the form
+`https://opencode.ai/workspace/<workspace-id>/go`. Fetching the user's exact
+route with curl returned an HTTP redirect to `auth.opencode.ai/authorize`.
+Supplying the Go inference key as `Authorization: Bearer` did not change that
+result: the page requires the web login/session and workspace actor, not the
+provider key used by the Go model gateway.
+
+This is useful as a manual browser fallback, but it is not a CLI API. The
+workspace id, browser cookie, and rendered HTML are intentionally not stored
+in the repository. The product must not copy those cookies or scrape the page
+to manufacture a quota source.
+
 ## CLI and local auth findings
 
 The installed CLI exposes provider credential management and local statistics:
