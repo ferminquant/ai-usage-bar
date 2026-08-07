@@ -48,6 +48,74 @@ jobs:
       - name: Run acceptance tests
         run: cargo test --test acceptance --all-features
 
+  quality:
+    name: Coverage and mutation quality ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Install coverage and mutation tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Install mutation tool
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Test quality gate script
+        run: python -m unittest discover --start-directory scripts --pattern 'test_*.py'
+      - name: Collect line coverage
+        shell: bash
+        run: |
+          mkdir -p quality-output
+          cargo llvm-cov --all-features --all-targets --json --summary-only \
+            --output-path quality-output/coverage.json
+      - name: Run bounded policy-core mutation suite
+        continue-on-error: true
+        run: >-
+          cargo mutants --all-features
+          --file src/model.rs
+          --file src/daemon.rs
+          --re 'UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome'
+          --jobs 2
+          --timeout 60
+          --build-timeout 300
+          --no-shuffle
+          --baseline run
+      - name: Evaluate quality gates
+        run: >-
+          python scripts/check_quality.py
+          --coverage quality-output/coverage.json
+          --mutants mutants.out/outcomes.json
+          --thresholds quality/thresholds.json
+          --summary-out quality-output/quality-summary.json
+      - name: Add quality summary to job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f quality-output/quality-summary.json ]; then
+            echo '### Quality ratchet' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat quality-output/quality-summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-evidence
+          path: |
+            quality-output/
+            mutants.out/
+          if-no-files-found: warn
+          retention-days: 14
+
   windows:
     name: Windows shell tests and clippy
     runs-on: windows-latest

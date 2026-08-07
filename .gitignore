@@ -1,1 +1,4 @@
 /target
+/mutants.out
+/quality-output
+__pycache__/
