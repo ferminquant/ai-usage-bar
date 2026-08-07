@@ -18,7 +18,7 @@ The issue's “OpenCode Co” wording refers to the official product name,
 | OpenCode Console usage export | Reject as the Go quota source. It is a service-account-only historical CSV export with bounded UTC ranges, not remaining allowance or reset metadata. |
 | Proposed `GET /zen/go/v1/usage` | Monitor, but do not implement against it yet. The upstream request is still open and the live endpoint returned HTTP 404 on 2026-08-06. |
 | Browser automation | Not required for a local estimate. The authenticated dashboard remains the exact manual fallback; do not scrape HTML or copy browser credentials. |
-| Issue #34 adapter | Split the decision: an explicitly labeled local estimate can be implemented now; an exact account adapter still waits for a released, documented individual-key usage endpoint. |
+| Issue #34 adapter | The explicitly labeled local estimate is now implemented; an exact account adapter still waits for a released, documented individual-key usage endpoint. Weekly/monthly anchors are user-adjustable in the shell because local history cannot know the subscription anniversary. |
 
 ## Product semantics
 
@@ -180,15 +180,17 @@ or raw authenticated dashboard payload.
 
 There are now two deliberately separate implementation paths:
 
-1. **Local estimate (available now, if the product accepts inferred data).**
+1. **Local estimate (implemented).**
    Read the local OpenCode session ledger, keep only `opencode-go` messages,
    apply the current model-specific weights, and calculate rolling, weekly,
    and monthly percentages. Mark every snapshot `source=local_api` and
    `confidence=inferred`; do not claim account-wide scope. A rolling reset can
    be approximated from local timestamps. The weekly boundary is derivable,
    but the monthly subscription anniversary and any activity from another
-   device are not authoritative locally, so those reset fields must be labeled
-   accordingly or left empty.
+   device are not authoritative locally. The shell lets the user set the next
+   weekly and monthly anchors; clearing them returns to the built-in
+   Monday/first-of-month defaults. The rolling reset is estimated from the
+   latest local Go event.
 2. **Exact account adapter (preferred).** OpenCode merges and documents an
    individual-key endpoint equivalent to the proposed `/zen/go/v1/usage`, and
    a live Windows smoke test confirms all three windows plus reset metadata; or

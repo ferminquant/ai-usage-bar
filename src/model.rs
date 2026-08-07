@@ -6,6 +6,7 @@ const PROVIDER_KIMI: &str = "kimi";
 const PROVIDER_OLLAMA_CLOUD: &str = "ollama_cloud";
 const PROVIDER_GROK_CONSUMER: &str = "grok_consumer";
 const PROVIDER_GROK_API: &str = "grok_api";
+const PROVIDER_OPENCODE_GO: &str = "opencode_go";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +16,7 @@ pub enum Provider {
     OllamaCloud,
     GrokConsumer,
     GrokApi,
+    OpenCodeGo,
 }
 
 impl Provider {
@@ -25,6 +27,7 @@ impl Provider {
             Self::OllamaCloud => PROVIDER_OLLAMA_CLOUD,
             Self::GrokConsumer => PROVIDER_GROK_CONSUMER,
             Self::GrokApi => PROVIDER_GROK_API,
+            Self::OpenCodeGo => PROVIDER_OPENCODE_GO,
         }
     }
 }

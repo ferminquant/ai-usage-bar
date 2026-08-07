@@ -102,6 +102,9 @@ fn metric_sort_priority(provider: &str, metric: &MetricCard) -> u8 {
         "Ollama" if label == "session" => 0,
         "Kimi" if label == "5-hour" => 0,
         "Kimi" if matches!(label.as_str(), "total" | "monthly") => 1,
+        "OpenCode" if label == "5-hour" => 0,
+        "OpenCode" if label == "weekly" => 1,
+        "OpenCode" if matches!(label.as_str(), "monthly" | "total") => 2,
         _ if matches!(label.as_str(), "primary" | "weekly") => 2,
         _ if metric.metric_kind == MetricKind::Credits => 10,
         _ => 5,
@@ -136,7 +139,7 @@ fn tooltip_metric_value(metric: &MetricCard) -> String {
     format!("{value}{unit_display}")
 }
 
-fn tooltip_metric_name(_provider: &str, metric: &MetricCard) -> String {
+fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
     let label = metric.label.trim();
     let window_kind = metric.window_kind.as_str();
 
@@ -154,7 +157,11 @@ fn tooltip_metric_name(_provider: &str, metric: &MetricCard) -> String {
         return "Weekly".to_string();
     }
     if label.eq_ignore_ascii_case("monthly") {
-        return "Total".to_string();
+        return if provider.eq_ignore_ascii_case("OpenCode") {
+            "Monthly".to_string()
+        } else {
+            "Total".to_string()
+        };
     }
 
     // A provider-native label can already include the window name. Avoid
@@ -162,6 +169,7 @@ fn tooltip_metric_name(_provider: &str, metric: &MetricCard) -> String {
     if label.eq_ignore_ascii_case(window_kind) {
         return match window_kind {
             "weekly" => "Weekly".to_string(),
+            "monthly" if provider.eq_ignore_ascii_case("OpenCode") => "Monthly".to_string(),
             "monthly" => "Total".to_string(),
             "rolling" => "Rolling".to_string(),
             "daily" => "Daily".to_string(),
@@ -179,6 +187,8 @@ fn tooltip_metric_name(_provider: &str, metric: &MetricCard) -> String {
 pub fn window_display_name(provider: &Provider, window: &str) -> String {
     match (provider, window.to_ascii_lowercase().as_str()) {
         (Provider::OllamaCloud, "session") | (Provider::Kimi, "5-hour") => "5-hour".into(),
+        (Provider::OpenCodeGo, "5-hour") => "5-hour".into(),
+        (Provider::OpenCodeGo, "monthly") => "Monthly".into(),
         (_, "weekly") | (_, "primary") => "Weekly".into(),
         (_, "total") | (_, "monthly") => "Total".into(),
         (_, "rolling") => "Rolling".into(),
@@ -224,6 +234,7 @@ pub fn provider_display_name(provider: &Provider) -> &'static str {
         Provider::OllamaCloud => "Ollama",
         Provider::GrokConsumer => "Grok",
         Provider::GrokApi => "Grok API",
+        Provider::OpenCodeGo => "OpenCode",
     }
 }
 
@@ -240,6 +251,10 @@ fn is_compact_candidate(s: &UsageSnapshot) -> bool {
             Provider::Kimi => matches!(
                 s.window_label.as_deref(),
                 Some("5-hour" | "weekly" | "primary")
+            ),
+            Provider::OpenCodeGo => matches!(
+                s.window_label.as_deref(),
+                Some("5-hour" | "weekly" | "monthly")
             ),
             _ => s.window_label.as_deref() == Some("primary"),
         }
@@ -270,6 +285,14 @@ fn window_matches_snapshot(snapshot: &UsageSnapshot, window: &str) -> bool {
             "total" => matches!(snapshot.window_label.as_deref(), Some("total" | "monthly")),
             _ => false,
         },
+        Provider::OpenCodeGo => match window {
+            "5-hour" => snapshot.window_label.as_deref() == Some("5-hour"),
+            "weekly" => snapshot.window_label.as_deref() == Some("weekly"),
+            "monthly" | "total" => {
+                matches!(snapshot.window_label.as_deref(), Some("monthly" | "total"))
+            }
+            _ => false,
+        },
         _ => window == "primary" && snapshot.window_label.as_deref() == Some("primary"),
     }
 }
@@ -278,6 +301,7 @@ fn compact_priority(snapshot: &UsageSnapshot) -> u8 {
     match snapshot.provider {
         Provider::OllamaCloud if snapshot.window_label.as_deref() == Some("session") => 0,
         Provider::Kimi if snapshot.window_label.as_deref() == Some("5-hour") => 0,
+        Provider::OpenCodeGo if snapshot.window_label.as_deref() == Some("5-hour") => 0,
         _ => 1,
     }
 }
@@ -652,6 +676,38 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(total_view.used_percent, Some(12.0));
+    }
+
+    #[test]
+    fn opencode_defaults_to_five_hour_and_can_focus_monthly() {
+        let mut five_hour = make_snapshot(Some(8.0), Freshness::Live, Some("5-hour"));
+        five_hour.provider = Provider::OpenCodeGo;
+        five_hour.account_id = "opencode-local".into();
+        five_hour.window_kind = WindowKind::Rolling;
+        let mut weekly = five_hour.clone();
+        weekly.used = Some(34.0);
+        weekly.remaining = Some(66.0);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("weekly".into());
+        let mut monthly = five_hour.clone();
+        monthly.used = Some(17.0);
+        monthly.remaining = Some(83.0);
+        monthly.window_kind = WindowKind::Monthly;
+        monthly.window_label = Some("monthly".into());
+
+        let snapshots = vec![five_hour, weekly, monthly];
+        let default_view = build_tray_view(&snapshots);
+        assert_eq!(default_view.used_percent, Some(8.0));
+        assert_eq!(default_view.status_label, "OpenCode");
+        assert!(default_view.tooltip.contains("Monthly: 83% left"));
+
+        let monthly_view = build_tray_view_focused_window(
+            &snapshots,
+            Some(&Provider::OpenCodeGo),
+            Some("monthly"),
+            Utc::now(),
+        );
+        assert_eq!(monthly_view.used_percent, Some(17.0));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod grok;
 pub mod kimi;
 pub mod ollama;
+pub mod opencode;
 pub mod model;
 pub mod viewmodel;
 
@@ -26,6 +27,9 @@ pub use kimi::{
 pub use ollama::{
     error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_usage_response,
     OllamaAdapterError, OllamaCloudAdapter,
+};
+pub use opencode::{
+    opencode_data_available, OpenCodeGoAdapter, OpenCodeResetSettings,
 };
 pub use daemon::{
     Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,

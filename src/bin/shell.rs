@@ -10,12 +10,16 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_tray_view_focused_window, load_registry, provider_display_name, window_display_name,
-        Provider, RefreshPolicy, RefreshService, UsageSnapshot,
+        build_registry, build_tray_view_focused_window, default_config_path, provider_display_name,
+        window_display_name, AppConfig, OpenCodeResetSettings, Provider, RefreshPolicy,
+        RefreshService, UsageSnapshot,
     };
+    use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+    use chrono_tz::America::Toronto;
     use std::ffi::c_void;
+    use std::path::PathBuf;
     use std::ptr::null_mut;
-    use std::sync::Arc;
+    use std::sync::{Arc, Once};
     use std::thread;
 
     use super::shell_logic::{
@@ -54,6 +58,7 @@ mod windows_shell {
     const MENU_QUIT: usize = 1003;
     const MENU_OPEN_OLLAMA_USAGE: usize = 1004;
     const MENU_OPEN_KIMI_CONSOLE: usize = 1005;
+    const MENU_CONFIG_OPENCODE_RESETS: usize = 1006;
     /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
     const MENU_SHOW_PROVIDER_BASE: usize = 1100;
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
@@ -66,6 +71,11 @@ mod windows_shell {
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
     const OLLAMA_USAGE_URL: &str = "https://ollama.com/settings";
     const KIMI_CONSOLE_URL: &str = "https://www.kimi.com/code/console";
+    const OPENCODE_RESET_DIALOG_CLASS: PCWSTR = w!("AIUsageBarOpenCodeResetDialog");
+    const RESET_DIALOG_SAVE: usize = 1;
+    const RESET_DIALOG_CANCEL: usize = 2;
+    const RESET_DIALOG_WEEKLY_EDIT: usize = 10;
+    const RESET_DIALOG_MONTHLY_EDIT: usize = 11;
 
     const COLOR_BACKGROUND: COLORREF = COLORREF(0x002a2a2a);
     const COLOR_OUTER: COLORREF = COLORREF(0x00141414);
@@ -80,6 +90,8 @@ mod windows_shell {
 
     struct AppState {
         refresh_service: Arc<RefreshService>,
+        config: AppConfig,
+        config_path: PathBuf,
         snapshots: Vec<UsageSnapshot>,
         used_percent: Option<f64>,
         /// Pill subtitle, e.g. "Codex" / "Grok".
@@ -104,9 +116,15 @@ mod windows_shell {
     }
 
     impl AppState {
-        fn loading(refresh_service: Arc<RefreshService>) -> Self {
+        fn loading(
+            refresh_service: Arc<RefreshService>,
+            config: AppConfig,
+            config_path: PathBuf,
+        ) -> Self {
             Self {
                 refresh_service,
+                config,
+                config_path,
                 snapshots: Vec::new(),
                 used_percent: None,
                 pill_status: "Loading…".to_string(),
@@ -1038,6 +1056,389 @@ mod windows_shell {
         set_focus_provider(hwnd, next);
     }
 
+    struct ResetDialogState {
+        parent: HWND,
+        weekly_edit: HWND,
+        monthly_edit: HWND,
+        current: OpenCodeResetSettings,
+        result: Option<OpenCodeResetSettings>,
+    }
+
+    fn reset_dialog_state(hwnd: HWND) -> Option<&'static mut ResetDialogState> {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ResetDialogState;
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr })
+        }
+    }
+
+    fn format_reset_anchor(value: Option<DateTime<Utc>>) -> String {
+        value
+            .map(|instant| {
+                instant
+                    .with_timezone(&Toronto)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+
+    fn parse_reset_anchor(
+        raw: &str,
+    ) -> std::result::Result<Option<DateTime<Utc>>, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+            return Ok(Some(parsed.with_timezone(&Utc)));
+        }
+        let local = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M")
+            .map_err(|_| "Use YYYY-MM-DD HH:MM (Eastern) or an RFC3339 value such as 2026-08-10T15:00:00Z".to_string())?;
+        Toronto
+            .from_local_datetime(&local)
+            .single()
+            .map(|instant| Some(instant.with_timezone(&Utc)))
+            .ok_or_else(|| "That local time is ambiguous or invalid because of a daylight-saving transition".to_string())
+    }
+
+    fn window_text(hwnd: HWND) -> String {
+        unsafe {
+            let length = GetWindowTextLengthW(hwnd).max(0) as usize;
+            let mut buffer = vec![0u16; length + 1];
+            let written = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
+            String::from_utf16_lossy(&buffer[..written.min(buffer.len())])
+        }
+    }
+
+    fn reset_dialog_close(hwnd: HWND, save: bool) {
+        let Some(state) = reset_dialog_state(hwnd) else {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        if save {
+            state.result = Some(state.current);
+        }
+        unsafe {
+            let _ = EnableWindow(state.parent, true);
+            let _ = SetForegroundWindow(state.parent);
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    unsafe extern "system" fn reset_dialog_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_COMMAND => {
+                let command = wparam.0 & 0xffff;
+                if command == RESET_DIALOG_CANCEL {
+                    reset_dialog_close(hwnd, false);
+                    return LRESULT(0);
+                }
+                if command == RESET_DIALOG_SAVE {
+                    let Some(state) = reset_dialog_state(hwnd) else {
+                        return LRESULT(0);
+                    };
+                    let weekly = match parse_reset_anchor(&window_text(state.weekly_edit)) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let text = to_wide(&error);
+                            let _ = MessageBoxW(
+                                Some(hwnd),
+                                PCWSTR(text.as_ptr()),
+                                w!("Invalid weekly reset"),
+                                MB_OK | MB_ICONERROR,
+                            );
+                            return LRESULT(0);
+                        }
+                    };
+                    let monthly = match parse_reset_anchor(&window_text(state.monthly_edit)) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let text = to_wide(&error);
+                            let _ = MessageBoxW(
+                                Some(hwnd),
+                                PCWSTR(text.as_ptr()),
+                                w!("Invalid monthly reset"),
+                                MB_OK | MB_ICONERROR,
+                            );
+                            return LRESULT(0);
+                        }
+                    };
+                    state.current = OpenCodeResetSettings {
+                        weekly_reset_at: weekly,
+                        monthly_reset_at: monthly,
+                    };
+                    reset_dialog_close(hwnd, true);
+                    return LRESULT(0);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CLOSE => {
+                reset_dialog_close(hwnd, false);
+                LRESULT(0)
+            }
+            WM_NCDESTROY => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_reset_dialog_control(
+        parent: HWND,
+        class: PCWSTR,
+        text: &str,
+        style: WINDOW_STYLE,
+        ex_style: WINDOW_EX_STYLE,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        id: usize,
+        hinst: HINSTANCE,
+    ) -> Option<HWND> {
+        let text = to_wide(text);
+        unsafe {
+            CreateWindowExW(
+                ex_style,
+                class,
+                PCWSTR(text.as_ptr()),
+                style,
+                x,
+                y,
+                width,
+                height,
+                Some(parent),
+                Some(HMENU(id as *mut c_void)),
+                Some(hinst),
+                None,
+            )
+            .ok()
+        }
+    }
+
+    fn run_opencode_reset_dialog(parent: HWND, settings: OpenCodeResetSettings) -> Option<OpenCodeResetSettings> {
+        static REGISTER_CLASS: Once = Once::new();
+        unsafe {
+            let hinst = GetModuleHandleW(None).ok().map(|module| HINSTANCE(module.0))?;
+            REGISTER_CLASS.call_once(|| {
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(reset_dialog_wnd_proc),
+                    hInstance: hinst,
+                    lpszClassName: OPENCODE_RESET_DIALOG_CLASS,
+                    style: CS_HREDRAW | CS_VREDRAW,
+                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    ..Default::default()
+                };
+                let _ = RegisterClassW(&class);
+            });
+
+            let mut parent_rect = RECT::default();
+            let _ = GetWindowRect(parent, &mut parent_rect);
+            let width = 480;
+            let height = 250;
+            let x = parent_rect.left + ((parent_rect.right - parent_rect.left - width) / 2);
+            let y = (parent_rect.top - height - 8).max(0);
+            let dialog = CreateWindowExW(
+                WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
+                OPENCODE_RESET_DIALOG_CLASS,
+                w!("OpenCode reset anchors"),
+                WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+                x,
+                y,
+                width,
+                height,
+                Some(parent),
+                None,
+                Some(hinst),
+                None,
+            )
+            .ok()?;
+
+            let mut state = Box::new(ResetDialogState {
+                parent,
+                weekly_edit: HWND(null_mut()),
+                monthly_edit: HWND(null_mut()),
+                current: settings,
+                result: None,
+            });
+            SetWindowLongPtrW(dialog, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+            let label_style = WS_CHILD | WS_VISIBLE;
+            let edit_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+            let button_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("STATIC"),
+                "Weekly next reset (YYYY-MM-DD HH:MM Eastern or RFC3339 UTC):",
+                label_style,
+                WINDOW_EX_STYLE(0),
+                18,
+                20,
+                430,
+                22,
+                0,
+                hinst,
+            );
+            let Some(weekly_edit) = create_reset_dialog_control(
+                dialog,
+                w!("EDIT"),
+                &format_reset_anchor(settings.weekly_reset_at),
+                edit_style,
+                WS_EX_CLIENTEDGE,
+                18,
+                45,
+                430,
+                24,
+                RESET_DIALOG_WEEKLY_EDIT,
+                hinst,
+            ) else {
+                let _ = DestroyWindow(dialog);
+                return None;
+            };
+            state.weekly_edit = weekly_edit;
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("STATIC"),
+                "Monthly next reset (YYYY-MM-DD HH:MM Eastern or RFC3339 UTC):",
+                label_style,
+                WINDOW_EX_STYLE(0),
+                18,
+                82,
+                430,
+                22,
+                0,
+                hinst,
+            );
+            let Some(monthly_edit) = create_reset_dialog_control(
+                dialog,
+                w!("EDIT"),
+                &format_reset_anchor(settings.monthly_reset_at),
+                edit_style,
+                WS_EX_CLIENTEDGE,
+                18,
+                107,
+                430,
+                24,
+                RESET_DIALOG_MONTHLY_EDIT,
+                hinst,
+            ) else {
+                let _ = DestroyWindow(dialog);
+                return None;
+            };
+            state.monthly_edit = monthly_edit;
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("STATIC"),
+                "Leave either field blank to use the built-in default.",
+                label_style,
+                WINDOW_EX_STYLE(0),
+                18,
+                140,
+                430,
+                22,
+                0,
+                hinst,
+            );
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("BUTTON"),
+                "Save",
+                button_style | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
+                WINDOW_EX_STYLE(0),
+                270,
+                178,
+                85,
+                28,
+                RESET_DIALOG_SAVE,
+                hinst,
+            );
+            let _ = create_reset_dialog_control(
+                dialog,
+                w!("BUTTON"),
+                "Cancel",
+                button_style,
+                WINDOW_EX_STYLE(0),
+                363,
+                178,
+                85,
+                28,
+                RESET_DIALOG_CANCEL,
+                hinst,
+            );
+
+            let _ = EnableWindow(parent, false);
+            let _ = SetForegroundWindow(dialog);
+            let _ = SetFocus(Some(state.weekly_edit));
+            let mut message = MSG::default();
+            while IsWindow(Some(dialog)).as_bool() {
+                let result = GetMessageW(&mut message, None, 0, 0);
+                if result.0 <= 0 {
+                    break;
+                }
+                if !IsDialogMessageW(dialog, &message).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            if IsWindow(Some(dialog)).as_bool() {
+                let _ = DestroyWindow(dialog);
+            }
+            let _ = EnableWindow(parent, true);
+            let _ = SetForegroundWindow(parent);
+            state.result.take()
+        }
+    }
+
+    fn save_opencode_reset_settings(hwnd: HWND, settings: OpenCodeResetSettings) {
+        let result = (|| {
+            let state = app_state(hwnd).ok_or_else(|| "widget state is unavailable".to_string())?;
+            let mut config = state.config.clone();
+            config.set_opencode_reset_settings(settings);
+            config
+                .save(&state.config_path)
+                .map_err(|error| format!("could not save settings: {error}"))?;
+            let registry = build_registry(&config)
+                .map_err(|error| format!("could not reload providers: {error}"))?;
+            state.config = config;
+            state.refresh_service = Arc::new(RefreshService::new(registry, RefreshPolicy::default()));
+            Ok::<(), String>(())
+        })();
+        match result {
+            Ok(()) => {
+                begin_refresh(hwnd);
+                if let Some(state) = app_state(hwnd) {
+                    set_status(hwnd, state, "OpenCode reset settings saved");
+                }
+            }
+            Err(error) => {
+                eprintln!("OpenCode reset settings failed: {error}");
+                if let Some(state) = app_state(hwnd) {
+                    set_status(hwnd, state, "Could not save OpenCode reset settings");
+                }
+            }
+        }
+    }
+
+    fn open_opencode_reset_dialog(hwnd: HWND) {
+        let Some(settings) = app_state_ref(hwnd).map(|state| state.config.opencode_reset_settings()) else {
+            return;
+        };
+        if let Some(updated) = run_opencode_reset_dialog(hwnd, settings) {
+            save_opencode_reset_settings(hwnd, updated);
+        }
+    }
+
     fn open_ollama_usage_page(hwnd: HWND) {
         let url = to_wide(OLLAMA_USAGE_URL);
         let launched = unsafe {
@@ -1089,6 +1490,12 @@ mod windows_shell {
                 "total" | "monthly" => Some("total"),
                 _ => None,
             },
+            Provider::OpenCodeGo => match label {
+                "5-hour" => Some("5-hour"),
+                "weekly" => Some("weekly"),
+                "monthly" | "total" => Some("monthly"),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1097,7 +1504,7 @@ mod windows_shell {
         match window {
             "session" | "5-hour" => 0,
             "weekly" => 1,
-            "total" => 2,
+            "total" | "monthly" => 2,
             _ => 3,
         }
     }
@@ -1185,7 +1592,9 @@ mod windows_shell {
                         })
                     })
                     .unwrap_or_else(|| {
-                        if focused.as_ref() == Some(&Provider::Kimi) {
+                        if focused.as_ref().is_some_and(|provider| {
+                            matches!(provider, Provider::Kimi | Provider::OpenCodeGo)
+                        }) {
                             "5-hour".to_string()
                         } else {
                             "session".to_string()
@@ -1218,7 +1627,8 @@ mod windows_shell {
 
             let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
             let kimi_focused = focused.as_ref() == Some(&Provider::Kimi);
-            if ollama_focused || kimi_focused {
+            let opencode_focused = focused.as_ref() == Some(&Provider::OpenCodeGo);
+            if ollama_focused || kimi_focused || opencode_focused {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
                 if ollama_focused {
                     let _ = AppendMenuW(
@@ -1234,6 +1644,14 @@ mod windows_shell {
                         MF_STRING,
                         MENU_OPEN_KIMI_CONSOLE,
                         w!("Open Kimi Console"),
+                    );
+                }
+                if opencode_focused {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING,
+                        MENU_CONFIG_OPENCODE_RESETS,
+                        w!("Configure OpenCode reset times…"),
                     );
                 }
             }
@@ -1285,6 +1703,7 @@ mod windows_shell {
                 MENU_REFRESH => begin_refresh(hwnd),
                 MENU_OPEN_OLLAMA_USAGE => open_ollama_usage_page(hwnd),
                 MENU_OPEN_KIMI_CONSOLE => open_kimi_console(hwnd),
+                MENU_CONFIG_OPENCODE_RESETS => open_opencode_reset_dialog(hwnd),
                 MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);
@@ -1476,10 +1895,18 @@ mod windows_shell {
                 return;
             }
 
-            let registry = match load_registry() {
-                Ok(registry) => registry,
+            let config_path = default_config_path();
+            let config = match AppConfig::load(&config_path) {
+                Ok(config) => config,
                 Err(error) => {
                     eprintln!("failed to load provider configuration: {error}");
+                    return;
+                }
+            };
+            let registry = match build_registry(&config) {
+                Ok(registry) => registry,
+                Err(error) => {
+                    eprintln!("failed to build provider registry: {error}");
                     return;
                 }
             };
@@ -1510,7 +1937,11 @@ mod windows_shell {
                 registry,
                 RefreshPolicy::default(),
             ));
-            let state_ptr = Box::into_raw(Box::new(AppState::loading(refresh_service)));
+            let state_ptr = Box::into_raw(Box::new(AppState::loading(
+                refresh_service,
+                config,
+                config_path,
+            )));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
             create_tooltip(hwnd, hinst, &mut *state_ptr);
 

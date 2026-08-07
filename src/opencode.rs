@@ -1,0 +1,599 @@
+//! OpenCode Go local usage estimator.
+//!
+//! OpenCode's Go gateway keeps the authoritative rolling/weekly/monthly
+//! counters on the service, but the CLI also keeps a local SQLite session
+//! ledger.  This adapter intentionally reports an inferred, local-device
+//! estimate from that ledger.  It never reads the OpenCode API key and never
+//! attempts to authenticate to the web dashboard.
+
+use crate::model::*;
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Timelike, Utc};
+use rusqlite::{params, Connection, OpenFlags};
+use serde::Deserialize;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const OPENCODE_PROVIDER: Provider = Provider::OpenCodeGo;
+const OPENCODE_ACCOUNT_ID: &str = "opencode-local";
+const OPENCODE_DATA_DIR_ENV: &str = "OPENCODE_DATA_DIR";
+const OPENCODE_DB_ENV: &str = "OPENCODE_DB";
+const FIVE_HOURS: i64 = 5 * 60 * 60;
+const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60;
+const WEEKLY_LIMIT_USD: f64 = 30.0;
+const MONTHLY_LIMIT_USD: f64 = 60.0;
+const ROLLING_LIMIT_USD: f64 = 12.0;
+
+/// User-adjustable reset anchors for the inferred estimator.
+///
+/// Each value is the next known reset instant in UTC.  Once it passes, the
+/// estimator advances the same phase by one week or one calendar month.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenCodeResetSettings {
+    pub weekly_reset_at: Option<DateTime<Utc>>,
+    pub monthly_reset_at: Option<DateTime<Utc>>,
+}
+
+/// Built-in local OpenCode Go estimator.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenCodeGoAdapter {
+    settings: OpenCodeResetSettings,
+}
+
+impl OpenCodeGoAdapter {
+    pub fn new(settings: OpenCodeResetSettings) -> Self {
+        Self { settings }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenCodeAdapterError {
+    #[error("OpenCode local database is not configured")]
+    NotConfigured,
+    #[error("unable to read OpenCode local database")]
+    Database,
+    #[error("OpenCode local database schema drift: {0}")]
+    SchemaDrift(String),
+}
+
+impl From<OpenCodeAdapterError> for AdapterError {
+    fn from(error: OpenCodeAdapterError) -> Self {
+        let code = match error {
+            OpenCodeAdapterError::NotConfigured => ErrorCode::Network,
+            OpenCodeAdapterError::Database => ErrorCode::Network,
+            OpenCodeAdapterError::SchemaDrift(_) => ErrorCode::SchemaDrift,
+        };
+        AdapterError { code, message: None }
+    }
+}
+
+impl ProviderAdapter for OpenCodeGoAdapter {
+    fn provider(&self) -> Provider {
+        OPENCODE_PROVIDER
+    }
+
+    fn fetch(&self) -> Result<Vec<UsageSnapshot>, AdapterError> {
+        fetch_opencode_snapshots(self.settings).map_err(AdapterError::from)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UsageEvent {
+    observed_at: DateTime<Utc>,
+    model_id: String,
+    cost_usd: f64,
+    weight: f64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MessageInfo {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(rename = "providerID", default)]
+    provider_id: Option<String>,
+    #[serde(rename = "modelID", default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    cost: Option<f64>,
+}
+
+/// Whether the OpenCode local session database can be found without opening
+/// it.  Used by registry bootstrap to distinguish "not configured" from a
+/// live adapter that later encounters a read/schema failure.
+pub fn opencode_data_available() -> bool {
+    opencode_database_path().is_some()
+}
+
+/// Resolve OpenCode's SQLite database using the same XDG/Windows conventions
+/// as the upstream CLI, with explicit test/developer overrides first.
+pub fn opencode_database_path() -> Option<PathBuf> {
+    if let Some(path) = env::var_os(OPENCODE_DB_ENV).map(PathBuf::from) {
+        return path.is_file().then_some(path);
+    }
+
+    let mut directories = Vec::new();
+    if let Some(data_dir) = env::var_os(OPENCODE_DATA_DIR_ENV) {
+        directories.push(PathBuf::from(data_dir));
+    }
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
+        directories.push(PathBuf::from(data_home).join("opencode"));
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        directories.push(PathBuf::from(local_app_data).join("opencode"));
+    }
+    if let Some(home) = env::var_os("USERPROFILE") {
+        directories.push(PathBuf::from(&home).join(".local").join("share").join("opencode"));
+    }
+    if let Some(home) = env::var_os("HOME") {
+        directories.push(PathBuf::from(home).join(".local").join("share").join("opencode"));
+    }
+
+    directories
+        .into_iter()
+        .flat_map(|directory| database_candidates(&directory))
+        .find(|path| path.is_file())
+}
+
+fn database_candidates(directory: &Path) -> Vec<PathBuf> {
+    let preferred = directory.join("opencode.db");
+    let mut candidates = vec![preferred.clone()];
+    let Ok(entries) = fs::read_dir(directory) else {
+        return candidates;
+    };
+    let mut channel_databases: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("opencode-") && name.ends_with(".db"))
+        })
+        .collect();
+    channel_databases.sort();
+    candidates.extend(channel_databases);
+    candidates
+}
+
+/// Fetch local inferred snapshots for the three Go windows.
+pub fn fetch_opencode_snapshots(
+    settings: OpenCodeResetSettings,
+) -> Result<Vec<UsageSnapshot>, OpenCodeAdapterError> {
+    let observed_at = Utc::now();
+    let path = opencode_database_path().ok_or(OpenCodeAdapterError::NotConfigured)?;
+    fetch_from_database(&path, settings, observed_at)
+}
+
+fn fetch_from_database(
+    path: &Path,
+    settings: OpenCodeResetSettings,
+    now: DateTime<Utc>,
+) -> Result<Vec<UsageSnapshot>, OpenCodeAdapterError> {
+    let mut bounds = WindowBounds::new(now, settings);
+    let events = read_usage_events(path, bounds.earliest_start())?;
+    bounds.rolling_reset = rolling_reset_from_events(&events, bounds.rolling_start, now);
+    let mut confidence = Confidence::Inferred;
+
+    let weighted_cost = |start: DateTime<Utc>, end: DateTime<Utc>| {
+        events
+            .iter()
+            .filter(|event| event.observed_at >= start && event.observed_at < end)
+            .map(|event| event.cost_usd * event.weight)
+            .sum::<f64>()
+    };
+
+    // An unrecognized model is still included at 1x so the bar does not
+    // silently report zero. Downgrade the confidence to make that assumption
+    // visible in copied details/diagnostics.
+    if events
+        .iter()
+        .any(|event| {
+            event.cost_usd > 0.0
+                && event.weight == 1.0
+                && is_unknown_model(&event.model_id)
+        })
+    {
+        confidence = Confidence::Unknown;
+    }
+
+    let rolling_cost = weighted_cost(bounds.rolling_start, now);
+    let weekly_cost = weighted_cost(bounds.weekly_start, now);
+    let monthly_cost = weighted_cost(bounds.monthly_start, now);
+
+    Ok(vec![
+        make_snapshot(
+            "5-hour",
+            WindowKind::Rolling,
+            rolling_cost,
+            ROLLING_LIMIT_USD,
+            bounds.rolling_reset,
+            now,
+            confidence,
+        ),
+        make_snapshot(
+            "weekly",
+            WindowKind::Weekly,
+            weekly_cost,
+            WEEKLY_LIMIT_USD,
+            bounds.weekly_reset,
+            now,
+            confidence,
+        ),
+        make_snapshot(
+            "monthly",
+            WindowKind::Monthly,
+            monthly_cost,
+            MONTHLY_LIMIT_USD,
+            bounds.monthly_reset,
+            now,
+            confidence,
+        ),
+    ])
+}
+
+fn read_usage_events(path: &Path, earliest_start: DateTime<Utc>) -> Result<Vec<UsageEvent>, OpenCodeAdapterError> {
+    if let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        if let Ok(events) = read_usage_events_from_connection(&connection, earliest_start) {
+            return Ok(events);
+        }
+    }
+
+    // OpenCode keeps a live WAL beside the database. On Windows/WSL mounts,
+    // a read-only connection can reject that WAL with a transient disk-I/O
+    // error while the desktop process is writing. An immutable read is a safe
+    // fallback: it never takes locks or writes, and the next refresh can
+    // observe the latest checkpoint.
+    let uri = format!(
+        "file:{}?immutable=1",
+        path.to_string_lossy().replace('\\', "/")
+    );
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|_| OpenCodeAdapterError::Database)?;
+    read_usage_events_from_connection(&connection, earliest_start)
+}
+
+fn read_usage_events_from_connection(
+    connection: &Connection,
+    earliest_start: DateTime<Utc>,
+) -> Result<Vec<UsageEvent>, OpenCodeAdapterError> {
+    connection
+        .busy_timeout(Duration::from_millis(500))
+        .map_err(|_| OpenCodeAdapterError::Database)?;
+
+    let mut statement = connection
+        .prepare("SELECT time_created, data FROM message WHERE time_created >= ?1")
+        .map_err(|error| OpenCodeAdapterError::SchemaDrift(error.to_string()))?;
+    let rows = statement
+        .query_map(params![earliest_start.timestamp_millis()], |row| {
+            let timestamp: i64 = row.get(0)?;
+            let data: String = row.get(1)?;
+            Ok((timestamp, data))
+        })
+        .map_err(|error| OpenCodeAdapterError::SchemaDrift(error.to_string()))?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let (timestamp, data) = row.map_err(|_| OpenCodeAdapterError::Database)?;
+        let message: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|error| OpenCodeAdapterError::SchemaDrift(error.to_string()))?;
+        let info_value = message.get("info").unwrap_or(&message);
+        let info: MessageInfo = serde_json::from_value(info_value.clone())
+            .map_err(|error| OpenCodeAdapterError::SchemaDrift(error.to_string()))?;
+        if info.role.as_deref() != Some("assistant")
+            || !is_opencode_provider(info.provider_id.as_deref())
+        {
+            continue;
+        }
+        let Some(model_id) = info.model_id else {
+            continue;
+        };
+        let Some(cost_usd) = info.cost.filter(|cost| cost.is_finite() && *cost >= 0.0) else {
+            continue;
+        };
+        let Some(observed_at) = Utc.timestamp_millis_opt(timestamp).single() else {
+            continue;
+        };
+        let weight = model_weight(&model_id);
+        events.push(UsageEvent {
+            observed_at,
+            model_id,
+            cost_usd,
+            weight,
+        });
+    }
+    Ok(events)
+}
+
+fn is_opencode_provider(provider_id: Option<&str>) -> bool {
+    // `opencode` is the separate free/local provider in the same ledger. Only
+    // the hosted Go provider contributes to this subscription estimate.
+    provider_id == Some("opencode-go")
+}
+
+fn make_snapshot(
+    label: &str,
+    window_kind: WindowKind,
+    weighted_cost: f64,
+    limit_usd: f64,
+    resets_at: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+    confidence: Confidence,
+) -> UsageSnapshot {
+    let used = (weighted_cost.max(0.0) / limit_usd * 100.0).clamp(0.0, 100.0);
+    let used = if used == 0.0 { 0.0 } else { used };
+    UsageSnapshot {
+        provider: OPENCODE_PROVIDER,
+        account_id: OPENCODE_ACCOUNT_ID.to_string(),
+        metric_kind: MetricKind::Quota,
+        window_kind,
+        unit: "percent".to_string(),
+        observed_at,
+        source: Source::LocalApi,
+        freshness: Freshness::Live,
+        confidence,
+        used: Some(used),
+        remaining: Some(100.0 - used),
+        limit: Some(100.0),
+        unlimited: false,
+        resets_at: Some(resets_at),
+        window_label: Some(label.to_string()),
+        error: None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowBounds {
+    rolling_start: DateTime<Utc>,
+    weekly_start: DateTime<Utc>,
+    monthly_start: DateTime<Utc>,
+    rolling_reset: DateTime<Utc>,
+    weekly_reset: DateTime<Utc>,
+    monthly_reset: DateTime<Utc>,
+}
+
+impl WindowBounds {
+    fn new(now: DateTime<Utc>, settings: OpenCodeResetSettings) -> Self {
+        let rolling_start = now - ChronoDuration::seconds(FIVE_HOURS);
+        let rolling_reset = now + ChronoDuration::seconds(FIVE_HOURS);
+        let (weekly_start, weekly_reset) = recurring_weekly_bounds(now, settings.weekly_reset_at);
+        let (monthly_start, monthly_reset) = recurring_monthly_bounds(now, settings.monthly_reset_at);
+        Self {
+            rolling_start,
+            weekly_start,
+            monthly_start,
+            rolling_reset,
+            weekly_reset,
+            monthly_reset,
+        }
+    }
+
+    fn earliest_start(self) -> DateTime<Utc> {
+        self.rolling_start
+            .min(self.weekly_start)
+            .min(self.monthly_start)
+    }
+}
+
+fn rolling_reset_from_events(
+    events: &[UsageEvent],
+    rolling_start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    // The hosted service's rolling window is refreshed by the latest usage.
+    // Use the newest local assistant event as the best available reset
+    // estimate; with no recent event, show a full five-hour horizon.
+    events
+        .iter()
+        .filter(|event| event.observed_at >= rolling_start && event.observed_at < now)
+        .map(|event| event.observed_at + ChronoDuration::seconds(FIVE_HOURS))
+        .max()
+        .unwrap_or_else(|| now + ChronoDuration::seconds(FIVE_HOURS))
+}
+
+fn recurring_weekly_bounds(
+    now: DateTime<Utc>,
+    configured_next: Option<DateTime<Utc>>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let mut next = configured_next.unwrap_or_else(|| default_weekly_reset(now));
+    while next <= now {
+        next += ChronoDuration::seconds(SEVEN_DAYS);
+    }
+    (next - ChronoDuration::seconds(SEVEN_DAYS), next)
+}
+
+fn recurring_monthly_bounds(
+    now: DateTime<Utc>,
+    configured_next: Option<DateTime<Utc>>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let mut next = configured_next.unwrap_or_else(|| default_monthly_reset(now));
+    while next <= now {
+        next = shift_month(next, 1);
+    }
+    (shift_month(next, -1), next)
+}
+
+fn default_weekly_reset(now: DateTime<Utc>) -> DateTime<Utc> {
+    let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
+    let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
+    let date = now.date_naive() + ChronoDuration::days(days_until_monday as i64);
+    Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).expect("valid midnight"))
+}
+
+fn default_monthly_reset(now: DateTime<Utc>) -> DateTime<Utc> {
+    let first = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).expect("valid month");
+    let first_next = shift_month_date(first, 1);
+    Utc.from_utc_datetime(&first_next.and_hms_opt(0, 0, 0).expect("valid midnight"))
+}
+
+fn shift_month(value: DateTime<Utc>, delta: i32) -> DateTime<Utc> {
+    let date = shift_month_date(value.date_naive(), delta);
+    Utc.from_utc_datetime(
+        &date
+            .and_hms_nano_opt(value.hour(), value.minute(), value.second(), value.nanosecond())
+            .expect("valid shifted datetime"),
+    )
+}
+
+fn shift_month_date(date: NaiveDate, delta: i32) -> NaiveDate {
+    let total = date.year() * 12 + date.month0() as i32 + delta;
+    let year = total.div_euclid(12);
+    let month0 = total.rem_euclid(12) as u32;
+    let month = month0 + 1;
+    let max_day = NaiveDate::from_ymd_opt(year, month, 1)
+        .and_then(|first| first.checked_add_months(chrono::Months::new(1)))
+        .and_then(|first_next| first_next.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(28);
+    NaiveDate::from_ymd_opt(year, month, date.day().min(max_day)).expect("valid shifted date")
+}
+
+fn is_unknown_model(model: &str) -> bool {
+    model_weight_known(model).is_none()
+}
+
+fn model_weight(model: &str) -> f64 {
+    model_weight_known(model).unwrap_or(1.0)
+}
+
+fn model_weight_known(model: &str) -> Option<f64> {
+    Some(match model {
+        // Models whose published Usage tier is $15 are charged against the
+        // $60 Go monthly allowance at 4x their raw model cost.
+        "grok-4.5"
+        | "gpt-5.6-luna"
+        | "kimi-k3"
+        | "mimo-v2.5-pro"
+        | "qwen3.8-max"
+        | "deepseek-v4-pro" => 4.0,
+        // Models whose published Usage tier is $60 use the raw model cost.
+        "glm-5.2"
+        | "glm-5.1"
+        | "kimi-k2.7-code"
+        | "kimi-k2.6"
+        | "mimo-v2.5"
+        | "minimax-m3"
+        | "minimax-m2.7"
+        | "minimax-m2.5"
+        | "qwen3.7-max"
+        | "qwen3.7-plus"
+        | "qwen3.6-plus"
+        | "deepseek-v4-flash"
+        | "hy3" => 1.0,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn instant(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn published_usage_tiers_map_to_expected_weights() {
+        assert_eq!(model_weight("qwen3.8-max"), 4.0);
+        assert_eq!(model_weight("glm-5.2"), 1.0);
+        assert_eq!(model_weight("future-model"), 1.0);
+        assert!(is_unknown_model("future-model"));
+    }
+
+    #[test]
+    fn configured_weekly_anchor_controls_the_window() {
+        let now = instant("2026-08-07T18:00:00Z");
+        let configured = instant("2026-08-10T15:00:00Z");
+        let (start, end) = recurring_weekly_bounds(now, Some(configured));
+        assert_eq!(start, instant("2026-08-03T15:00:00Z"));
+        assert_eq!(end, configured);
+    }
+
+    #[test]
+    fn configured_monthly_anchor_clamps_february() {
+        let now = instant("2026-02-03T00:00:00Z");
+        let configured = instant("2026-02-28T12:00:00Z");
+        let (start, end) = recurring_monthly_bounds(now, Some(configured));
+        assert_eq!(start, instant("2026-01-28T12:00:00Z"));
+        assert_eq!(end, configured);
+    }
+
+    #[test]
+    fn reads_only_opencode_go_assistant_costs() {
+        let temp = tempfile_path();
+        let connection = Connection::open(&temp).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE message (time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+            )
+            .unwrap();
+        let when = instant("2026-08-07T12:00:00Z").timestamp_millis();
+        let mut insert = connection
+            .prepare("INSERT INTO message(time_created, data) VALUES (?1, ?2)")
+            .unwrap();
+        insert
+            .execute(params![
+                when,
+                serde_json::json!({
+                    "info": {"role":"assistant","providerID":"opencode-go","modelID":"qwen3.8-max","cost":1.25}
+                })
+                .to_string()
+            ])
+            .unwrap();
+        insert
+            .execute(params![
+                when + 2 * 60 * 60 * 1000,
+                serde_json::json!({
+                    "role":"assistant", "providerID":"opencode-go", "modelID":"glm-5.2", "cost":0.5
+                })
+                .to_string()
+            ])
+            .unwrap();
+        insert
+            .execute(params![
+                when,
+                serde_json::json!({
+                    "info": {"role":"assistant","providerID":"ollama","modelID":"qwen3.8-max","cost":99.0}
+                })
+                .to_string()
+            ])
+            .unwrap();
+        drop(insert);
+
+        let snapshots = fetch_from_database(
+            &temp,
+            OpenCodeResetSettings::default(),
+            instant("2026-08-07T18:00:00Z"),
+        )
+        .unwrap();
+        let weekly = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window_label.as_deref() == Some("weekly"))
+            .unwrap();
+        assert!((weekly.used.unwrap() - ((1.25 * 4.0 + 0.5) / 30.0 * 100.0)).abs() < 1e-9);
+        let rolling = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window_label.as_deref() == Some("5-hour"))
+            .unwrap();
+        assert_eq!(rolling.resets_at, Some(instant("2026-08-07T19:00:00Z")));
+        let _ = fs::remove_file(temp);
+    }
+
+    fn tempfile_path() -> PathBuf {
+        let mut path = env::temp_dir();
+        path.push(format!("ai-usage-bar-opencode-{}.db", std::process::id()));
+        let _ = fs::remove_file(&path);
+        // Keep the import explicit so the test fails loudly if the temporary
+        // path cannot be created on the host.
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(b"").unwrap();
+        path
+    }
+}

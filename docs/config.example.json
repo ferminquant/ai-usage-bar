@@ -7,6 +7,9 @@
     "grok_consumer": {
       "enabled": true
     },
+    "opencode_go": {
+      "enabled": true
+    },
     "kimi": {
       "enabled": false
     },
