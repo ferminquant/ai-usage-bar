@@ -33,7 +33,14 @@ $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 if ([string]::IsNullOrWhiteSpace($StartupValueName)) {
     throw "StartupValueName cannot be empty"
 }
-if ($TestFailureMode -notin @("", "after-swap", "after-startup", "after-swap-cleanup-blocked")) {
+if ($TestFailureMode -notin @(
+        "",
+        "after-swap",
+        "after-startup",
+        "after-swap-cleanup-blocked",
+        "after-quarantine-blocked",
+        "after-restore-blocked"
+    )) {
     throw "Unsupported TestFailureMode: $TestFailureMode"
 }
 
@@ -220,8 +227,12 @@ try {
     }
     Move-Item -LiteralPath $stagingRoot -Destination $InstallRoot
     $newInstallMoved = $true
-    if ($TestFailureMode -eq "after-swap" -or
-        $TestFailureMode -eq "after-swap-cleanup-blocked") {
+    if ($TestFailureMode -in @(
+            "after-swap",
+            "after-swap-cleanup-blocked",
+            "after-quarantine-blocked",
+            "after-restore-blocked"
+        )) {
         throw "Synthetic install failure after swap: $TestFailureMode"
     }
 
@@ -266,7 +277,7 @@ try {
     $newInstallGone = -not $newInstallMoved -or -not (Test-Path -LiteralPath $InstallRoot)
     if (-not $newInstallGone) {
         try {
-            if ($TestFailureMode -eq "after-swap-cleanup-blocked") {
+            if ($TestFailureMode -in @("after-swap-cleanup-blocked", "after-quarantine-blocked")) {
                 throw "Synthetic locked partial install"
             }
             Remove-Item -LiteralPath $InstallRoot -Recurse -Force
@@ -275,21 +286,37 @@ try {
             # Keep the backup below if a transient lock prevents cleanup. It
             # is the only recoverable copy of the previous installation.
             try {
+                if ($TestFailureMode -eq "after-quarantine-blocked") {
+                    throw "Synthetic quarantine lock"
+                }
                 Move-Item -LiteralPath $InstallRoot -Destination $failedRoot -Force
                 $newInstallGone = -not (Test-Path -LiteralPath $InstallRoot)
                 if (-not $newInstallGone) {
-                    Write-Warning ("Could not quarantine the partial installation at {0}; the previous-version backup remains at {1}" -f $InstallRoot, $backupRoot)
+                    $backupMessage = if ($oldInstallMoved) {
+                        "The previous-version backup remains at $backupRoot"
+                    } else {
+                        "This was a fresh install; no previous-version backup exists"
+                    }
+                    Write-Warning ("Could not quarantine the partial installation at {0}; {1}" -f $InstallRoot, $backupMessage)
                 }
             } catch {
                 # If the quarantine move is also blocked, leave both the
                 # partial install and backup in place for manual recovery.
                 $newInstallGone = $false
-                Write-Warning ("Could not quarantine the partial installation at {0}; the previous-version backup remains at {1}: {2}" -f $InstallRoot, $backupRoot, $_.Exception.Message)
+                $backupMessage = if ($oldInstallMoved) {
+                    "The previous-version backup remains at $backupRoot"
+                } else {
+                    "This was a fresh install; no previous-version backup exists"
+                }
+                Write-Warning ("Could not quarantine the partial installation at {0}; {1}: {2}" -f $InstallRoot, $backupMessage, $_.Exception.Message)
             }
         }
     }
     if ($oldInstallMoved -and $newInstallGone -and (Test-Path -LiteralPath $backupRoot)) {
         try {
+            if ($TestFailureMode -eq "after-restore-blocked") {
+                throw "Synthetic restore lock"
+            }
             Move-Item -LiteralPath $backupRoot -Destination $InstallRoot
             $rollbackRestored = $true
         } catch {

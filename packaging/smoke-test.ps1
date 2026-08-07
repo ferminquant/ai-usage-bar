@@ -90,11 +90,14 @@ function Invoke-ExpectedPackageFailure {
     param(
         [string]$ScriptPath,
         [hashtable]$Parameters,
-        [string]$ExpectedMessage
+        [string]$ExpectedMessage,
+        [string]$ExpectedWarning = ""
     )
     $failure = $null
+    $scriptWarnings = @()
     try {
-        Invoke-PackageScript -ScriptPath $ScriptPath -Parameters $Parameters
+        $output = @(& $ScriptPath @Parameters -WarningVariable scriptWarnings)
+        Write-Verbose ("{0}: {1}" -f [IO.Path]::GetFileName($ScriptPath), ($output -join [Environment]::NewLine))
     } catch {
         $failure = $_
     }
@@ -103,6 +106,10 @@ function Invoke-ExpectedPackageFailure {
     }
     if ($failure.Exception.Message -notmatch [regex]::Escape($ExpectedMessage)) {
         throw "Package script failed for an unexpected reason: $($failure.Exception.Message)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedWarning) -and
+        (($scriptWarnings | ForEach-Object { $_.Message }) -join [Environment]::NewLine) -notmatch [regex]::Escape($ExpectedWarning)) {
+        throw "Package script did not report the expected recovery warning: $ExpectedWarning"
     }
 }
 
@@ -179,6 +186,8 @@ try {
     $beforeUpgradeState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
         ConvertFrom-Json
     $beforeUpgradeStartup = Get-RunValue -Name $startupValueName
+    $installParent = Split-Path -Parent $installRoot
+    $installLeaf = Split-Path -Leaf $installRoot
     $upgradePackageRoot = Join-Path $SandboxPath "upgrade-package"
     Copy-Item -LiteralPath $packageRoot -Destination $upgradePackageRoot -Recurse -Force
     $upgradeManifestPath = Join-Path $upgradePackageRoot "package-manifest.json"
@@ -227,6 +236,35 @@ try {
         PackageRoot = $upgradePackageRoot
         InstallRoot = $installRoot
         StartupValueName = $startupValueName
+        TestFailureMode = "after-quarantine-blocked"
+    } -ExpectedMessage "Synthetic install failure after swap" `
+        -ExpectedWarning "Could not quarantine the partial installation"
+    $blockedQuarantineBackup = @(Get-ChildItem -LiteralPath $installParent -Directory -Filter ("{0}.__backup_*" -f $installLeaf))
+    if ($blockedQuarantineBackup.Count -ne 1) {
+        throw "Expected one preserved backup after quarantine failure"
+    }
+    Remove-Item -LiteralPath $installRoot -Recurse -Force
+    Move-Item -LiteralPath $blockedQuarantineBackup[0].FullName -Destination $installRoot
+    $summary.checks.quarantine_failure_warning = "passed"
+
+    Invoke-ExpectedPackageFailure -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
+        TestFailureMode = "after-restore-blocked"
+    } -ExpectedMessage "Synthetic install failure after swap" `
+        -ExpectedWarning "Could not restore the previous installation"
+    $blockedRestoreBackup = @(Get-ChildItem -LiteralPath $installParent -Directory -Filter ("{0}.__backup_*" -f $installLeaf))
+    if ($blockedRestoreBackup.Count -ne 1) {
+        throw "Expected one preserved backup after restore failure"
+    }
+    Move-Item -LiteralPath $blockedRestoreBackup[0].FullName -Destination $installRoot
+    $summary.checks.restore_failure_warning = "passed"
+
+    Invoke-ExpectedPackageFailure -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
         TestFailureMode = "after-swap-cleanup-blocked"
     } -ExpectedMessage "Synthetic install failure after swap"
     $afterQuarantineState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
@@ -234,8 +272,6 @@ try {
     if ($afterQuarantineState.version -cne $beforeUpgradeState.version) {
         throw "Quarantine recovery did not restore the previous package version"
     }
-    $installParent = Split-Path -Parent $installRoot
-    $installLeaf = Split-Path -Leaf $installRoot
     $failedRoots = @(Get-ChildItem -LiteralPath $installParent -Directory -Filter ("{0}.__failed_*" -f $installLeaf))
     if ($failedRoots.Count -ne 1) {
         throw "Expected one quarantined failed install directory"

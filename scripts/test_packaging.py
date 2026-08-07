@@ -41,6 +41,8 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("__failed_", self.install)
         self.assertIn("TestFailureMode", self.install)
         self.assertIn("after-startup", self.install)
+        self.assertIn("after-quarantine-blocked", self.install)
+        self.assertIn("after-restore-blocked", self.install)
         self.assertIn("expectedChecksumPaths", self.install)
         self.assertIn("$originalError", self.install)
         self.assertIn("$installSucceeded", self.install)
@@ -68,6 +70,8 @@ class PackagingContractTests(unittest.TestCase):
             "rollback_recovery",
             "startup_rollback_recovery",
             "quarantine_recovery",
+            "quarantine_failure_warning",
+            "restore_failure_warning",
             "TestFailureMode",
         ):
             self.assertIn(marker, self.smoke)

@@ -76,7 +76,7 @@ profile and verifies:
 2. the installed CLI reads the isolated configuration path;
 3. the shell process stays alive through its initial startup window;
 4. failed swaps restore the previous version, including a locked-cleanup
-   quarantine path;
+   quarantine path and recovery-location warnings;
 5. reinstall/upgrade installs a new manifest version while preserving a
    sentinel user configuration;
 6. uninstall removes the package and startup value; and
