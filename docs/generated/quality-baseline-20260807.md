@@ -5,6 +5,7 @@
 - Rust: `rustc 1.95.0 (59807616e 2026-04-14)`
 - Coverage tool: `cargo-llvm-cov 0.8.7`
 - Mutation tool: `cargo-mutants 27.1.0`
+- Quality CI toolchain: Rust `1.95.0` with cached Cargo/build artifacts
 
 This is the first executable baseline for [issue #13](https://github.com/ferminquant/ai-usage-bar/issues/13).
 It records the evidence used to set the alpha ratchet; it does not claim that
@@ -41,22 +42,26 @@ the pre-1.0 target is 95%.
 ## Mutation testing
 
 The bounded mutation command targeted snapshot validation and normalization,
-cache ordering, freshness classification and sanitization, invalid-window
-handling, and freshness aggregation in `src/model.rs` and `src/daemon.rs`.
-It ran the full Rust test suite, including invariant tests.
+cache ordering, refresh-policy normalization, freshness classification and
+sanitization, invalid-window handling, and freshness aggregation in
+`src/model.rs` and `src/daemon.rs`. It ran the full Rust test suite, including
+invariant tests, and the checked-in regex matched every emitted mutant.
 
 | Outcome | Count |
 | --- | ---: |
 | Total mutants | 51 |
-| Caught | 33 |
-| Missed | 11 |
+| Caught | 38 |
+| Missed | 6 |
 | Timed out | 0 |
 | Unviable | 7 |
 | Viable denominator | 44 |
-| Mutation score | **75.0000%** |
+| Mutation score | **86.3636%** |
 
 The alpha mutation gate is 70% of viable mutants; the pre-1.0 target is 80%.
-The mutation run completed in approximately 54 seconds on the local Linux
+Mutation outcomes can vary slightly with process scheduling, so the gate is
+intentionally set below this baseline and checks the score rather than exact
+counts.
+The mutation run completed in approximately 45 seconds on the local Linux
 environment. Raw diffs and caught/missed lists are retained in the CI artifact
 so invariant-killed mutants remain inspectable.
 
@@ -64,11 +69,11 @@ so invariant-killed mutants remain inspectable.
 
 Provider adapters, configuration, browser hand-off, and native Windows
 entrypoints are reported but excluded from the alpha policy-core coverage
-scope. View-model mutation is similarly excluded from the first bounded run
-because its presentation branches need a UI-focused mutation budget. Each
-exception is recorded with issue #13 and a 2026-10-31 review date in
+scope. View-model mutation is outside the first bounded mutation file list
+because its presentation branches need a UI-focused mutation budget. Coverage
+exceptions are recorded with issue #13 and a 2026-10-31 review date in
 [`quality/thresholds.json`](../../quality/thresholds.json). The review must
-either extend the evidence or replace the exception before that date.
+either extend the evidence or replace each exception before that date.
 
 The earlier documentation-only seed remains available as the historical
 [2026-07-31 baseline](quality-baseline-20260731.md).

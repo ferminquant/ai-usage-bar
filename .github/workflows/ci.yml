@@ -56,6 +56,10 @@ jobs:
         uses: actions/checkout@v5
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -63,11 +67,11 @@ jobs:
       - name: Install coverage and mutation tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.8.7
       - name: Install mutation tool
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       - name: Test quality gate script
         run: python -m unittest discover --start-directory scripts --pattern 'test_*.py'
       - name: Collect line coverage
@@ -82,10 +86,10 @@ jobs:
           cargo mutants --all-features
           --file src/model.rs
           --file src/daemon.rs
-          --re 'UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome'
+          --re 'RefreshPolicy::normalized|UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome'
           --jobs 2
           --timeout 60
-          --build-timeout 300
+          --build-timeout 600
           --no-shuffle
           --baseline run
       - name: Evaluate quality gates

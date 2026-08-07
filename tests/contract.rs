@@ -9,6 +9,31 @@ use chrono::{Duration, TimeZone, Utc};
 use common::{instant, metric_snapshot};
 
 #[test]
+fn contract_account_id_cache_keys_require_nonempty_noncontrol_values() {
+    let mut snapshot = metric_snapshot(
+        Provider::Codex,
+        instant(),
+        MetricKind::Quota,
+        WindowKind::Weekly,
+        "percent",
+        Some(20.0),
+        Some(80.0),
+        Some(100.0),
+        Freshness::Live,
+        Some("primary"),
+    );
+
+    assert!(snapshot.has_safe_account_id());
+    for invalid in ["", "   ", "bad\nid", "bad\tid"] {
+        snapshot.account_id = invalid.into();
+        assert!(
+            !snapshot.has_safe_account_id(),
+            "account id should not be cache-safe: {invalid:?}"
+        );
+    }
+}
+
+#[test]
 fn contract_snapshot_round_trip_preserves_state_and_timestamps() {
     let observed_at = instant();
     let reset_at = observed_at - Duration::hours(1);

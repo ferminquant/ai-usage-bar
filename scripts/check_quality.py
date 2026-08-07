@@ -14,6 +14,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -198,7 +199,44 @@ def load_mutation_report(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
         mutation_policy.get("alpha_score_threshold"),
         "mutation.alpha_score_threshold",
     )
-    exclusions = _validate_exclusions(mutation_policy.get("excluded", []), dt.date.today())
+    scope_files = mutation_policy.get("scope_files")
+    if not isinstance(scope_files, list) or not scope_files or not all(
+        isinstance(item, str) and item for item in scope_files
+    ):
+        raise QualityError("mutation.scope_files must be a non-empty list of paths")
+    regex_text = mutation_policy.get("regex")
+    if not isinstance(regex_text, str) or not regex_text:
+        raise QualityError("mutation.regex must be a non-empty string")
+    try:
+        mutation_regex = re.compile(regex_text)
+    except re.error as exc:
+        raise QualityError(f"mutation regex is invalid: {exc}") from exc
+
+    outcomes = report.get("outcomes")
+    if not isinstance(outcomes, list):
+        raise QualityError("mutation report has no outcomes list")
+    mutant_names: list[str] = []
+    for outcome in outcomes:
+        scenario = outcome.get("scenario") if isinstance(outcome, dict) else None
+        mutant = scenario.get("Mutant") if isinstance(scenario, dict) else None
+        if mutant is None:
+            continue
+        if not isinstance(mutant, dict):
+            raise QualityError("mutation report has an invalid mutant scenario")
+        name = mutant.get("name")
+        file = mutant.get("file")
+        if not isinstance(name, str) or not isinstance(file, str):
+            raise QualityError("mutation report mutant is missing name or file")
+        if file not in scope_files:
+            raise QualityError(f"mutation report escaped scope: {file}")
+        if not mutation_regex.search(name):
+            raise QualityError(f"mutation report does not match mutation.regex: {name}")
+        mutant_names.append(name)
+    if len(mutant_names) != values["total_mutants"]:
+        raise QualityError(
+            "mutation report mutant count does not match total_mutants: "
+            f"{len(mutant_names)} != {values['total_mutants']}"
+        )
     gate = {
         "name": "policy-core mutation score",
         "threshold": threshold,
@@ -214,9 +252,8 @@ def load_mutation_report(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
             mutation_policy.get("pre_release_score_threshold"),
             "mutation.pre_release_score_threshold",
         ),
-        "scope_files": mutation_policy.get("scope_files", []),
-        "regex": mutation_policy.get("regex", ""),
-        "excluded": list(exclusions.values()),
+        "scope_files": scope_files,
+        "regex": regex_text,
         "gate": gate,
         "version": report.get("cargo_mutants_version"),
     }
@@ -256,7 +293,6 @@ def write_summary(
                 "pre_release_threshold",
                 "scope_files",
                 "regex",
-                "excluded",
                 "version",
             )
         },
@@ -278,8 +314,8 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     root = args.root.resolve()
-    policy = json.loads(args.thresholds.read_text(encoding="utf-8"))
     try:
+        policy = json.loads(args.thresholds.read_text(encoding="utf-8"))
         coverage = load_coverage_report(args.coverage, root, policy)
         mutation = load_mutation_report(args.mutants, policy)
         gates = evaluate(coverage, mutation)

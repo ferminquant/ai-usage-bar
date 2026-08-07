@@ -74,14 +74,6 @@
       "src/model.rs",
       "src/daemon.rs"
     ],
-    "regex": "UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome",
-    "excluded": [
-      {
-        "path": "src/viewmodel.rs",
-        "reason": "View-model sorting and compact-card branches are UI presentation logic; keep this first mutation run bounded while invariants cover incompatible aggregation.",
-        "issue": 13,
-        "review_by": "2026-10-31"
-      }
-    ]
+    "regex": "RefreshPolicy::normalized|UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome"
   }
 }

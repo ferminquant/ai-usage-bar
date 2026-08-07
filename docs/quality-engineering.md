@@ -48,12 +48,20 @@ the shared policy and presentation boundary; adapter and native-entrypoint
 files are still reported and listed as exceptions.
 
 Mutation testing is deliberately bounded to the snapshot contract, cache
-ordering, freshness classification, sanitization, invalid-window handling,
-and freshness aggregation functions in `src/model.rs` and `src/daemon.rs`.
+ordering, refresh-policy normalization, freshness classification,
+sanitization, invalid-window handling, and freshness aggregation functions in
+`src/model.rs` and `src/daemon.rs`. The checked-in regex is validated against
+every mutant emitted by `cargo-mutants`, so command/policy drift fails the
+quality job instead of silently widening the scope.
 The mutation command runs the full Rust test set, including the invariant
 tests, so the report shows which policy mutants those tests kill. The alpha
 gate is 70% of viable mutants (unviable mutants are reported separately); the
 pre-1.0 target is 80%.
+
+Every file emitted by `cargo-llvm-cov` must either be in the enforced scope or
+have an issue-linked entry in `quality/thresholds.json`. Adding a Rust source
+file therefore requires classifying it in that policy in the same change; an
+unclassified file intentionally fails the quality job.
 
 ## Required evidence artifacts
 

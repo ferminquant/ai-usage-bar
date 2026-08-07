@@ -33,7 +33,6 @@ class QualityEvidenceTests(unittest.TestCase):
                 "pre_release_score_threshold": 80,
                 "scope_files": ["src/model.rs"],
                 "regex": "model",
-                "excluded": [],
             },
         }
 
@@ -77,6 +76,21 @@ class QualityEvidenceTests(unittest.TestCase):
             "timeout": 0,
             "unviable": 1,
             "cargo_mutants_version": "test",
+            "outcomes": [
+                {"scenario": {"Baseline": {}}, "summary": "Success"},
+                *[
+                    {
+                        "scenario": {
+                            "Mutant": {
+                                "name": "src/model.rs:1: model mutation",
+                                "file": "src/model.rs",
+                            }
+                        },
+                        "summary": "CaughtMutant",
+                    }
+                    for _ in range(5)
+                ],
+            ],
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "outcomes.json"
@@ -85,6 +99,84 @@ class QualityEvidenceTests(unittest.TestCase):
         self.assertEqual(result["viable"], 4)
         self.assertEqual(result["score_percent"], 75.0)
         self.assertTrue(result["gate"]["passed"])
+
+    def test_coverage_rejects_unclassified_files(self) -> None:
+        import json
+        import tempfile
+
+        report = {
+            "data": [
+                {
+                    "files": [
+                        {
+                            "filename": "/repo/src/model.rs",
+                            "summary": {"lines": {"count": 10, "covered": 10}},
+                        },
+                        {
+                            "filename": "/repo/src/new.rs",
+                            "summary": {"lines": {"count": 1, "covered": 1}},
+                        },
+                        {
+                            "filename": "/repo/src/bin/main.rs",
+                            "summary": {"lines": {"count": 2, "covered": 0}},
+                        },
+                    ],
+                    "totals": {"lines": {"count": 13, "covered": 11}},
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "coverage.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaises(check_quality.QualityError):
+                check_quality.load_coverage_report(path, Path("/repo"), self.policy)
+
+    def test_expired_exclusion_is_rejected(self) -> None:
+        import json
+        import tempfile
+
+        policy = json.loads(json.dumps(self.policy))
+        policy["coverage"]["excluded"][0]["review_by"] = "2020-01-01"
+        report = {
+            "data": [
+                {
+                    "files": [
+                        {
+                            "filename": "/repo/src/model.rs",
+                            "summary": {"lines": {"count": 1, "covered": 1}},
+                        },
+                        {
+                            "filename": "/repo/src/bin/main.rs",
+                            "summary": {"lines": {"count": 1, "covered": 0}},
+                        },
+                    ],
+                    "totals": {"lines": {"count": 2, "covered": 1}},
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "coverage.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaises(check_quality.QualityError):
+                check_quality.load_coverage_report(path, Path("/repo"), policy)
+
+    def test_malformed_policy_is_rejected_without_assuming_report_shape(self) -> None:
+        import json
+        import tempfile
+
+        report = {
+            "total_mutants": 0,
+            "caught": 0,
+            "missed": 0,
+            "timeout": 0,
+            "unviable": 0,
+            "outcomes": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "outcomes.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaises(check_quality.QualityError):
+                check_quality.load_mutation_report(path, self.policy)
 
 
 if __name__ == "__main__":
