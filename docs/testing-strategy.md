@@ -109,6 +109,10 @@ cargo test --test invariants --all-features
 cargo test --test acceptance --all-features
 ~~~
 
-The broader Linux and Windows jobs continue to run all targets. Integration,
-UI, packaging, security, diagnostic, and mutation jobs remain split by risk
-and runtime as those surfaces are implemented.
+The broader Linux and Windows jobs continue to run all targets. The quality
+job now runs the bounded policy-core coverage and mutation gates described in
+the [quality contract](quality-engineering.md). Provider adapters, native
+entrypoints, and UI-specific mutation branches remain visible in the artifact
+with issue-linked review dates rather than being silently omitted. Integration,
+UI, packaging, security, and diagnostic jobs remain split by risk and runtime
+as those surfaces are implemented.

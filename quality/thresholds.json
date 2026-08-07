@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "coverage": {
+    "scoped_line_threshold": 90.0,
+    "core_file_threshold": 90.0,
+    "scope": [
+      "src/daemon.rs",
+      "src/model.rs",
+      "src/security.rs",
+      "src/shell_logic.rs",
+      "src/viewmodel.rs"
+    ],
+    "excluded": [
+      {
+        "path": "src/bin/ai-usage-bar.rs",
+        "reason": "Windows entrypoint; behavior is covered by shell smoke work rather than Linux line instrumentation.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/bin/shell.rs",
+        "reason": "Native Windows shell entrypoint; behavior is covered by UI and packaging smoke work.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/browser.rs",
+        "reason": "Browser hand-off integration is validated by allowlist and destination tests; native launch remains a smoke-test surface.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/lib.rs",
+        "reason": "Crate module and re-export declarations have no instrumented executable lines; module behavior is measured in the scoped source files.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/codex.rs",
+        "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/config.rs",
+        "reason": "Configuration filesystem and migration paths need dedicated integration coverage.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/grok.rs",
+        "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/kimi.rs",
+        "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/ollama.rs",
+        "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
+        "path": "src/opencode.rs",
+        "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      }
+    ]
+  },
+  "mutation": {
+    "alpha_score_threshold": 70.0,
+    "pre_release_score_threshold": 80.0,
+    "scope_files": [
+      "src/model.rs",
+      "src/daemon.rs"
+    ],
+    "regex": "RefreshPolicy::normalized|UsageSnapshot::(validate|is_percentage|has_safe_account_id)|SnapshotCache::(try_store_live|cached_snapshots|get|for_provider)|classify_cached|aggregate_freshness|sanitize_adapter_snapshot|invalid_window_outcome"
+  }
+}

@@ -110,8 +110,8 @@ credentials are sent to a project server.
   approach.
 - [Security boundaries](docs/security.md) — redaction, safe diagnostics,
   dependency/secret gates, and the allowlisted browser hand-off.
-- [Initial quality baseline](docs/generated/quality-baseline-20260731.md) —
-  the honest docs-only starting point for future ratchets.
+- [Quality baseline](docs/generated/quality-baseline-20260807.md) —
+  the first executable coverage and mutation measurements.
 - [Testing strategy](docs/testing-strategy.md) — unit, contract, invariant,
   integration, UI, packaging, security, and mutation-test plans.
 - [Runner strategy](docs/runner-strategy.md) — whether the existing Budget
@@ -155,10 +155,10 @@ constraints include:
 - lint, type, dependency, secret, packaging, and UI smoke checks;
 - generated quality evidence attached to CI runs.
 
-There is no source-code coverage baseline yet because the repository is still
-documentation-only. The thresholds and artifacts are defined in
-[Quality engineering](docs/quality-engineering.md), and implementation work
-is tracked in the [GitHub issue backlog](https://github.com/ferminquant/ai-usage-bar/issues).
+The first executable baseline now records the full-repository coverage,
+enforced policy-core scope, bounded mutation score, and dated exclusions. The
+thresholds and artifact format are defined in [Quality engineering](docs/quality-engineering.md),
+and implementation work is tracked in the [GitHub issue backlog](https://github.com/ferminquant/ai-usage-bar/issues).
 
 ## Development principles
 

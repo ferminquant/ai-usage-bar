@@ -1,9 +1,10 @@
 # Quality engineering contract
 
-This document records the quality contract and its current executable gates.
-Coverage and mutation targets remain roadmap items; the implemented test,
-secret-scan, lint, and dependency-audit jobs are evidence, not a claim that
-all targets are complete.
+This document records the quality contract and its executable gates. The
+coverage and mutation ratchet is intentionally bounded: the alpha gate
+measures the provider-neutral policy core, while provider I/O and native
+Windows entrypoints remain explicit, dated exceptions until their dedicated
+fixture and smoke suites are complete.
 
 The guiding reference is
 [the requested Uncle Bob post](https://x.com/i/status/2080257779395154409),
@@ -17,8 +18,9 @@ treating any single metric as proof of correctness.
 | Area | Alpha gate | Pre-1.0 target | Evidence |
 | --- | ---: | ---: | --- |
 | Test pass rate | 100% selected CI tests | 100% | CI job summary |
-| Line coverage, overall | >= 90% | >= 95% | coverage.json plus ratchet config |
-| Adapter normalization/core coverage | >= 95% | >= 95% | Per-file thresholds |
+| Line coverage, enforced policy scope | >= 90% | >= 95% | coverage.json plus ratchet config |
+| Policy-core file coverage | >= 90% | >= 95% | Per-file thresholds |
+| Provider adapter/entrypoint coverage | Reported with dated exceptions | >= 95% | quality-summary.json and issue-linked exclusions |
 | Mutation score for policy/normalization core | >= 70% | >= 80% | Mutation report |
 | Contract fixture pass rate | 100% | 100% | Versioned redacted fixtures |
 | Invariant pass rate | 100% | 100% | Dedicated invariant job |
@@ -30,12 +32,42 @@ treating any single metric as proof of correctness.
 | Quality job runtime | <= 20 minutes on the selected runner | <= 15 minutes where practical | CI timing artifact |
 
 Thresholds are starting points. A threshold can be changed only with a dated
-baseline, an issue explaining the risk, and a ratchet plan. A high percentage
-does not excuse missing behavior or weak provider semantics.
+baseline, an issue explaining the risk, and a ratchet plan. Every excluded
+file must carry an issue number, a reason, and a review date in
+[`quality/thresholds.json`](../quality/thresholds.json); an expired exception
+fails the quality job. A high percentage does not excuse missing behavior or
+weak provider semantics.
+
+## Executable alpha gate
+
+The `quality` CI job installs `cargo-llvm-cov` and `cargo-mutants`, then emits
+`quality-output/quality-summary.json` and the raw reports as a short-lived
+artifact. Coverage is calculated for `src/model.rs`, `src/daemon.rs`,
+`src/security.rs`, `src/shell_logic.rs`, and `src/viewmodel.rs`. This scope is
+the shared policy and presentation boundary; adapter and native-entrypoint
+files are still reported and listed as exceptions.
+
+Mutation testing is deliberately bounded to the snapshot contract, cache
+ordering, refresh-policy normalization, freshness classification,
+sanitization, invalid-window handling, and freshness aggregation functions in
+`src/model.rs` and `src/daemon.rs`. The checked-in regex is validated against
+every mutant emitted by `cargo-mutants`, so command/policy drift fails the
+quality job instead of silently widening the scope.
+The mutation command runs the full Rust test set, including the invariant
+tests, so the report shows which policy mutants those tests kill. The alpha
+gate is 70% of viable mutants (unviable mutants are reported separately); the
+pre-1.0 target is 80%.
+
+Every file emitted by `cargo-llvm-cov` must either be in the enforced scope or
+have an issue-linked entry in `quality/thresholds.json`. Adding a Rust source
+file therefore requires classifying it in that policy in the same change; an
+unclassified file intentionally fails the quality job. A source file with no
+instrumented executable lines may be an explicit dated exclusion (as with
+`src/lib.rs`), even when it is absent from the coverage report.
 
 ## Required evidence artifacts
 
-The CI workflow should eventually publish or retain:
+The CI workflow publishes or retains:
 
 - a machine-readable quality-summary.json;
 - coverage and per-file threshold data;
@@ -74,7 +106,9 @@ The first implementation issue must record:
 - known gaps and their issue links.
 
 Future baselines compare against that record. Missing evidence is reported as
-unknown; it is not silently treated as passing.
+unknown; it is not silently treated as passing. The current executable
+baseline is recorded in
+[docs/generated/quality-baseline-20260807.md](generated/quality-baseline-20260807.md).
 
 The starting point is recorded in
 [docs/generated/quality-baseline-20260731.md](generated/quality-baseline-20260731.md).
