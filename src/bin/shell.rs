@@ -1101,7 +1101,7 @@ mod windows_shell {
             .unwrap_or(lower.as_str())
             .trim();
         let tokens: Vec<&str> = countdown.split_whitespace().collect();
-        if tokens.len() < 2 || tokens.len() % 2 != 0 {
+        if tokens.len() < 2 || !tokens.len().is_multiple_of(2) {
             return Err(
                 "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\""
                     .to_string(),
