@@ -16,7 +16,8 @@ service.
   text is rendered, which protects direct diagnostic/test inputs as well.
 - Account identifiers shown to users are stable safe identifiers. Email
   addresses, paths, and other unsafe values are replaced with a stable local
-  hash.
+  hash. This is display-level pseudonymization for correlation, not
+  cryptographic anonymity; it must never be treated as a credential or secret.
 - `scripts/check_secrets.py` scans tracked text files for high-confidence
   private-key, provider-key, GitHub-token, JWT, bearer, authorization, and
   named-secret patterns. It reports only path, line, and rule name; secret

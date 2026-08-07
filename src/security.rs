@@ -51,6 +51,7 @@ fn marked_value_ranges(input: &str) -> Vec<(usize, usize)> {
         "id_token",
         "client_secret",
         "api_key",
+        "api-key",
         "apikey",
         "password",
         "secret",
@@ -84,7 +85,11 @@ fn marked_value_ranges(input: &str) -> Vec<(usize, usize)> {
             }
             let is_header = matches!(
                 *marker,
-                "proxy-authorization" | "authorization" | "set-cookie" | "cookie"
+                "proxy-authorization"
+                    | "authorization"
+                    | "set-cookie"
+                    | "cookie"
+                    | "api-key"
             );
             cursor += 1;
             while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
@@ -146,7 +151,9 @@ fn is_sensitive_query_key(key: &str) -> bool {
             | "id_token"
             | "token"
             | "api_key"
+            | "api-key"
             | "apikey"
+            | "key"
             | "client_secret"
             | "secret"
             | "code"
@@ -291,6 +298,25 @@ mod tests {
         assert!(!output.contains("short-code"));
         assert!(output.contains("format=json"));
         assert!(output.contains("api_key=[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_hyphenated_api_key_headers_and_query_keys() {
+        let input = concat!(
+            "X-API-KEY: plain-key with trailing detail\n",
+            "X-Goog-Api-Key=google-key\n",
+            "https://example.test/callback?key=query-key&format=json"
+        );
+        let output = redact_sensitive_text(input);
+
+        assert_eq!(
+            output,
+            concat!(
+                "X-API-KEY: [REDACTED]\n",
+                "X-Goog-Api-Key=[REDACTED]\n",
+                "https://example.test/callback?key=[REDACTED]&format=json"
+            )
+        );
     }
 
     #[test]

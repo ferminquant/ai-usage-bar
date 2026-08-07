@@ -1520,7 +1520,10 @@ mod windows_shell {
                 }
             }
             Err(error) => {
-                eprintln!("OpenCode reset settings failed: {error}");
+                eprintln!(
+                    "OpenCode reset settings failed: {}",
+                    ai_usage_bar::redact_sensitive_text(&error)
+                );
                 if let Some(state) = app_state(hwnd) {
                     set_status(hwnd, state, "Could not save OpenCode reset settings");
                 }
