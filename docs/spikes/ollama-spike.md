@@ -99,6 +99,15 @@ totals, but still omits reset timestamps and reset headers. The settings page is
 therefore a useful manual fallback only; the application does not scrape it or
 copy browser credentials.
 
+On Windows, `ollama` may be a Windows client talking to an Ollama daemon that
+is actually running in WSL. Those environments have separate key files even
+though the local daemon reports the signed-in account. The adapter first uses
+the native Windows key and, after an upstream authentication rejection, retries
+with the default WSL key through `wsl.exe`; it does not sign out, copy the key,
+or interrupt the daemon's active sessions. An explicit `OLLAMA_ID` or
+`OLLAMA_HOME` (or API key environment variable) remains authoritative and
+disables that automatic fallback.
+
 ## Candidate source decision
 
 | Source | Provides totals/reset | Auth boundary | Decision |
