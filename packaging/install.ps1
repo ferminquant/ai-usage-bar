@@ -277,10 +277,14 @@ try {
             try {
                 Move-Item -LiteralPath $InstallRoot -Destination $failedRoot -Force
                 $newInstallGone = -not (Test-Path -LiteralPath $InstallRoot)
+                if (-not $newInstallGone) {
+                    Write-Warning ("Could not quarantine the partial installation at {0}; the previous-version backup remains at {1}" -f $InstallRoot, $backupRoot)
+                }
             } catch {
                 # If the quarantine move is also blocked, leave both the
                 # partial install and backup in place for manual recovery.
                 $newInstallGone = $false
+                Write-Warning ("Could not quarantine the partial installation at {0}; the previous-version backup remains at {1}: {2}" -f $InstallRoot, $backupRoot, $_.Exception.Message)
             }
         }
     }
@@ -292,6 +296,7 @@ try {
             # Leave backupRoot in place for manual recovery rather than
             # deleting the previous installation in finally.
             $rollbackRestored = $false
+            Write-Warning ("Could not restore the previous installation from {0}; manual recovery is required: {1}" -f $backupRoot, $_.Exception.Message)
         }
     } elseif (-not $oldInstallMoved) {
         $rollbackRestored = $true
