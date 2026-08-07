@@ -76,8 +76,8 @@ if ([string]::IsNullOrWhiteSpace($packageVersion)) {
     throw "Version must contain at least one package-safe character"
 }
 
-if (($SignToolPath -and -not $CertificateThumbprint) -or
-    ($CertificateThumbprint -and -not $SignToolPath)) {
+if ([string]::IsNullOrWhiteSpace($SignToolPath) -xor
+    [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     throw "SignToolPath and CertificateThumbprint must be supplied together"
 }
 $signingThumbprint = ($CertificateThumbprint -replace "\s", "").ToLowerInvariant()

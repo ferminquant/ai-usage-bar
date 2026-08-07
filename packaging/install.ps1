@@ -172,6 +172,8 @@ $backupRoot = "$InstallRoot.__backup_$runId"
 $oldInstallMoved = $false
 $newInstallMoved = $false
 $startupChanged = $false
+$rollbackRestored = $false
+$backupCleanupAllowed = $false
 
 try {
     Stop-InstalledShell -Root $InstallRoot
@@ -222,18 +224,36 @@ try {
             Set-RunValue -Name $StartupValueName -Value $previousStartup
         }
     }
-    if ($newInstallMoved -and (Test-Path -LiteralPath $InstallRoot)) {
-        Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+    $newInstallGone = -not $newInstallMoved -or -not (Test-Path -LiteralPath $InstallRoot)
+    if (-not $newInstallGone) {
+        try {
+            Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+            $newInstallGone = -not (Test-Path -LiteralPath $InstallRoot)
+        } catch {
+            # Keep the backup below if a transient lock prevents cleanup. It
+            # is the only recoverable copy of the previous installation.
+            $newInstallGone = $false
+        }
     }
-    if ($oldInstallMoved -and (Test-Path -LiteralPath $backupRoot)) {
-        Move-Item -LiteralPath $backupRoot -Destination $InstallRoot
+    if ($oldInstallMoved -and $newInstallGone -and (Test-Path -LiteralPath $backupRoot)) {
+        try {
+            Move-Item -LiteralPath $backupRoot -Destination $InstallRoot
+            $rollbackRestored = $true
+        } catch {
+            # Leave backupRoot in place for manual recovery rather than
+            # deleting the previous installation in finally.
+            $rollbackRestored = $false
+        }
+    } elseif (-not $oldInstallMoved) {
+        $rollbackRestored = $true
     }
+    $backupCleanupAllowed = -not $oldInstallMoved -or $rollbackRestored
     throw
 } finally {
     if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
-    if (Test-Path -LiteralPath $backupRoot) {
+    if ($backupCleanupAllowed -and (Test-Path -LiteralPath $backupRoot)) {
         Remove-Item -LiteralPath $backupRoot -Recurse -Force
     }
 }

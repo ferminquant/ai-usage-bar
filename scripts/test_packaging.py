@@ -31,6 +31,7 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("checksums.sha256", self.package)
         self.assertIn("Get-FileHash", self.package)
         self.assertIn("Compress-Archive", self.package)
+        self.assertIn("IsNullOrWhiteSpace($CertificateThumbprint)", self.package)
 
     def test_installer_is_user_scoped_and_transactional(self):
         self.assertIn("LocalApplicationData", self.install)
