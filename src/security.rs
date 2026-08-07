@@ -164,7 +164,7 @@ fn bare_token_ranges(input: &str) -> Vec<(usize, usize)> {
         while let Some(relative) = input[search_from..].find(prefix) {
             let start = search_from + relative;
             let end = value_end(input, start);
-            if end > start + prefix.len() {
+            if has_prefix_boundary(input.as_bytes(), start) && end > start + prefix.len() {
                 ranges.push((start, end));
             }
             search_from = start + prefix.len();
@@ -196,6 +196,11 @@ fn has_identifier_boundaries(bytes: &[u8], start: usize, end: usize) -> bool {
     let after_is_identifier = end < bytes.len()
         && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
     !before_is_identifier && !after_is_identifier
+}
+
+fn has_prefix_boundary(bytes: &[u8], start: usize) -> bool {
+    start == 0
+        || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
 }
 
 fn line_end(input: &str, start: usize) -> usize {
@@ -301,6 +306,14 @@ mod tests {
             redact_sensitive_text("provider token must not escape"),
             "provider token must not escape"
         );
+    }
+
+    #[test]
+    fn does_not_redact_sk_hyphen_inside_words() {
+        let input = "risk-assessment task-key desk-set sk-demo";
+        let output = redact_sensitive_text(input);
+
+        assert_eq!(output, "risk-assessment task-key desk-set [REDACTED]");
     }
 
     #[test]
