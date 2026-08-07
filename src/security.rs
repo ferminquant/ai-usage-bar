@@ -76,6 +76,12 @@ fn marked_value_ranges(input: &str) -> Vec<(usize, usize)> {
             }
 
             let mut cursor = marker_end;
+            // JSON and similar structured diagnostics quote the field name:
+            // `"api_key": "value"`. Skip that closing key quote before
+            // looking for the key/value separator.
+            if matches!(bytes.get(cursor), Some(b'"') | Some(b'\'')) {
+                cursor += 1;
+            }
             while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
                 cursor += 1;
             }
@@ -298,6 +304,17 @@ mod tests {
         assert!(!output.contains("short-code"));
         assert!(output.contains("format=json"));
         assert!(output.contains("api_key=[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_quoted_json_secret_keys() {
+        let input = r#"{"api_key": "short-key", "client_secret":"short-secret", "other": 1}"#;
+        let output = redact_sensitive_text(input);
+
+        assert_eq!(
+            output,
+            r#"{"api_key": [REDACTED], "client_secret":[REDACTED], "other": 1}"#
+        );
     }
 
     #[test]
