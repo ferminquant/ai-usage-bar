@@ -18,7 +18,7 @@ The issue's “OpenCode Co” wording refers to the official product name,
 | OpenCode Console usage export | Reject as the Go quota source. It is a service-account-only historical CSV export with bounded UTC ranges, not remaining allowance or reset metadata. |
 | Proposed `GET /zen/go/v1/usage` | Monitor, but do not implement against it yet. The upstream request is still open and the live endpoint returned HTTP 404 on 2026-08-06. |
 | Browser automation | Not required for a local estimate. The authenticated dashboard remains the exact manual fallback; do not scrape HTML or copy browser credentials. |
-| Issue #34 adapter | The explicitly labeled local estimate is now implemented; an exact account adapter still waits for a released, documented individual-key usage endpoint. Weekly/monthly anchors are user-adjustable in the shell because local history cannot know the subscription anniversary. |
+| Issue #34 adapter | The explicitly labeled local estimate is now implemented; an exact account adapter still waits for a released, documented individual-key usage endpoint. Weekly/monthly anchors are user-adjustable in the shell because local history cannot know the subscription anniversary. The editor accepts the dashboard's `2 days 10 hours`/`29 days 0 hours` countdown strings (or a copied `Resets in ...` line) directly. |
 
 ## Product semantics
 

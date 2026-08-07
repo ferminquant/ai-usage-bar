@@ -56,6 +56,10 @@ is not account-authoritative and cannot include other devices or workspaces.
 The rolling reset is estimated from the latest local Go event. Weekly and
 monthly reset anchors are editable from the OpenCode right-click menu; leaving
 either field blank restores the built-in Monday/first-of-month defaults. The
+editor accepts the same countdown text shown by the dashboard, such as
+`2 days 10 hours` or `29 days 0 hours` (and also a copied `Resets in ...`
+line), so no timezone conversion is needed. The rolling five-hour reset is
+derived from local activity and is not edited there. The
 exact account usage endpoint remains tracked upstream and is not scraped.
 
 ## Product direction
