@@ -9,6 +9,7 @@ team post on the official forum.
 | Surface | Provider id | Decision |
 | --- | --- | --- |
 | Kimi Code membership quota: weekly (7-day) plan window plus rolling 5-hour window | `kimi` | **Implement** |
+| Shared monthly membership pool, when the managed response reports it | `kimi` (separate monthly quota snapshot rendered as **Total**) | **Implement conditionally; omit when absent** |
 | Extra Usage wallet (top-up balance, monthly spending cap) | `kimi` (separate credits snapshot) | **Implement** with the same `/usages` response |
 | Kimi Code Console (`https://www.kimi.com/code/console`) | n/a | Manual fallback only; open in the user's OS browser, never scraped |
 | Kimi Open Platform (`platform.moonshot.cn` / API-key billing balance) | n/a | **Defer / out of scope**; a separate pay-as-you-go product, not the membership remaining-usage bar |
@@ -96,6 +97,12 @@ Observed response shape (values illustrative/redacted; see fixtures):
       }
     }
   ],
+  "totalQuota": {
+    "used": "12",
+    "limit": "100",
+    "remaining": "88",
+    "resetTime": "2026-09-01T00:00:00Z"
+  },
   "boosterWallet": {
     "balance": { "type": "BOOSTER", "amount": 1500000000, "amountLeft": 1250000000 },
     "monthlyChargeLimit": { "priceInCents": 10000, "currency": "CNY" },
@@ -114,6 +121,7 @@ Observed response shape (values illustrative/redacted; see fixtures):
 | `limits[]` | array | Additional windows, e.g. the rolling 5-hour rate window | One snapshot per row. `window.duration`/`timeUnit` map to `window_kind` (`300 TIME_UNIT_MINUTE` → `rolling` 5h). |
 | `limits[].detail.used/limit/remaining` | decimal string | Per-window usage | Same mapping as `usage`. |
 | `limits[].detail.resetTime` | ISO-8601 string | Per-window reset | `resets_at`. |
+| `totalQuota` (when populated) | usage summary object | Shared monthly membership pool | Separate `window_kind=monthly`, rendered as **Total**; an empty object is treated as absent. |
 | `boosterWallet.balance` | fixed-point ints | Extra Usage wallet; `amount`/`amountLeft` in **fixed-point cents** (`1_000_000` = 1 cent) | Separate `metric_kind=credits` snapshot, `unit=cents`, `currency` from `monthlyChargeLimit`/`monthlyUsed`. Absent wallet → no credits snapshot (not zero). |
 | `boosterWallet.monthlyChargeLimit` | `{priceInCents, currency}` | Monthly spending cap; 0 = unlimited | Diagnostics; report only if present. |
 | `boosterWallet.monthlyUsed` | `{priceInCents, currency}` | Spend this month under the cap | Diagnostics; report only if present. |
@@ -157,7 +165,7 @@ treat it as another `limits[]`-style row if present, never merge windows.
 | `usage.*` | weekly snapshot | `metric_kind=quota`, `window_kind=weekly`, `window_label=primary`, `unit=percent`, `used`/`limit` from the response, `resets_at=usage.resetTime` |
 | `limits[]` | window snapshots | one per row; `window_kind=rolling` (300 min → 5h) or derived from `timeUnit`/`duration`; `window_label` = row `name` when present |
 | `boosterWallet` | credits snapshot | `metric_kind=credits`, `unit=cents`, `used=amountLeft`/`total=amount` equivalents with `currency`; absent wallet → no snapshot |
-| monthly membership pool | optional snapshot | if the backend reports it, keep it separate (`window_kind=monthly`); never merge with weekly/5h |
+| monthly membership pool | optional snapshot | if the backend reports numeric values, keep it separate (`window_kind=monthly`, label `total`); never merge with weekly/5h |
 | successful fetch | `freshness` | `live` |
 | (fixed) | `source` | `cli` when reusing the CLI session; `api` when using a Console API key |
 

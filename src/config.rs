@@ -5,8 +5,8 @@
 //! own local login/session surface.
 
 use crate::{
-    CodexAdapter, GrokConsumerAdapter, OllamaCloudAdapter, Provider, ProviderRegistry,
-    RegistryError,
+    CodexAdapter, GrokConsumerAdapter, KimiAdapter, OllamaCloudAdapter, Provider,
+    ProviderRegistry, RegistryError, session_available,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -175,8 +175,20 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
     registry.register(CodexAdapter)?;
     registry.register(GrokConsumerAdapter)?;
     registry.register(OllamaCloudAdapter)?;
+    // Kimi reuses the CLI OAuth session: with a session it is a live adapter;
+    // without one it registers as not configured (never zero usage).
+    if session_available() {
+        registry.register(KimiAdapter)?;
+    } else {
+        registry.register_not_configured(Provider::Kimi)?;
+    }
 
-    for provider in [Provider::Codex, Provider::GrokConsumer, Provider::OllamaCloud] {
+    for provider in [
+        Provider::Codex,
+        Provider::GrokConsumer,
+        Provider::OllamaCloud,
+        Provider::Kimi,
+    ] {
         registry.set_enabled(&provider, config.provider_enabled(&provider))?;
     }
 
@@ -284,7 +296,12 @@ mod tests {
         let registry = build_registry(&AppConfig::default()).unwrap();
         assert_eq!(
             registry.registered_providers(),
-            vec![Provider::Codex, Provider::GrokConsumer, Provider::OllamaCloud]
+            vec![
+                Provider::Codex,
+                Provider::GrokConsumer,
+                Provider::OllamaCloud,
+                Provider::Kimi
+            ]
         );
     }
 

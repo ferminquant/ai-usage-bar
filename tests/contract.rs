@@ -1,8 +1,9 @@
 mod common;
 
 use ai_usage_bar::{
-    AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, SnapshotValidationError,
-    Source, UsageSnapshot, WindowKind, parse_usage_response,
+    AdapterError, Confidence, ErrorCode, Freshness, KimiAdapterError, MetricKind, Provider,
+    SnapshotValidationError, Source, UsageSnapshot, WindowKind, parse_usages_response,
+    parse_usage_response,
 };
 use chrono::{Duration, TimeZone, Utc};
 use common::{instant, metric_snapshot};
@@ -60,6 +61,95 @@ fn contract_ollama_fixture_normalizes_both_hosted_windows() {
             && snapshot.metric_kind == MetricKind::Quota
             && snapshot.validate().is_ok()
     }));
+}
+
+#[test]
+fn contract_kimi_fixture_normalizes_weekly_rolling_and_credits() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/fixtures/kimi/normal.json");
+    let raw: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("Kimi fixture should be readable"),
+    )
+    .expect("Kimi fixture should be JSON");
+
+    let snapshots = parse_usages_response(&raw, instant(), "kimi-contract")
+        .expect("Kimi usages should satisfy the adapter contract");
+    assert_eq!(snapshots.len(), 3);
+
+    let weekly = snapshots
+        .iter()
+        .find(|snapshot| snapshot.window_label.as_deref() == Some("primary"))
+        .expect("weekly primary window present");
+    assert_eq!(weekly.provider, Provider::Kimi);
+    assert_eq!(weekly.metric_kind, MetricKind::Quota);
+    assert_eq!(weekly.window_kind, WindowKind::Weekly);
+    assert_eq!(weekly.unit, "percent");
+    assert_eq!(weekly.used, Some(33.0));
+    assert_eq!(weekly.remaining, Some(67.0));
+    assert_eq!(weekly.limit, Some(100.0));
+    assert_eq!(weekly.source, Source::Cli);
+
+    let rolling = snapshots
+        .iter()
+        .find(|snapshot| snapshot.window_kind == WindowKind::Rolling)
+        .expect("rolling 5-hour window present");
+    assert_eq!(rolling.used, Some(2.0));
+
+    let credits = snapshots
+        .iter()
+        .find(|snapshot| snapshot.metric_kind == MetricKind::Credits)
+        .expect("extra usage credits snapshot present");
+    assert_eq!(credits.used, Some(1250.0));
+    assert_eq!(credits.remaining, None);
+    assert_eq!(credits.limit, Some(1500.0));
+    assert_eq!(credits.unit, "cents");
+
+    assert!(snapshots.iter().all(|snapshot| snapshot.validate().is_ok()));
+}
+
+#[test]
+fn contract_kimi_fixture_failures_map_to_redacted_codes() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |name: &str| {
+        let path = manifest.join("docs/fixtures/kimi").join(name);
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("Kimi fixture should be readable"),
+        )
+        .expect("Kimi fixture should be JSON");
+        raw
+    };
+
+    let auth = parse_usages_response(&read("auth_failure.json"), instant(), "kimi-contract");
+    assert!(matches!(auth, Err(KimiAdapterError::AuthExpired)));
+
+    let timeout = parse_usages_response(&read("timeout.json"), instant(), "kimi-contract");
+    assert!(matches!(timeout, Err(KimiAdapterError::Timeout)));
+
+    let malformed = parse_usages_response(&read("malformed.json"), instant(), "kimi-contract");
+    assert!(matches!(malformed, Err(KimiAdapterError::SchemaDrift(_))));
+}
+
+#[test]
+fn contract_kimi_optional_total_quota_stays_a_monthly_window() {
+    let raw = serde_json::json!({
+        "usage": { "used": "33", "limit": "100", "remaining": "67" },
+        "totalQuota": {
+            "used": "12",
+            "limit": "100",
+            "remaining": "88",
+            "resetTime": "2026-09-01T00:00:00Z"
+        }
+    });
+    let snapshots = parse_usages_response(&raw, instant(), "kimi-contract")
+        .expect("optional Kimi total should satisfy the adapter contract");
+    let total = snapshots
+        .iter()
+        .find(|snapshot| snapshot.window_label.as_deref() == Some("total"))
+        .expect("monthly total window present");
+    assert_eq!(total.window_kind, WindowKind::Monthly);
+    assert_eq!(total.metric_kind, MetricKind::Quota);
+    assert_eq!(total.used, Some(12.0));
+    assert!(total.validate().is_ok());
 }
 
 #[test]

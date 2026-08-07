@@ -2,6 +2,7 @@ pub mod codex;
 pub mod config;
 pub mod daemon;
 pub mod grok;
+pub mod kimi;
 pub mod ollama;
 pub mod model;
 pub mod viewmodel;
@@ -18,6 +19,10 @@ pub use grok::{
     account_id_from_identity as grok_account_id_from_identity, error_snapshot as grok_error_snapshot,
     fetch_grok_consumer_snapshots, parse_billing_response, GrokAdapterError, GrokConsumerAdapter,
 };
+pub use kimi::{
+    account_id_from_credential_path, error_snapshot as kimi_error_snapshot, fetch_kimi_snapshots,
+    parse_usages_response, session_available, KimiAdapter, KimiAdapterError,
+};
 pub use ollama::{
     error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_usage_response,
     OllamaAdapterError, OllamaCloudAdapter,
@@ -32,5 +37,5 @@ pub use model::{
 };
 pub use viewmodel::{
     build_tray_view, build_tray_view_focused, build_tray_view_focused_window, format_reset_label,
-    provider_display_name, MetricCard, ProviderCard, TrayViewModel,
+    provider_display_name, window_display_name, MetricCard, ProviderCard, TrayViewModel,
 };
