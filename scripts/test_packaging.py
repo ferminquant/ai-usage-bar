@@ -40,6 +40,8 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("__backup_", self.install)
         self.assertIn("__failed_", self.install)
         self.assertIn("TestFailureMode", self.install)
+        self.assertIn("after-startup", self.install)
+        self.assertIn("expectedChecksumPaths", self.install)
         self.assertIn("$originalError", self.install)
         self.assertIn("$installSucceeded", self.install)
         self.assertIn("APPDATA", self.install)
@@ -49,6 +51,7 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("package-manifest.json", self.uninstall)
         self.assertIn("install-state.json", self.uninstall)
         self.assertIn('$manifest.product -ne "AI Usage Bar"', self.uninstall)
+        self.assertIn('$state.schema_version -ne 1', self.uninstall)
         self.assertIn("Remove-Item -LiteralPath $InstallRoot -Recurse -Force", self.uninstall)
         self.assertNotIn("$env:APPDATA", self.uninstall)
         self.assertNotIn("Remove-Item -LiteralPath $env:APPDATA", self.uninstall)
@@ -63,6 +66,7 @@ class PackagingContractTests(unittest.TestCase):
             "uninstall_preserves_user_data",
             "startup_value_name",
             "rollback_recovery",
+            "startup_rollback_recovery",
             "quarantine_recovery",
             "TestFailureMode",
         ):

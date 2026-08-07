@@ -25,14 +25,12 @@ if (Test-Path -LiteralPath $SandboxPath) {
 New-Item -ItemType Directory -Path $SandboxPath -Force | Out-Null
 
 $packageRoot = $PackagePath
-$expandedPackage = $false
 if ((Get-Item -LiteralPath $PackagePath).PSIsContainer -eq $false) {
     if ([IO.Path]::GetExtension($PackagePath) -ine ".zip") {
         throw "PackagePath must be a package directory or .zip archive"
     }
     $packageRoot = Join-Path $SandboxPath "package"
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $packageRoot -Force
-    $expandedPackage = $true
 }
 $packageRoot = (Resolve-Path -LiteralPath $packageRoot).Path
 
@@ -180,6 +178,7 @@ try {
     $beforeUpgradeConfig = (Get-Content -LiteralPath $configPath -Raw).Trim()
     $beforeUpgradeState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
         ConvertFrom-Json
+    $beforeUpgradeStartup = Get-RunValue -Name $startupValueName
     $upgradePackageRoot = Join-Path $SandboxPath "upgrade-package"
     Copy-Item -LiteralPath $packageRoot -Destination $upgradePackageRoot -Recurse -Force
     $upgradeManifestPath = Join-Path $upgradePackageRoot "package-manifest.json"
@@ -210,6 +209,19 @@ try {
         throw "Rollback did not restore the previous package version"
     }
     $summary.checks.rollback_recovery = "passed"
+
+    Invoke-ExpectedPackageFailure -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
+        TestFailureMode = "after-startup"
+    } -ExpectedMessage "Synthetic install failure after startup registration"
+    $afterStartupRollbackValue = Get-RunValue -Name $startupValueName
+    if ([string]::IsNullOrWhiteSpace($afterStartupRollbackValue) -or
+        $afterStartupRollbackValue.Trim('"') -ine $beforeUpgradeStartup.Trim('"')) {
+        throw "Rollback did not restore the previous startup registration"
+    }
+    $summary.checks.startup_rollback_recovery = "passed"
 
     Invoke-ExpectedPackageFailure -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
         PackageRoot = $upgradePackageRoot
@@ -248,7 +260,7 @@ try {
         -not (Test-Path -LiteralPath (Join-Path $installRoot "ai-usage-bar.exe") -PathType Leaf)) {
         throw "Upgrade did not install the new package version"
     }
-    $summary.checks.upgrade_preserves_config = $upgradeVersion
+    $summary.checks.upgrade_preserves_config = "passed"
 
     Invoke-PackageScript -ScriptPath $uninstallScript -Parameters @{
         InstallRoot = $installRoot

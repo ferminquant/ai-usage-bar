@@ -33,7 +33,7 @@ $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 if ([string]::IsNullOrWhiteSpace($StartupValueName)) {
     throw "StartupValueName cannot be empty"
 }
-if ($TestFailureMode -notin @("", "after-swap", "after-swap-cleanup-blocked")) {
+if ($TestFailureMode -notin @("", "after-swap", "after-startup", "after-swap-cleanup-blocked")) {
     throw "Unsupported TestFailureMode: $TestFailureMode"
 }
 
@@ -134,10 +134,32 @@ foreach ($relativePath in $copyFiles) {
     }
 }
 $checksumPath = Join-Path $PackageRoot "checksums.sha256"
+$expectedChecksumPaths = @{}
+foreach ($entry in @($manifest.files)) {
+    $relativePath = ([string]$entry.path).Replace("\", "/")
+    if ($expectedChecksumPaths.ContainsKey($relativePath)) {
+        throw "Package manifest contains duplicate file entries: $relativePath"
+    }
+    $expectedChecksumPaths[$relativePath] = $true
+}
+$expectedChecksumPaths["package-manifest.json"] = $true
 $checksumByPath = @{}
 foreach ($line in Get-Content -LiteralPath $checksumPath) {
-    if ($line -match "^\s*([0-9a-fA-F]{64})\s+(.+?)\s*$") {
-        $checksumByPath[$matches[2].Replace("\", "/")] = $matches[1].ToLowerInvariant()
+    if ($line -notmatch "^\s*([0-9a-fA-F]{64})\s+(.+?)\s*$") {
+        throw "checksums.sha256 contains a malformed line"
+    }
+    $relativePath = $matches[2].Replace("\", "/")
+    if (-not $expectedChecksumPaths.ContainsKey($relativePath)) {
+        throw "checksums.sha256 contains an unexpected file: $relativePath"
+    }
+    if ($checksumByPath.ContainsKey($relativePath)) {
+        throw "checksums.sha256 contains a duplicate file: $relativePath"
+    }
+    $checksumByPath[$relativePath] = $matches[1].ToLowerInvariant()
+}
+foreach ($relativePath in $expectedChecksumPaths.Keys) {
+    if (-not $checksumByPath.ContainsKey($relativePath)) {
+        throw "checksums.sha256 is missing: $relativePath"
     }
 }
 foreach ($entry in @($manifest.files)) {
@@ -206,6 +228,9 @@ try {
     if (-not $SkipStartup) {
         Set-RunValue -Name $StartupValueName -Value $expectedStartup
         $startupChanged = $true
+        if ($TestFailureMode -eq "after-startup") {
+            throw "Synthetic install failure after startup registration"
+        }
     }
 
     $state = [ordered]@{

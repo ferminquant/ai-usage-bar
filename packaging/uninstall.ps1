@@ -42,7 +42,7 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
 $state = $null
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
     $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-    if ($state.product -ne "AI Usage Bar") {
+    if ($state.product -ne "AI Usage Bar" -or [int]$state.schema_version -ne 1) {
         throw "Installation marker does not belong to AI Usage Bar"
     }
     if ([string]::IsNullOrWhiteSpace($StartupValueName) -and $state.startup_value_name) {
