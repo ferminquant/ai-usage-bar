@@ -81,6 +81,11 @@ The CI workflow publishes or retains:
 Artifacts must be redacted and must never contain access tokens, cookies, or
 raw authenticated provider responses.
 
+The Windows packaging job also uploads the portable ZIP, its package manifest,
+SHA-256 checksums, and the isolated smoke-test result. CI artifacts are
+unsigned validation outputs unless a release workflow supplies the documented
+Authenticode certificate; they are not treated as public release binaries.
+
 ## Quality gates by change type
 
 | Change | Minimum validation |

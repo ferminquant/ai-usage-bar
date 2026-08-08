@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 #[path = "../shell_logic.rs"]
 #[allow(dead_code)]
 mod shell_logic;

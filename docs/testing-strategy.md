@@ -59,9 +59,13 @@ never require a personal account for ordinary pull requests.
 
 ### UI and packaging tests
 
-The release path needs clean-machine smoke tests for install, startup,
-refresh, detail view, offline behavior, upgrade, and uninstall. UI tests
-should assert accessible names and state labels, not screenshot pixels alone.
+The release path uses the portable Windows package defined in
+[packaging.md](packaging.md). `packaging/smoke-test.ps1` runs on a clean
+GitHub-hosted Windows image and verifies install, startup registration, shell
+startup, upgrade preservation, and uninstall without touching provider-owned
+data. The shell's refresh/detail/offline behavior remains covered by the Rust
+view-model and acceptance tests; UI tests should assert accessible names and
+state labels, not screenshot pixels alone.
 
 ### Security tests
 
@@ -111,8 +115,9 @@ cargo test --test acceptance --all-features
 
 The broader Linux and Windows jobs continue to run all targets. The quality
 job now runs the bounded policy-core coverage and mutation gates described in
-the [quality contract](quality-engineering.md). Provider adapters, native
-entrypoints, and UI-specific mutation branches remain visible in the artifact
-with issue-linked review dates rather than being silently omitted. Integration,
-UI, packaging, security, and diagnostic jobs remain split by risk and runtime
-as those surfaces are implemented.
+the [quality contract](quality-engineering.md), and the dedicated Windows
+packaging job publishes the package manifest/checksums plus smoke summary.
+Provider adapters, native entrypoints, and UI-specific mutation branches
+remain visible in the artifact with issue-linked review dates rather than being
+silently omitted. Integration, UI, packaging, security, and diagnostic jobs
+remain split by risk and runtime.

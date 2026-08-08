@@ -1,4 +1,6 @@
 /target
+/dist
+/package-output
 /mutants.out
 /mutants.out.old
 /quality-output
