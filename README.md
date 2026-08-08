@@ -107,6 +107,13 @@ pwsh -File packaging/package.ps1 -OutputDirectory .\dist
 The package lifecycle and clean-machine smoke contract are documented in
 [Windows packaging](docs/packaging.md).
 
+To publish a release, update the package version in `Cargo.toml`, create an
+annotated `vX.Y.Z` tag, and push the tag. The tag-driven GitHub Actions
+workflow builds the Windows x64 package and publishes the ZIP, manifest,
+checksums, and ZIP checksum as release assets. The initial workflow produces
+unsigned artifacts unless a maintainer later adds a controlled Authenticode
+signing path; verify the adjacent SHA-256 checksum before extracting a ZIP.
+
 ## Documentation
 
 - [Product brief](docs/product-brief.md) — problem, users, goals, and
