@@ -302,10 +302,15 @@ pub fn error_snapshot(
 // ---------------------------------------------------------------------------
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
+// Win32 CREATE_NO_WINDOW prevents helper processes from flashing a console.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug)]
 struct JsonRpcRequest {
@@ -391,13 +396,17 @@ fn read_response(
 
 pub fn fetch_codex_snapshots() -> Result<Vec<UsageSnapshot>, CodexAdapterError> {
     let codex_bin = find_codex_binary()?;
-    let mut child = Command::new(&codex_bin)
+    let mut command = Command::new(&codex_bin);
+    command
         .arg("app-server")
         .arg("--listen")
         .arg("stdio://")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
         .spawn()
         .map_err(|e| CodexAdapterError::Io(format!("failed to spawn codex: {e}")))?;
 

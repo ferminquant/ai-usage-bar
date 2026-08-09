@@ -16,6 +16,8 @@ use serde::Deserialize;
 use signature::Signer;
 use ssh_key::{PrivateKey, PublicKey};
 use std::fs;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::Command;
@@ -28,6 +30,9 @@ const DEFAULT_USAGE_URL: &str = "https://ollama.com/api/usage";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_LABEL: &str = "session";
 const WEEKLY_LABEL: &str = "weekly";
+#[cfg(windows)]
+// Win32 CREATE_NO_WINDOW prevents helper processes from flashing a console.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Built-in adapter for Ollama Pro/cloud account quotas.
 #[derive(Debug, Clone, Copy, Default)]
@@ -315,15 +320,10 @@ fn auth_from_private_key(private_key: PrivateKey) -> Result<OllamaAuth, OllamaAd
 
 #[cfg(windows)]
 fn load_wsl_auth() -> Option<OllamaAuth> {
-    let output = Command::new("wsl.exe")
-        .args([
-            "--exec",
-            "sh",
-            "-c",
-            "cat \"$HOME/.ollama/id_ed25519\"",
-        ])
-        .output()
-        .ok()?;
+    let mut command = Command::new("wsl.exe");
+    command.args(["--exec", "sh", "-c", "cat \"$HOME/.ollama/id_ed25519\""]);
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
