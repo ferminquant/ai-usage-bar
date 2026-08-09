@@ -119,10 +119,12 @@ jobs:
         shell: bash
         run: |
           if [ -f quality-output/quality-summary.json ]; then
-            echo '### Quality ratchet' >> "$GITHUB_STEP_SUMMARY"
-            echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            cat quality-output/quality-summary.json >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo '### Quality ratchet'
+              echo '```json'
+              cat quality-output/quality-summary.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload quality evidence
         if: always()
