@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-release:
+    name: Windows x64 release package
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag and package version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -ne "tag") {
+            throw "Release workflow must run from a tag, not $env:GITHUB_REF_TYPE"
+          }
+
+          $tagMatch = [regex]::Match(
+            $env:GITHUB_REF_NAME,
+            '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$'
+          )
+          if (-not $tagMatch.Success) {
+            throw "Release tag must use vX.Y.Z format: $env:GITHUB_REF_NAME"
+          }
+          $releaseVersion = $tagMatch.Groups['version'].Value
+
+          $cargoToml = Get-Content -LiteralPath "Cargo.toml" -Raw
+          $packageSection = [regex]::Match(
+            $cargoToml,
+            '(?ms)^\[package\][ \t]*(?<body>.*?)(?=^\[|\z)'
+          )
+          if (-not $packageSection.Success) {
+            throw "Cargo.toml does not contain a [package] section"
+          }
+          $versionMatch = [regex]::Match(
+            $packageSection.Groups['body'].Value,
+            '(?m)^[ \t]*version[ \t]*=[ \t]*"([^"]+)"'
+          )
+          if (-not $versionMatch.Success) {
+            throw "Cargo.toml [package] section does not contain a version"
+          }
+          $cargoVersion = $versionMatch.Groups[1].Value
+          if ($cargoVersion -ne $releaseVersion) {
+            throw "Release tag $env:GITHUB_REF_NAME does not match Cargo.toml version $cargoVersion"
+          }
+
+          "RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release entrypoints
+        run: cargo build --release --locked --bin ai-usage-bar --bin ai-usage-bar-shell
+
+      - name: Assemble release package
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE "release-output"
+          New-Item -ItemType Directory -Path $output -Force | Out-Null
+          & "$env:GITHUB_WORKSPACE\packaging\package.ps1" `
+            -Version $env:RELEASE_VERSION `
+            -OutputDirectory $output `
+            -SkipBuild
+          if (-not $?) {
+            throw "Packaging failed"
+          }
+
+          $stage = Join-Path $output ("ai-usage-bar-{0}-windows-x64" -f $env:RELEASE_VERSION)
+          $manifest = Join-Path $stage "package-manifest.json"
+          $checksums = Join-Path $stage "checksums.sha256"
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "Package manifest was not produced: $manifest"
+          }
+          if (-not (Test-Path -LiteralPath $checksums -PathType Leaf)) {
+            throw "Package checksums were not produced: $checksums"
+          }
+          $manifestData = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+          if ($manifestData.version -ne $env:RELEASE_VERSION) {
+            throw "Package manifest version does not match the release tag"
+          }
+          if ($manifestData.commit -ne $env:GITHUB_SHA) {
+            throw "Package manifest commit does not match the tagged source revision"
+          }
+
+          $releasePrefix = Join-Path $output ("ai-usage-bar-{0}-windows-x64" -f $env:RELEASE_VERSION)
+          Copy-Item -LiteralPath $manifest -Destination "$releasePrefix-package-manifest.json"
+          Copy-Item -LiteralPath $checksums -Destination "$releasePrefix-checksums.sha256"
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $gh = Get-Command gh -ErrorAction SilentlyContinue
+          if ($null -eq $gh) {
+            throw "GitHub CLI (gh) is required on the release runner"
+          }
+
+          $output = Join-Path $env:GITHUB_WORKSPACE "release-output"
+          $prefix = Join-Path $output ("ai-usage-bar-{0}-windows-x64" -f $env:RELEASE_VERSION)
+          $zip = "$prefix.zip"
+          $zipChecksum = "$zip.sha256"
+          $manifest = "$prefix-package-manifest.json"
+          $checksums = "$prefix-checksums.sha256"
+          foreach ($path in @($zip, $zipChecksum, $manifest, $checksums)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Release asset is missing: $path"
+            }
+          }
+
+          $notesPath = Join-Path $env:RUNNER_TEMP "ai-usage-bar-release-notes.md"
+          $notes = @"
+          ## AI Usage Bar $env:RELEASE_VERSION
+
+          Windows x64 portable package for the tagged source revision.
+
+          The ZIP contains the shell and CLI entrypoints, user-scoped install and uninstall scripts, a package manifest, and SHA-256 checksums. This initial release is unsigned because no Authenticode certificate is configured in CI.
+
+          Verify the published ZIP with the adjacent `.sha256` file before extracting it.
+          "@
+          $notes | Set-Content -LiteralPath $notesPath -Encoding utf8
+
+          $arguments = @(
+            "release", "create", $env:GITHUB_REF_NAME,
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--verify-tag",
+            "--title", "AI Usage Bar $env:RELEASE_VERSION",
+            "--notes-file", $notesPath,
+            $zip, $zipChecksum, $manifest, $checksums
+          )
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release creation failed with exit code $LASTEXITCODE"
+          }

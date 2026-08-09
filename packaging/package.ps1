@@ -22,13 +22,22 @@ if ([string]::IsNullOrWhiteSpace($TargetDirectory)) {
 
 function Get-CargoVersion {
     $cargoToml = Join-Path $repoRoot "Cargo.toml"
-    $versionLine = Get-Content -LiteralPath $cargoToml |
-        Where-Object { $_ -match '^\s*version\s*=\s*"([^"]+)"' } |
-        Select-Object -First 1
-    if ($null -eq $versionLine -or $versionLine -notmatch '^\s*version\s*=\s*"([^"]+)"') {
-        throw "Cargo.toml does not contain a package version"
+    $cargoTomlText = Get-Content -LiteralPath $cargoToml -Raw
+    $packageSection = [regex]::Match(
+        $cargoTomlText,
+        '(?ms)^\[package\][ \t]*(?<body>.*?)(?=^\[|\z)'
+    )
+    if (-not $packageSection.Success) {
+        throw "Cargo.toml does not contain a [package] section"
     }
-    return $matches[1]
+    $versionMatch = [regex]::Match(
+        $packageSection.Groups['body'].Value,
+        '(?m)^[ \t]*version[ \t]*=[ \t]*"([^"]+)"'
+    )
+    if (-not $versionMatch.Success) {
+        throw "Cargo.toml [package] section does not contain a version"
+    }
+    return $versionMatch.Groups[1].Value
 }
 
 function Get-CommitId {

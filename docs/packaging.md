@@ -90,3 +90,30 @@ Known limitations: the first package is Windows x64 only, uses a portable ZIP
 rather than an MSI, and requires a maintainer-controlled Authenticode
 certificate before public release. The package does not install or alter any
 provider CLI or browser session.
+
+## GitHub Release workflow
+
+The repository's release workflow is deliberately tag-driven. To publish a
+versioned package:
+
+1. Update the package version in `Cargo.toml`.
+2. Create an annotated tag with the same version, for example
+   `git tag -a v0.1.0 -m "AI Usage Bar v0.1.0"`.
+3. Push the tag with `git push origin v0.1.0`.
+
+The workflow accepts only `vX.Y.Z` tags and refuses to publish when the tag
+does not exactly match `Cargo.toml`. It builds both Windows entrypoints with
+the locked dependency graph, runs the existing package script, and creates a
+GitHub Release containing:
+
+- the portable Windows x64 ZIP;
+- the ZIP's adjacent SHA-256 checksum file;
+- a copy of the package manifest; and
+- a copy of the package payload checksum file.
+
+The workflow uses a GitHub-hosted Windows runner and the repository-provided
+`GITHUB_TOKEN`; it does not run for pull requests, read provider credentials,
+copy browser cookies, or depend on a self-hosted runner. The initial release
+path is unsigned. Authenticode signing can be added later as a separate,
+maintainer-controlled release concern; signing secrets must never be exposed
+to pull-request workflows.
