@@ -33,6 +33,11 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("Compress-Archive", self.package)
         self.assertIn("IsNullOrWhiteSpace($CertificateThumbprint)", self.package)
 
+    def test_package_version_is_read_from_the_package_section(self):
+        self.assertIn("[package]", self.package)
+        self.assertIn("packageSection", self.package)
+        self.assertIn("[package] section does not contain a version", self.package)
+
     def test_installer_is_user_scoped_and_transactional(self):
         self.assertIn("LocalApplicationData", self.install)
         self.assertIn("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", self.install)

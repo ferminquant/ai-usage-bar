@@ -16,7 +16,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_release_is_tag_driven_and_writes_only_release_contents(self):
         self.assertIn("tags:", self.workflow)
-        self.assertIn('"v*.*.*"', self.workflow)
+        self.assertIn('"v[0-9]+.[0-9]+.[0-9]+"', self.workflow)
         self.assertIn("contents: write", self.workflow)
         self.assertIn("GITHUB_REF_TYPE", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)
@@ -24,6 +24,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_release_validates_tag_against_cargo_version(self):
         self.assertIn("Cargo.toml", self.workflow)
+        self.assertIn("[package]", self.workflow)
+        self.assertIn("packageSection", self.workflow)
         self.assertIn("does not match Cargo.toml version", self.workflow)
         self.assertIn("RELEASE_VERSION", self.workflow)
 

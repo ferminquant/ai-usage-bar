@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
@@ -42,12 +42,22 @@ jobs:
           }
           $releaseVersion = $tagMatch.Groups['version'].Value
 
-          $versionLine = Select-String -LiteralPath "Cargo.toml" -Pattern '^\s*version\s*=\s*"([^"]+)"' |
-            Select-Object -First 1
-          if ($null -eq $versionLine -or $versionLine.Line -notmatch '^\s*version\s*=\s*"([^"]+)"') {
-            throw "Cargo.toml does not contain a package version"
+          $cargoToml = Get-Content -LiteralPath "Cargo.toml" -Raw
+          $packageSection = [regex]::Match(
+            $cargoToml,
+            '(?ms)^\[package\][ \t]*(?<body>.*?)(?=^\[|\z)'
+          )
+          if (-not $packageSection.Success) {
+            throw "Cargo.toml does not contain a [package] section"
           }
-          $cargoVersion = $Matches[1]
+          $versionMatch = [regex]::Match(
+            $packageSection.Groups['body'].Value,
+            '(?m)^[ \t]*version[ \t]*=[ \t]*"([^"]+)"'
+          )
+          if (-not $versionMatch.Success) {
+            throw "Cargo.toml [package] section does not contain a version"
+          }
+          $cargoVersion = $versionMatch.Groups[1].Value
           if ($cargoVersion -ne $releaseVersion) {
             throw "Release tag $env:GITHUB_REF_NAME does not match Cargo.toml version $cargoVersion"
           }
