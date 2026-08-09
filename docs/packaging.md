@@ -67,6 +67,63 @@ daemon executable to install. The package therefore starts one shell process,
 which contains the local refresh/cache lifecycle already covered by the Rust
 tests.
 
+## Verify and install a published release
+
+Published releases are currently manual and unsigned. The adjacent `.sha256`
+file verifies that the ZIP arrived intact, while the package manifest and the
+installer verify the contents after extraction. A checksum does not prove who
+published a file, so download release assets only from the repository's GitHub
+Release page until Authenticode signing is enabled.
+
+After downloading the ZIP and its matching `.zip.sha256` sidecar into the same
+directory, run this in PowerShell:
+
+```powershell
+$packagePath = (Get-Item .\ai-usage-bar-0.1.0-windows-x64.zip).FullName
+$checksumPath = "$packagePath.sha256"
+$expected = ((Get-Content -LiteralPath $checksumPath -Raw) -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) {
+    throw "ZIP checksum mismatch. Expected $expected, got $actual."
+}
+
+$extractPath = Join-Path $env:TEMP "ai-usage-bar-0.1.0-release"
+if (Test-Path -LiteralPath $extractPath) {
+    Remove-Item -LiteralPath $extractPath -Recurse -Force
+}
+Expand-Archive -LiteralPath $packagePath -DestinationPath $extractPath
+$installer = Join-Path $extractPath "install.ps1"
+& pwsh -NoProfile -ExecutionPolicy Bypass -File $installer
+if ($LASTEXITCODE -ne 0) {
+    throw "The package installer failed with exit code $LASTEXITCODE."
+}
+```
+
+The installer performs its own manifest and payload-checksum validation before
+swapping the install directory. It preserves `%APPDATA%\AI Usage Bar\config.json`,
+provider-owned data, and the existing per-user startup registration. It also
+stages upgrades transactionally and restores the previous installation if a
+swap or registration step fails. Close a development copy first if it is
+running from a different directory; the installer only stops a shell whose
+executable path matches the installed copy.
+
+To verify the installed package after the command completes:
+
+```powershell
+$installed = Join-Path $env:LOCALAPPDATA "AI Usage Bar\package-manifest.json"
+Get-Content -LiteralPath $installed -Raw | ConvertFrom-Json |
+  Select-Object version, commit, signing
+```
+
+The `signing.mode` value is `unsigned` for the current public release. The
+repository's signing policy keeps certificate material in a maintainer-only
+release environment; it must never be present in pull-request jobs, source,
+logs, or release artifacts. When that policy is enabled, both Windows
+entrypoints must be signed and signature verification must pass before a
+release is published. Until then, the checksum-plus-manifest flow above is the
+supported update path; there is no silent updater or background executable
+replacement.
+
 ## Clean-machine smoke test
 
 `packaging/smoke-test.ps1` expands a package into an isolated temporary user
@@ -116,4 +173,6 @@ The workflow uses a GitHub-hosted Windows runner and the repository-provided
 copy browser cookies, or depend on a self-hosted runner. The initial release
 path is unsigned. Authenticode signing can be added later as a separate,
 maintainer-controlled release concern; signing secrets must never be exposed
-to pull-request workflows.
+to pull-request workflows. CI runs `actionlint` against every workflow file and
+the workflow contract tests before the Rust and packaging jobs, so malformed
+workflow changes fail before they can reach a release tag.
