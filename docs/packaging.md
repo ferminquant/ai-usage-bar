@@ -19,8 +19,9 @@ application directory.
 The package is intentionally unsigned when no certificate is supplied. A
 release build can pass a Windows SDK `signtool.exe` and certificate thumbprint
 to `package.ps1`; the manifest then records Authenticode signing for both
-executables. Unsigned CI artifacts are validation artifacts, not publication
-artifacts.
+executables. A release workflow without its protected signing secrets records
+the same unsigned state in the manifest and release notes; this is an explicit
+fallback, not an implicit claim that the package is signed.
 
 Example from a Windows checkout:
 
@@ -40,6 +41,35 @@ pwsh -File packaging/package.ps1 `
 The thumbprint may be the certificate-store SHA-1 (40 hexadecimal characters)
 or SHA-256 (64 hexadecimal characters); the package script selects the
 corresponding `signtool` selector.
+
+### Release signing policy
+
+The tag-driven release job runs on a GitHub-hosted Windows runner in the
+protected `release` environment. To enable signing, a maintainer must add both
+of these as environment secrets on that environment:
+
+- `WINDOWS_SIGNING_PFX_BASE64` — the base64-encoded PFX containing the code
+  signing certificate and private key;
+- `WINDOWS_SIGNING_PFX_PASSWORD` — the PFX password.
+
+The workflow fails closed if only one secret is present. When both are present,
+it imports the PFX into the runner's current-user certificate store, requires a
+private key and the Code Signing EKU, rejects certificates that are not yet
+valid or expire within seven days, locates the Windows SDK `signtool.exe`, and
+passes the certificate thumbprint to `package.ps1`. Both Windows entrypoints
+are then checked with `Get-AuthenticodeSignature`; a missing, invalid, or
+unexpected signer blocks publication. The manifest records only the signing
+mode and filenames, never the PFX, password, or certificate material. The
+temporary PFX is deleted immediately after import and an `always()` cleanup
+step removes the imported certificate from the runner store.
+
+The certificate owner is responsible for issuance, rotation, revocation, and
+renewal. Keep the `release` environment restricted to maintainers and require
+environment approval for production tags. Do not copy the PFX into the
+repository, a pull-request secret, a workflow artifact, or a self-hosted
+runner. If the two environment secrets are absent, the workflow publishes an
+explicitly unsigned package and says so in the release notes; no fake or
+ephemeral certificate is generated.
 
 ## Install, upgrade, and uninstall behavior
 
@@ -69,11 +99,13 @@ tests.
 
 ## Verify and install a published release
 
-Published releases are currently manual and unsigned. The adjacent `.sha256`
-file verifies that the ZIP arrived intact, while the package manifest and the
-installer verify the contents after extraction. A checksum does not prove who
-published a file, so download release assets only from the repository's GitHub
-Release page until Authenticode signing is enabled.
+Published releases remain manual. They may be Authenticode-signed or explicitly
+unsigned, and the adjacent manifest and release notes report which mode was
+used. The adjacent `.sha256` file verifies that the ZIP arrived intact, while
+the package manifest and installer verify the contents after extraction. A
+checksum does not prove who published a file, so download release assets only
+from the repository's GitHub Release page and prefer a signed release when the
+manifest reports `authenticode`.
 
 After downloading the ZIP and its matching `.zip.sha256` sidecar into the same
 directory, run this in PowerShell:
@@ -120,9 +152,9 @@ repository's signing policy keeps certificate material in a maintainer-only
 release environment; it must never be present in pull-request jobs, source,
 logs, or release artifacts. When that policy is enabled, both Windows
 entrypoints must be signed and signature verification must pass before a
-release is published. Until then, the checksum-plus-manifest flow above is the
-supported update path; there is no silent updater or background executable
-replacement.
+release is published. Until a maintainer configures those secrets, the
+checksum-plus-manifest flow above remains the supported update path; there is
+no silent updater or background executable replacement.
 
 ## Clean-machine smoke test
 
@@ -143,10 +175,11 @@ The Windows CI workflow runs this smoke test on `windows-latest` and uploads
 the ZIP, manifest, and checksums as a retained artifact. It uses no provider
 credentials and does not exercise live provider calls as a release gate.
 
-Known limitations: the first package is Windows x64 only, uses a portable ZIP
-rather than an MSI, and requires a maintainer-controlled Authenticode
-certificate before public release. The package does not install or alter any
-provider CLI or browser session.
+Known limitations: the first package is Windows x64 only and uses a portable
+ZIP rather than an MSI. A signed public release requires a
+maintainer-controlled Authenticode certificate; until it is configured,
+release notes and the manifest make the unsigned state explicit. The package
+does not install or alter any provider CLI or browser session.
 
 ## GitHub Release workflow
 
@@ -170,9 +203,9 @@ GitHub Release containing:
 
 The workflow uses a GitHub-hosted Windows runner and the repository-provided
 `GITHUB_TOKEN`; it does not run for pull requests, read provider credentials,
-copy browser cookies, or depend on a self-hosted runner. The initial release
-path is unsigned. Authenticode signing can be added later as a separate,
-maintainer-controlled release concern; signing secrets must never be exposed
-to pull-request workflows. CI runs `actionlint` against every workflow file and
-the workflow contract tests before the Rust and packaging jobs, so malformed
-workflow changes fail before they can reach a release tag.
+copy browser cookies, or depend on a self-hosted runner. It signs and verifies
+both entrypoints when the protected `release` environment is configured, and
+otherwise publishes an explicitly unsigned package. Signing secrets must never
+be exposed to pull-request workflows. CI runs `actionlint` against every
+workflow file and the workflow contract tests before the Rust and packaging
+jobs, so malformed workflow changes fail before they can reach a release tag.

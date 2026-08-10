@@ -175,7 +175,7 @@ $manifest = [ordered]@{
         note = if ($signedFiles.Count -gt 0) {
             "Signed with the supplied certificate thumbprint."
         } else {
-            "No signing certificate was supplied; verify and sign release artifacts before publication."
+            "No signing certificate was supplied; this package is explicitly unsigned."
         }
     }
     files = $payloadRecords
