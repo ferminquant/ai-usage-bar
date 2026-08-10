@@ -131,8 +131,9 @@ jobs:
 
             $signTool = Get-Command signtool.exe -ErrorAction SilentlyContinue
             if ($null -eq $signTool) {
+              $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
               $searchRoots = @(
-                (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"),
+                (Join-Path $programFilesX86 "Windows Kits\10\bin"),
                 (Join-Path $env:ProgramFiles "Windows Kits\10\bin")
               ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
               $signTool = $searchRoots |

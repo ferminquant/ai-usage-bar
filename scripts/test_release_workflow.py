@@ -55,6 +55,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("WINDOWS_SIGNING_PFX_BASE64", self.workflow)
         self.assertIn("WINDOWS_SIGNING_PFX_PASSWORD", self.workflow)
         self.assertIn("Import-PfxCertificate", self.workflow)
+        self.assertIn('GetEnvironmentVariable("ProgramFiles(x86)")', self.workflow)
         self.assertIn("Get-AuthenticodeSignature", self.workflow)
         self.assertIn("Remove signing certificate from runner", self.workflow)
         self.assertIn("authenticode", self.workflow)
