@@ -132,10 +132,14 @@ jobs:
             $signTool = Get-Command signtool.exe -ErrorAction SilentlyContinue
             if ($null -eq $signTool) {
               $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-              $searchRoots = @(
-                (Join-Path $programFilesX86 "Windows Kits\10\bin"),
-                (Join-Path $env:ProgramFiles "Windows Kits\10\bin")
-              ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+              $searchRoots = @()
+              if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+                $searchRoots += Join-Path $programFilesX86 "Windows Kits\10\bin"
+              }
+              if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+                $searchRoots += Join-Path $env:ProgramFiles "Windows Kits\10\bin"
+              }
+              $searchRoots = $searchRoots | Where-Object { Test-Path -LiteralPath $_ }
               $signTool = $searchRoots |
                 ForEach-Object {
                   Get-ChildItem -LiteralPath $_ -Filter "signtool.exe" -File -Recurse -ErrorAction SilentlyContinue
