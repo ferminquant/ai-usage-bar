@@ -142,9 +142,14 @@ jobs:
               $searchRoots = $searchRoots | Where-Object { Test-Path -LiteralPath $_ }
               $signTool = $searchRoots |
                 ForEach-Object {
-                  Get-ChildItem -LiteralPath $_ -Filter "signtool.exe" -File -Recurse -ErrorAction SilentlyContinue
+                  Get-ChildItem -LiteralPath $_ -Directory -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                      $candidate = Join-Path $_.FullName "x64\signtool.exe"
+                      if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                        Get-Item -LiteralPath $candidate
+                      }
+                    }
                 } |
-                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
                 Sort-Object FullName -Descending |
                 Select-Object -First 1
             }

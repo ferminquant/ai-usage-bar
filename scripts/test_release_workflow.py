@@ -57,6 +57,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Import-PfxCertificate", self.workflow)
         self.assertIn('GetEnvironmentVariable("ProgramFiles(x86)")', self.workflow)
         self.assertIn('IsNullOrWhiteSpace($programFilesX86)', self.workflow)
+        self.assertIn('Get-ChildItem -LiteralPath $_ -Directory', self.workflow)
+        self.assertIn('Join-Path $_.FullName "x64\\signtool.exe"', self.workflow)
         self.assertIn("Get-AuthenticodeSignature", self.workflow)
         self.assertIn("Remove signing certificate from runner", self.workflow)
         self.assertIn("authenticode", self.workflow)
