@@ -205,7 +205,20 @@ jobs:
             throw "Package signing mode does not match the configured release signing mode"
           }
           $binaryNames = @("ai-usage-bar.exe", "ai-usage-bar-shell.exe")
+          $signedFileNames = @(
+            $manifestData.signing.files | Where-Object {
+              -not [string]::IsNullOrWhiteSpace([string]$_)
+            }
+          )
           if ($expectedSigningMode -eq "authenticode") {
+            if ($signedFileNames.Count -ne $binaryNames.Count) {
+              throw "Signed package manifest must list both Windows entrypoints"
+            }
+            foreach ($binaryName in $binaryNames) {
+              if ($signedFileNames -notcontains $binaryName) {
+                throw "Signed package manifest is missing $binaryName"
+              }
+            }
             foreach ($binaryName in $binaryNames) {
               $binaryPath = Join-Path $stage $binaryName
               $signature = Get-AuthenticodeSignature -LiteralPath $binaryPath
@@ -217,10 +230,17 @@ jobs:
                 throw "Authenticode signer mismatch for $binaryName"
               }
             }
-          } elseif (@($manifestData.signing.files | Where-Object {
-              -not [string]::IsNullOrWhiteSpace([string]$_)
-            }).Count -ne 0) {
-            throw "Unsigned package manifest unexpectedly lists signed files"
+          } else {
+            if ($signedFileNames.Count -ne 0) {
+              throw "Unsigned package manifest unexpectedly lists signed files"
+            }
+            foreach ($binaryName in $binaryNames) {
+              $binaryPath = Join-Path $stage $binaryName
+              $signature = Get-AuthenticodeSignature -LiteralPath $binaryPath
+              if ($signature.Status -ne "NotSigned") {
+                throw "Unsigned release binary has unexpected Authenticode status for $binaryName: $($signature.Status)"
+              }
+            }
           }
 
           $releasePrefix = Join-Path $output ("ai-usage-bar-{0}-windows-x64" -f $env:RELEASE_VERSION)
