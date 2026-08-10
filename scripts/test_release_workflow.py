@@ -16,7 +16,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_release_is_tag_driven_and_writes_only_release_contents(self):
         self.assertIn("tags:", self.workflow)
-        self.assertIn('"v[0-9]+.[0-9]+.[0-9]+"', self.workflow)
+        self.assertIn('"v[0-9]*.[0-9]*.[0-9]*"', self.workflow)
         self.assertIn("contents: write", self.workflow)
         self.assertIn("GITHUB_REF_TYPE", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)
@@ -44,14 +44,25 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("manifestData.version", self.workflow)
         self.assertIn("manifestData.commit", self.workflow)
 
-    def test_release_publishes_verifiable_assets_without_signing_secrets(self):
+    def test_release_supports_guarded_signing_and_unsigned_fallback(self):
         self.assertIn("gh", self.workflow)
         self.assertIn('"release", "create"', self.workflow)
         self.assertIn("--verify-tag", self.workflow)
         self.assertIn("GH_TOKEN", self.workflow)
         self.assertIn(".sha256", self.workflow)
+        self.assertIn("environment:", self.workflow)
+        self.assertIn("name: release", self.workflow)
+        self.assertIn("WINDOWS_SIGNING_PFX_BASE64", self.workflow)
+        self.assertIn("WINDOWS_SIGNING_PFX_PASSWORD", self.workflow)
+        self.assertIn("Import-PfxCertificate", self.workflow)
+        self.assertIn('GetEnvironmentVariable("ProgramFiles(x86)")', self.workflow)
+        self.assertIn('IsNullOrWhiteSpace($programFilesX86)', self.workflow)
+        self.assertIn('Get-ChildItem -LiteralPath $_ -Directory', self.workflow)
+        self.assertIn('Join-Path $_.FullName "x64\\signtool.exe"', self.workflow)
+        self.assertIn("Get-AuthenticodeSignature", self.workflow)
+        self.assertIn("Remove signing certificate from runner", self.workflow)
+        self.assertIn("authenticode", self.workflow)
         self.assertIn("unsigned", self.workflow)
-        self.assertNotIn("CERTIFICATE_THUMBPRINT", self.workflow)
         self.assertNotIn("browser", self.workflow.lower())
         self.assertNotIn("cookie", self.workflow.lower())
 

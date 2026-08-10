@@ -110,10 +110,11 @@ The package lifecycle and clean-machine smoke contract are documented in
 To publish a release, update the package version in `Cargo.toml`, create an
 annotated `vX.Y.Z` tag, and push the tag. The tag-driven GitHub Actions
 workflow builds the Windows x64 package and publishes the ZIP, manifest,
-checksums, and ZIP checksum as release assets. The initial workflow produces
-unsigned artifacts until a maintainer enables the controlled Authenticode
-signing path. For the supported manual upgrade procedure, including checksum
-verification and transactional installation, see [Verify and install a
+checksums, and ZIP checksum as release assets. The workflow produces an
+Authenticode-signed package when the protected release environment contains
+the documented certificate secrets; otherwise it publishes an explicitly
+unsigned package. For the supported manual upgrade procedure, including
+checksum verification and transactional installation, see [Verify and install a
 published release](docs/packaging.md#verify-and-install-a-published-release).
 
 ## Documentation

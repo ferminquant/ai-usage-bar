@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: write
@@ -19,6 +19,8 @@ jobs:
   windows-release:
     name: Windows x64 release package
     runs-on: windows-latest
+    environment:
+      name: release
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
@@ -70,15 +72,120 @@ jobs:
       - name: Build release entrypoints
         run: cargo build --release --locked --bin ai-usage-bar --bin ai-usage-bar-shell
 
+      - name: Detect release signing configuration
+        id: signing_config
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          $hasPfx = -not [string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)
+          if ($hasPfx -xor $hasPassword) {
+            throw "Both WINDOWS_SIGNING_PFX_BASE64 and WINDOWS_SIGNING_PFX_PASSWORD are required together"
+          }
+          $enabled = $hasPfx -and $hasPassword
+          "enabled=$($enabled.ToString().ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "RELEASE_SIGNING_ENABLED=$($enabled.ToString().ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Import release signing certificate
+        if: ${{ steps.signing_config.outputs.enabled == 'true' }}
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "ai-usage-bar-signing.pfx"
+          try {
+            $pfxBytes = [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
+            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+            $pfxSecurePassword = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate `
+              -FilePath $pfxPath `
+              -CertStoreLocation "Cert:\CurrentUser\My" `
+              -Password $pfxSecurePassword)
+            $certificate = $imported |
+              Where-Object { $_.HasPrivateKey } |
+              Select-Object -First 1
+            if ($null -eq $certificate) {
+              throw "The signing PFX did not import a certificate with a private key"
+            }
+
+            "RELEASE_SIGNING_THUMBPRINT=$($certificate.Thumbprint)" |
+              Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+            $codeSigningEku = @($certificate.Extensions |
+              Where-Object { $_.Oid.Value -eq "1.3.6.1.5.5.7.3.3" })
+            if ($codeSigningEku.Count -eq 0) {
+              throw "The configured certificate does not have the Code Signing EKU"
+            }
+            $now = (Get-Date).ToUniversalTime()
+            if ($certificate.NotBefore.ToUniversalTime() -gt $now) {
+              throw "The configured signing certificate is not valid yet"
+            }
+            if ($certificate.NotAfter.ToUniversalTime() -le $now.AddDays(7)) {
+              throw "The configured signing certificate expires within seven days"
+            }
+
+            $signTool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+            if ($null -eq $signTool) {
+              $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+              $searchRoots = @()
+              if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+                $searchRoots += Join-Path $programFilesX86 "Windows Kits\10\bin"
+              }
+              if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+                $searchRoots += Join-Path $env:ProgramFiles "Windows Kits\10\bin"
+              }
+              $searchRoots = $searchRoots | Where-Object { Test-Path -LiteralPath $_ }
+              $signTool = $searchRoots |
+                ForEach-Object {
+                  Get-ChildItem -LiteralPath $_ -Directory -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                      $candidate = Join-Path $_.FullName "x64\signtool.exe"
+                      if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                        Get-Item -LiteralPath $candidate
+                      }
+                    }
+                } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            }
+            if ($null -eq $signTool) {
+              throw "Windows SDK signtool.exe was not found on the release runner"
+            }
+            $signToolPath = if ($signTool.PSObject.Properties.Name -contains "Source") {
+              $signTool.Source
+            } else {
+              $signTool.FullName
+            }
+            "RELEASE_SIGNTOOL_PATH=$signToolPath" |
+              Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            if (Test-Path -LiteralPath $pfxPath -PathType Leaf) {
+              Remove-Item -LiteralPath $pfxPath -Force
+            }
+          }
+
       - name: Assemble release package
         shell: pwsh
         run: |
           $output = Join-Path $env:GITHUB_WORKSPACE "release-output"
           New-Item -ItemType Directory -Path $output -Force | Out-Null
-          & "$env:GITHUB_WORKSPACE\packaging\package.ps1" `
-            -Version $env:RELEASE_VERSION `
-            -OutputDirectory $output `
-            -SkipBuild
+          $packageArguments = @(
+            "-Version", $env:RELEASE_VERSION,
+            "-OutputDirectory", $output,
+            "-SkipBuild"
+          )
+          if ($env:RELEASE_SIGNING_ENABLED -eq "true") {
+            $packageArguments += @(
+              "-SignToolPath", $env:RELEASE_SIGNTOOL_PATH,
+              "-CertificateThumbprint", $env:RELEASE_SIGNING_THUMBPRINT
+            )
+          }
+          & "$env:GITHUB_WORKSPACE\packaging\package.ps1" @packageArguments
           if (-not $?) {
             throw "Packaging failed"
           }
@@ -98,6 +205,52 @@ jobs:
           }
           if ($manifestData.commit -ne $env:GITHUB_SHA) {
             throw "Package manifest commit does not match the tagged source revision"
+          }
+          $expectedSigningMode = if ($env:RELEASE_SIGNING_ENABLED -eq "true") {
+            "authenticode"
+          } else {
+            "unsigned"
+          }
+          if ($manifestData.signing.mode -ne $expectedSigningMode) {
+            throw "Package signing mode does not match the configured release signing mode"
+          }
+          $binaryNames = @("ai-usage-bar.exe", "ai-usage-bar-shell.exe")
+          $signedFileNames = @(
+            $manifestData.signing.files | Where-Object {
+              -not [string]::IsNullOrWhiteSpace([string]$_)
+            }
+          )
+          if ($expectedSigningMode -eq "authenticode") {
+            if ($signedFileNames.Count -ne $binaryNames.Count) {
+              throw "Signed package manifest must list both Windows entrypoints"
+            }
+            foreach ($binaryName in $binaryNames) {
+              if ($signedFileNames -notcontains $binaryName) {
+                throw "Signed package manifest is missing $binaryName"
+              }
+            }
+            foreach ($binaryName in $binaryNames) {
+              $binaryPath = Join-Path $stage $binaryName
+              $signature = Get-AuthenticodeSignature -LiteralPath $binaryPath
+              if ($signature.Status -ne "Valid") {
+                throw "Authenticode verification failed for $binaryName: $($signature.Status)"
+              }
+              if ($null -eq $signature.SignerCertificate -or
+                  $signature.SignerCertificate.Thumbprint -ine $env:RELEASE_SIGNING_THUMBPRINT) {
+                throw "Authenticode signer mismatch for $binaryName"
+              }
+            }
+          } else {
+            if ($signedFileNames.Count -ne 0) {
+              throw "Unsigned package manifest unexpectedly lists signed files"
+            }
+            foreach ($binaryName in $binaryNames) {
+              $binaryPath = Join-Path $stage $binaryName
+              $signature = Get-AuthenticodeSignature -LiteralPath $binaryPath
+              if ($signature.Status -ne "NotSigned") {
+                throw "Unsigned release binary has unexpected Authenticode status for $binaryName: $($signature.Status)"
+              }
+            }
           }
 
           $releasePrefix = Join-Path $output ("ai-usage-bar-{0}-windows-x64" -f $env:RELEASE_VERSION)
@@ -126,13 +279,22 @@ jobs:
             }
           }
 
+          $manifestData = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+          $signingNote = if ($manifestData.signing.mode -eq "authenticode") {
+            "Both Windows entrypoints passed Authenticode verification with the maintainer-controlled release certificate."
+          } else {
+            "This release is unsigned because the protected Authenticode certificate secrets are not configured."
+          }
+
           $notesPath = Join-Path $env:RUNNER_TEMP "ai-usage-bar-release-notes.md"
           $notes = @"
           ## AI Usage Bar $env:RELEASE_VERSION
 
           Windows x64 portable package for the tagged source revision.
 
-          The ZIP contains the shell and CLI entrypoints, user-scoped install and uninstall scripts, a package manifest, and SHA-256 checksums. This initial release is unsigned because no Authenticode certificate is configured in CI.
+          The ZIP contains the shell and CLI entrypoints, user-scoped install and uninstall scripts, a package manifest, and SHA-256 checksums.
+
+          $signingNote
 
           Verify the published ZIP with the adjacent `.sha256` file before extracting it.
           "@
@@ -149,4 +311,15 @@ jobs:
           & gh @arguments
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub Release creation failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Remove signing certificate from runner
+        if: ${{ always() && steps.signing_config.outputs.enabled == 'true' }}
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_SIGNING_THUMBPRINT)) {
+            $certificatePath = "Cert:\CurrentUser\My\$($env:RELEASE_SIGNING_THUMBPRINT)"
+            if (Test-Path -LiteralPath $certificatePath) {
+              Remove-Item -LiteralPath $certificatePath -Force
+            }
           }
