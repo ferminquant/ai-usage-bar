@@ -111,8 +111,10 @@ To publish a release, update the package version in `Cargo.toml`, create an
 annotated `vX.Y.Z` tag, and push the tag. The tag-driven GitHub Actions
 workflow builds the Windows x64 package and publishes the ZIP, manifest,
 checksums, and ZIP checksum as release assets. The initial workflow produces
-unsigned artifacts unless a maintainer later adds a controlled Authenticode
-signing path; verify the adjacent SHA-256 checksum before extracting a ZIP.
+unsigned artifacts until a maintainer enables the controlled Authenticode
+signing path. For the supported manual upgrade procedure, including checksum
+verification and transactional installation, see [Verify and install a
+published release](docs/packaging.md#verify-and-install-a-published-release).
 
 ## Documentation
 

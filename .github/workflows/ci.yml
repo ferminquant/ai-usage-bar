@@ -18,6 +18,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  workflow-validation:
+    name: Workflow syntax and structure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Validate workflow syntax
+        uses: raven-actions/actionlint@v2
+      - name: Run workflow contract tests
+        run: python -m unittest scripts.test_release_workflow scripts.test_workflow_contract
+
   linux:
     name: Linux tests and clippy
     runs-on: ubuntu-latest
@@ -104,10 +119,12 @@ jobs:
         shell: bash
         run: |
           if [ -f quality-output/quality-summary.json ]; then
-            echo '### Quality ratchet' >> "$GITHUB_STEP_SUMMARY"
-            echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            cat quality-output/quality-summary.json >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo '### Quality ratchet'
+              echo '```json'
+              cat quality-output/quality-summary.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload quality evidence
         if: always()
