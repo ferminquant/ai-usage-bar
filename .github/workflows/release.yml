@@ -101,11 +101,11 @@ jobs:
           try {
             $pfxBytes = [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
             [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-            $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $pfxSecurePassword = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
             $imported = @(Import-PfxCertificate `
               -FilePath $pfxPath `
               -CertStoreLocation "Cert:\CurrentUser\My" `
-              -Password $password)
+              -Password $pfxSecurePassword)
             $certificate = $imported |
               Where-Object { $_.HasPrivateKey } |
               Select-Object -First 1
