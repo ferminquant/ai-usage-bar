@@ -155,9 +155,9 @@ file enables Codex, Grok, and OpenCode Go when its local database is present;
 Ollama Pro/cloud and Kimi remain registered but opt-in until enabled in that
 file.
 
-## Proposed first release
+## Initial release scope
 
-The first useful slice is deliberately small:
+The initial release was deliberately small and established:
 
 1. a Windows tray/taskbar shell with a compact pill and a detail panel;
 2. a provider-neutral usage snapshot model;
