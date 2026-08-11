@@ -36,7 +36,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("packaging\\package.ps1", self.workflow)
-        self.assertIn("-SkipBuild", self.workflow)
+        self.assertIn("$packageArguments = @{", self.workflow)
+        self.assertIn("SkipBuild = $true", self.workflow)
+        self.assertIn("@packageArguments", self.workflow)
+        self.assertNotIn('"-SkipBuild"', self.workflow)
         self.assertIn("if (-not $?)", self.workflow)
         self.assertNotIn("Packaging failed with exit code $LASTEXITCODE", self.workflow)
         self.assertIn("package-manifest.json", self.workflow)
