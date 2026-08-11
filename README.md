@@ -73,7 +73,8 @@ Ollama
 
 The current public package is explicitly unsigned; the release notes and
 manifest say so. The package and upgrade process are documented in
-[Windows packaging](docs/packaging.md).
+[Windows packaging](docs/packaging.md), including the
+[manual verify-and-install steps](docs/packaging.md#verify-and-install-a-published-release).
 
 ### Configure providers
 
