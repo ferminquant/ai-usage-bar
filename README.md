@@ -1,66 +1,106 @@
 # AI Usage Bar
 
-AI Usage Bar is a desktop usage widget for people who use several online AI
-subscriptions at once.
+See the state of your AI subscriptions at a glance—without opening five
+different dashboards.
 
-The first target is a small Windows taskbar/tray surface inspired by the
-compact usage pill in [this Codex example](https://x.com/i/status/2083054528522268756).
-The initial provider set is:
+AI Usage Bar is a Windows-first, local-only usage widget for hosted AI
+services. It keeps each provider separate, shows the relevant usage windows and
+reset state, and never sends your credentials to a project server.
 
-- Codex
-- Kimi
-- Ollama Pro/cloud (hosted)
-- Grok
-- OpenCode Go (inferred local ledger estimate)
+<p align="center">
+  <img src="./docs/images/compact-pill.png" width="252" alt="AI Usage Bar compact pill showing Kimi usage">
+</p>
 
-The MVP core is implemented: Codex, Grok consumer, Kimi, Ollama Pro/cloud, and
-an explicitly inferred OpenCode Go local-ledger estimator, cached freshness
-states, contract/invariant tests, a Windows shell, and hosted-provider
-configuration. The Kimi usage source was
-validated in [spike #3](https://github.com/ferminquant/ai-usage-bar/issues/3)
-and implemented in [#17](https://github.com/ferminquant/ai-usage-bar/issues/17).
+## What it looks like
 
-Ollama reports hosted session (5-hour) and weekly (7-day) totals from its
-authenticated cloud endpoint. The compact view defaults to the session quota;
-the right-click menu can select the weekly quota. Ollama's usage response does
-not currently include reset timestamps, so the Ollama context menu includes
-**Open Ollama usage page** as the low-friction fallback. It opens the normal
-OS browser at `https://ollama.com/settings`; no browser extension, cookie
-copying, or manual setup is required. Reset metadata is tracked in
-[issue #35](https://github.com/ferminquant/ai-usage-bar/issues/35) while
-Ollama works on a supported API surface.
+The bar is deliberately small, but it has three useful levels of detail:
 
-On Windows, the adapter also handles the common WSL setup: if the native
-Windows Ollama key is rejected, it retries with the default WSL Ollama key
-without signing out, copying credentials, or interrupting active sessions.
+| Compact pill | Hover details | Right-click controls |
+| --- | --- | --- |
+| <img src="./docs/images/compact-pill.png" width="252" alt="Compact usage pill"> | <img src="./docs/images/provider-tooltip.png" width="287" alt="Provider usage tooltip"> | <img src="./docs/images/context-menu.png" width="225" alt="Provider and window context menu"> |
+| Click the pill to cycle providers. | See every provider and its available windows. | Choose a provider, switch windows, refresh, or open a provider page. |
 
-Kimi reports the weekly plan window (7 days from the subscription date), each
-reported rate window (with the rolling 5-hour window shown first), and the
-Extra Usage balance as a separate credits snapshot. If the managed endpoint
-reports a numeric shared monthly quota, it is shown as an optional **Total**
-window; the current account response may omit that field, in which case the
-bar does not invent one. It reuses the OAuth session created by the official
-CLI (`kimi login`; `~/.kimi-code/credentials/kimi-code.json`) and calls the
-same managed endpoint behind the CLI `/usage` command. The monthly spending
-cap, spend amount, plan tier, wallet currency, and Kimi Open Platform
-(API-key billing) balance remain separate diagnostics rather than quota
-percentages. Kimi is registered but opt-in until enabled in
-the config file; a missing CLI login shows as "not configured", never zero
-usage, and the user is pointed at `kimi login` and the
-[Kimi Code Console](https://www.kimi.com/code/console).
+These screenshots are from the Windows shell; usage values and reset countdowns
+change as providers refresh.
 
-OpenCode Go reports inferred five-hour, weekly, and monthly percentages from
-the local OpenCode SQLite ledger. It applies the current published model
-Usage-tier multipliers to raw Go costs, so it is useful for this machine but
-is not account-authoritative and cannot include other devices or workspaces.
-The rolling reset is estimated from the latest local Go event. Weekly and
-monthly reset anchors are editable from the OpenCode right-click menu; leaving
-either field blank restores the built-in Monday/first-of-month defaults. The
-editor accepts the same countdown text shown by the dashboard, such as
-`2 days 10 hours` or `29 days 0 hours` (and also a copied `Resets in ...`
-line), so no timezone conversion is needed. The rolling five-hour reset is
-derived from local activity and is not edited there. The
-exact account usage endpoint remains tracked upstream and is not scraped.
+Typical interactions:
+
+- **Click** the pill to cycle the focused provider.
+- **Hover** to see live, cached, stale, unavailable, and not-configured states.
+- **Right-click** to choose a provider or quota window, refresh, copy details,
+  open a provider's usage page, or edit OpenCode reset anchors.
+
+## Supported providers
+
+| Provider | What the bar reports | Important limitation |
+| --- | --- | --- |
+| Codex | CLI-reported usage windows and reset times | Uses the existing Codex CLI session. |
+| Grok | SuperGrok weekly usage and reset time | Uses the Grok Build CLI session. |
+| Kimi | Five-hour and weekly windows, plus an optional total/credits view | Requires `kimi login`; some plan fields may be absent upstream. |
+| Ollama Pro | Hosted five-hour and weekly totals | Reset timestamps are not exposed by Ollama yet; the menu opens the usage page. |
+| OpenCode Go | Inferred five-hour, weekly, and monthly estimates from the local ledger | Local estimate only; it is not account-authoritative. |
+
+The widget does not scrape dashboards, import browser cookies, or combine
+unrelated provider limits into a misleading “total” percentage. See the
+[provider matrix](docs/provider-matrix.md) for sources and known limitations.
+
+## Example detail text
+
+The exact numbers change as providers refresh, but the shape looks like this:
+
+```text
+Grok
+  Weekly: 100% left · resets in 6 days 20 hours
+
+Kimi
+  5-hour: 15% left · resets in 1 hour 33 minutes
+  Weekly: 66% left · resets in 5 days 18 hours
+
+Ollama
+  5-hour: 73% left · reset time unavailable
+  Weekly: 60% left · reset time unavailable
+```
+
+## Quick start
+
+### Download the Windows package
+
+1. Download the [latest Windows x64 release](https://github.com/ferminquant/ai-usage-bar/releases/latest).
+2. Verify the adjacent `.zip.sha256` file.
+3. Extract the ZIP and run `install.ps1` for a per-user installation.
+4. Start the bar from the Start menu or let the registered startup entry launch
+   it with Windows.
+
+The current public package is explicitly unsigned; the release notes and
+manifest say so. The package and upgrade process are documented in
+[Windows packaging](docs/packaging.md).
+
+### Configure providers
+
+Copy [docs/config.example.json](docs/config.example.json) to
+`%APPDATA%\AI Usage Bar\config.json`. Set `enabled` to `false` for any hosted
+provider you do not want to query. Provider credentials remain in the provider's
+own local CLI/session store.
+
+### Build from source
+
+```powershell
+cargo build --release --locked --bin ai-usage-bar --bin ai-usage-bar-shell
+```
+
+For a portable package, run:
+
+```powershell
+pwsh -File packaging/package.ps1 -OutputDirectory .\dist
+```
+
+Run the full local checks with:
+
+```powershell
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+python -m unittest discover --start-directory scripts --pattern "test_*.py"
+```
 
 ## Product direction
 
@@ -82,40 +122,6 @@ It should not:
 - scrape or bypass provider controls;
 - combine unrelated percentages into a false “total quota”;
 - invent hosted usage data for an unsupported provider.
-
-## Current status
-
-The current implementation is Windows-first. Provider adapters run locally and
-use each service's existing session or credential surface; no provider
-credentials are sent to a project server.
-
-## Build and package on Windows
-
-The shell can be built directly from a Windows checkout:
-
-```powershell
-cargo build --release --locked --bin ai-usage-bar --bin ai-usage-bar-shell
-```
-
-To create the portable, per-user ZIP package with install, upgrade, uninstall,
-manifest, and checksum files:
-
-```powershell
-pwsh -File packaging/package.ps1 -OutputDirectory .\dist
-```
-
-The package lifecycle and clean-machine smoke contract are documented in
-[Windows packaging](docs/packaging.md).
-
-To publish a release, update the package version in `Cargo.toml`, create an
-annotated `vX.Y.Z` tag, and push the tag. The tag-driven GitHub Actions
-workflow builds the Windows x64 package and publishes the ZIP, manifest,
-checksums, and ZIP checksum as release assets. The workflow produces an
-Authenticode-signed package when the protected release environment contains
-the documented certificate secrets; otherwise it publishes an explicitly
-unsigned package. For the supported manual upgrade procedure, including
-checksum verification and transactional installation, see [Verify and install a
-published release](docs/packaging.md#verify-and-install-a-published-release).
 
 ## Documentation
 
@@ -149,12 +155,6 @@ published release](docs/packaging.md#verify-and-install-a-published-release).
 - [References](docs/references.md) — design inspiration, prior art, and
   primary provider documentation.
 
-On Windows, copy that example to %APPDATA%\AI Usage Bar\config.json and set
-enabled to false for any hosted provider you want to opt out of. A missing
-file enables Codex, Grok, and OpenCode Go when its local database is present;
-Ollama Pro/cloud and Kimi remain registered but opt-in until enabled in that
-file.
-
 ## Initial release scope
 
 The initial release was deliberately small and established:
@@ -165,9 +165,10 @@ The initial release was deliberately small and established:
 4. cached data with explicit freshness and error states;
 5. fixture-driven tests and a quality gate before more providers are added.
 
-Kimi should be added only after its supported, user-authorized usage surface
-has been verified. A browser/dashboard bridge is an option for surfaces
-without a documented API, but it remains read-only and opt-in.
+The implemented adapters use provider-authorized sessions and documented or
+observed CLI-backed usage surfaces. A browser/dashboard bridge remains an
+option for future providers that expose no supported API, but it must stay
+read-only and opt-in.
 
 ## Quality promise
 
