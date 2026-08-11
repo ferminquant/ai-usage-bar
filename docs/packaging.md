@@ -111,7 +111,7 @@ After downloading the ZIP and its matching `.zip.sha256` sidecar into the same
 directory, run this in PowerShell:
 
 ```powershell
-$packagePath = (Get-Item .\ai-usage-bar-0.1.0-windows-x64.zip).FullName
+$packagePath = (Get-Item .\ai-usage-bar-0.1.1-windows-x64.zip).FullName
 $checksumPath = "$packagePath.sha256"
 $expected = ((Get-Content -LiteralPath $checksumPath -Raw) -split '\s+')[0].ToLowerInvariant()
 $actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -119,7 +119,7 @@ if ($actual -ne $expected) {
     throw "ZIP checksum mismatch. Expected $expected, got $actual."
 }
 
-$extractPath = Join-Path $env:TEMP "ai-usage-bar-0.1.0-release"
+$extractPath = Join-Path $env:TEMP "ai-usage-bar-0.1.1-release"
 if (Test-Path -LiteralPath $extractPath) {
     Remove-Item -LiteralPath $extractPath -Recurse -Force
 }
@@ -147,14 +147,15 @@ Get-Content -LiteralPath $installed -Raw | ConvertFrom-Json |
   Select-Object version, commit, signing
 ```
 
-The `signing.mode` value is `unsigned` for the current public release. The
-repository's signing policy keeps certificate material in a maintainer-only
-release environment; it must never be present in pull-request jobs, source,
-logs, or release artifacts. When that policy is enabled, both Windows
-entrypoints must be signed and signature verification must pass before a
-release is published. Until a maintainer configures those secrets, the
-checksum-plus-manifest flow above remains the supported update path; there is
-no silent updater or background executable replacement.
+The package manifest records `signing.mode` as `signed` when the protected
+certificate secrets are configured, or `unsigned` otherwise. The repository's
+signing policy keeps certificate material in a maintainer-only release
+environment; it must never be present in pull-request jobs, source, logs, or
+release artifacts. When signing is enabled, both Windows entrypoints must be
+signed and signature verification must pass before a release is published.
+When signing is not enabled, the checksum-plus-manifest flow above remains the
+supported update path; there is no silent updater or background executable
+replacement.
 
 ## Clean-machine smoke test
 
@@ -188,8 +189,8 @@ versioned package:
 
 1. Update the package version in `Cargo.toml`.
 2. Create an annotated tag with the same version, for example
-   `git tag -a v0.1.0 -m "AI Usage Bar v0.1.0"`.
-3. Push the tag with `git push origin v0.1.0`.
+   `git tag -a v0.1.1 -m "AI Usage Bar v0.1.1"`.
+3. Push the tag with `git push origin v0.1.1`.
 
 The workflow accepts only `vX.Y.Z` tags and refuses to publish when the tag
 does not exactly match `Cargo.toml`. It builds both Windows entrypoints with
