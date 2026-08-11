@@ -1,46 +1,44 @@
-# Self-hosted runner strategy
+# CI runner strategy
 
-## What was observed in Budget
+## Decision
 
-On 2026-07-31, ferminquant/budget exposed eight online Linux x64 runners.
-They carry repository/workload-specific labels such as budget,
-aws-workspace, and budget-u3m-*. Its workflow currently uses
-runs-on: self-hosted.
+Use GitHub-hosted runners for this project's CI and release workflows. The
+repository intentionally does not depend on a self-hosted runner.
 
-## Can the same runners be reused?
+## Why
 
-Yes at the machine level, but not automatically at the repository level.
-A self-hosted runner registration is scoped to a repository, organization, or
-enterprise. A runner attached directly to ferminquant/budget will not
-silently become eligible for ferminquant/ai-usage-bar.
+GitHub-hosted runners provide a documented, repeatable baseline with less
+administration and better isolation for pull requests from contributors. They
+also make the project easier to build and audit after the repository is made
+public.
 
-The practical options are:
+The Windows packaging job runs on `windows-latest` because the desktop shell
+and PowerShell installer need a native Windows environment. Linux jobs cover
+the portable Rust tests, linting, security checks, and quality gates.
 
-1. **GitHub-hosted runners for the first CI.** Lowest setup and isolation
-   burden; use this for docs-only and early deterministic tests.
-2. **Register another runner instance on the same host.** The existing Budget
-   machines can run a separate runner registration for this repository. Give
-   it an ai-usage-bar label and use an explicit selector such as
-   runs-on: [self-hosted, Linux, X64, ai-usage-bar].
-3. **Organization-level runner sharing.** If the projects move under a
-   GitHub organization, an organization runner can be allowed for selected
-   repositories. This is the cleanest shared-pool model, but it requires
-   organization administration and a review of cross-repository isolation.
+## Future options
 
-Do not rely on the broad self-hosted label for this project. The Budget
-labels express assumptions about its workspace and dependencies that may not
-hold for a desktop-widget build.
+If hosted-runner limits or a platform-specific test require a self-hosted
+runner later, treat that as an explicit design change:
+
+1. register a dedicated runner for this repository or an approved
+   organization runner;
+2. give it an unambiguous project-specific label;
+3. keep credentials and unrelated workspaces off the machine;
+4. accept code from forks only on isolated, least-privilege jobs; and
+5. document the image, toolchain, cleanup, and monitoring requirements.
+
+Do not broaden a workflow to `self-hosted` merely because a runner is
+available. A self-hosted machine can expose credentials or unrelated files to
+untrusted pull-request code, so the default remains GitHub-hosted execution.
 
 ## Safety requirements
 
-- Never run untrusted fork code on a runner that can access Budget data or
+- Never run untrusted fork code on a runner that can access provider data or
   long-lived credentials.
 - Use a clean checkout and cleanup step for every job.
 - Keep provider credentials out of CI; adapter tests use redacted fixtures and
   fake sessions.
-- Pin setup actions and record the runner image/toolchain.
-- Add a health check for Windows packaging separately; the existing Linux
-  runners cannot validate the first desktop shell.
-
-The runner decision is intentionally tracked as a GitHub issue so it can be
-made after the first test/runtime measurements rather than assumed.
+- Pin setup actions where practical and record the runner image/toolchain.
+- Validate Windows packaging separately; Linux runners cannot validate the
+  desktop shell or installer.
