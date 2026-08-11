@@ -145,12 +145,16 @@ It should not:
   approach.
 - [Security boundaries](docs/security.md) — redaction, safe diagnostics,
   dependency/secret gates, and the allowlisted browser hand-off.
+- [Contributing](CONTRIBUTING.md) — development setup, testing, and pull
+  request expectations.
+- [Security policy](SECURITY.md) — supported versions and private
+  vulnerability reporting.
 - [Quality baseline](docs/generated/quality-baseline-20260807.md) —
   the first executable coverage and mutation measurements.
 - [Testing strategy](docs/testing-strategy.md) — unit, contract, invariant,
   integration, UI, packaging, security, and mutation-test plans.
-- [Runner strategy](docs/runner-strategy.md) — whether the existing Budget
-  self-hosted runners can be reused safely.
+- [Runner strategy](docs/runner-strategy.md) — CI runner isolation and the
+  GitHub-hosted default.
 - [Windows packaging](docs/packaging.md) — the portable package format,
   startup/upgrade/uninstall behavior, signing, and smoke test.
 - [References](docs/references.md) — design inspiration, prior art, and
@@ -204,5 +208,6 @@ and implementation work is tracked in the [GitHub issue backlog](https://github.
 
 ## License
 
-License choice is deferred until the implementation and distribution model
-are decided.
+AI Usage Bar is dual-licensed under either the MIT License or the Apache
+License, Version 2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).

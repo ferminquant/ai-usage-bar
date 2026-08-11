@@ -116,7 +116,7 @@ value.
 
 ## Initial GitHub backlog
 
-The first backlog is live in the private repository:
+The first backlog is live in the repository:
 
 | Slice | Issues |
 | --- | --- |
