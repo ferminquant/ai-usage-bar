@@ -91,6 +91,13 @@ struct BillingConfig {
     used: Option<Cent>,
     #[serde(default)]
     prepaid_balance: Option<Cent>,
+    /// On-demand spend cap and usage. These are zero-valued in the live
+    /// unified-billing response when the included percentage is omitted by
+    /// proto3 JSON encoding.
+    #[serde(default)]
+    on_demand_cap: Option<Cent>,
+    #[serde(default)]
+    on_demand_used: Option<Cent>,
     #[serde(default)]
     #[allow(dead_code)]
     billing_period_start: Option<String>,
@@ -390,6 +397,52 @@ fn resolve_usage_percent(config: &BillingConfig) -> Result<f64, GrokAdapterError
             return Ok(pct);
         }
     }
+    // Proto3 JSON omits zero-valued scalar fields. A current unified billing
+    // period with explicit zero on-demand/prepaid balances is therefore a
+    // valid 0%-used period, not an ambiguous missing quota. Keep this guard
+    // narrow so unrelated incomplete payloads remain schema drift.
+    let no_prepaid = config
+        .prepaid_balance
+        .as_ref()
+        .is_none_or(|balance| balance.val == 0);
+    let no_product_usage = config
+        .product_usage
+        .as_ref()
+        .is_none_or(Vec::is_empty);
+    let has_valid_period = config.current_period.as_ref().is_some_and(|period| {
+        period
+            .period_type
+            .as_deref()
+            .is_some_and(|period_type| {
+                matches!(
+                    window_kind_from_period(Some(period_type)),
+                    WindowKind::Daily | WindowKind::Weekly | WindowKind::Monthly
+                )
+            })
+            && period
+                .end
+                .as_deref()
+                .and_then(parse_rfc3339)
+                .is_some()
+    });
+    let zero_usage_period = config.credit_usage_percent.is_none()
+        && config.monthly_limit.is_none()
+        && config.used.is_none()
+        && config.is_unified_billing_user == Some(true)
+        && has_valid_period
+        && config
+            .on_demand_cap
+            .as_ref()
+            .is_some_and(|cap| cap.val == 0)
+        && config
+            .on_demand_used
+            .as_ref()
+            .is_some_and(|used| used.val == 0)
+        && no_prepaid
+        && no_product_usage;
+    if zero_usage_period {
+        return Ok(0.0);
+    }
     Err(GrokAdapterError::SchemaDrift(
         "missing creditUsagePercent and no usable legacy limit".into(),
     ))
@@ -645,6 +698,39 @@ mod tests {
         assert_eq!(primary.freshness, Freshness::Live);
         assert!(primary.resets_at.is_some());
         assert!(primary.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_zero_usage_with_omitted_proto3_percent() {
+        let raw = load_fixture("zero_usage_omitted.json");
+        let snaps = parse_billing_response(&raw, fixture_time(), "grok-consumer-test").unwrap();
+        assert_eq!(snaps.len(), 1);
+        let primary = &snaps[0];
+        assert_eq!(primary.window_kind, WindowKind::Weekly);
+        assert_eq!(primary.used, Some(0.0));
+        assert_eq!(primary.remaining, Some(100.0));
+        assert_eq!(primary.limit, Some(100.0));
+        assert_eq!(primary.window_label.as_deref(), Some("primary"));
+        assert_eq!(
+            primary.resets_at,
+            parse_rfc3339("2026-08-18T13:28:26.395580+00:00")
+        );
+        assert!(primary.validate().is_ok());
+    }
+
+    #[test]
+    fn missing_percent_without_zero_usage_evidence_is_schema_drift() {
+        let raw = serde_json::json!({
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-08-18T13:28:26.395580+00:00"
+                },
+                "isUnifiedBillingUser": true
+            }
+        });
+        let result = parse_billing_response(&raw, fixture_time(), "grok-consumer-test");
+        assert!(matches!(result, Err(GrokAdapterError::SchemaDrift(_))));
     }
 
     #[test]
