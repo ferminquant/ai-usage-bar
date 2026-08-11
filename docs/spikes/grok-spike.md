@@ -169,7 +169,7 @@ The adapter for the usage bar must call **account billing**
 | Token expired and refresh fails | `unavailable` + `auth_expired` |
 | Network / proxy timeout | preserve cache as stale; else `unavailable` + `timeout` |
 | HTTP 4xx/5xx from billing | redacted error; `schema_drift` only if body is unparseable success-shaped junk |
-| Missing `creditUsagePercent` and no legacy fallback | `schema_drift` |
+| Missing `creditUsagePercent` and no legacy fallback | `schema_drift`, except an active unified period with explicit zero on-demand/prepaid balances and omitted proto3 zero fields, which maps to 0% used |
 | Percent outside 0–100 | reject via contract validation |
 
 ## Security notes
