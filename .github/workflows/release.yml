@@ -174,16 +174,14 @@ jobs:
         run: |
           $output = Join-Path $env:GITHUB_WORKSPACE "release-output"
           New-Item -ItemType Directory -Path $output -Force | Out-Null
-          $packageArguments = @(
-            "-Version", $env:RELEASE_VERSION,
-            "-OutputDirectory", $output,
-            "-SkipBuild"
-          )
+          $packageArguments = @{
+            Version = $env:RELEASE_VERSION
+            OutputDirectory = $output
+            SkipBuild = $true
+          }
           if ($env:RELEASE_SIGNING_ENABLED -eq "true") {
-            $packageArguments += @(
-              "-SignToolPath", $env:RELEASE_SIGNTOOL_PATH,
-              "-CertificateThumbprint", $env:RELEASE_SIGNING_THUMBPRINT
-            )
+            $packageArguments.SignToolPath = $env:RELEASE_SIGNTOOL_PATH
+            $packageArguments.CertificateThumbprint = $env:RELEASE_SIGNING_THUMBPRINT
           }
           & "$env:GITHUB_WORKSPACE\packaging\package.ps1" @packageArguments
           if (-not $?) {
