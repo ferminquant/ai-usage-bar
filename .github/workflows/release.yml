@@ -233,7 +233,7 @@ jobs:
               $binaryPath = Join-Path $stage $binaryName
               $signature = Get-AuthenticodeSignature -LiteralPath $binaryPath
               if ($signature.Status -ne "Valid") {
-                throw "Authenticode verification failed for $binaryName: $($signature.Status)"
+                throw "Authenticode verification failed for ${binaryName}: $($signature.Status)"
               }
               if ($null -eq $signature.SignerCertificate -or
                   $signature.SignerCertificate.Thumbprint -ine $env:RELEASE_SIGNING_THUMBPRINT) {
@@ -248,7 +248,7 @@ jobs:
               $binaryPath = Join-Path $stage $binaryName
               $signature = Get-AuthenticodeSignature -LiteralPath $binaryPath
               if ($signature.Status -ne "NotSigned") {
-                throw "Unsigned release binary has unexpected Authenticode status for $binaryName: $($signature.Status)"
+                throw "Unsigned release binary has unexpected Authenticode status for ${binaryName}: $($signature.Status)"
               }
             }
           }
