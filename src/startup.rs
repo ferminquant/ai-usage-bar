@@ -218,10 +218,10 @@ mod windows_registry {
         let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
 
         if !enabled {
-            let Some(existing) = existing? else {
+            let Some(existing) = existing.as_ref() else {
                 return Ok(());
             };
-            if !startup_value_matches_executable(&existing, &executable) {
+            if !startup_value_matches_executable(existing, &executable) {
                 return Err(StartupError::OwnedByAnotherExecutable);
             }
             let key = open_run_key(KEY_SET_VALUE)?;
@@ -232,8 +232,8 @@ mod windows_registry {
             return Ok(());
         }
 
-        if let Some(existing) = existing? {
-            if !startup_value_matches_executable(&existing, &executable) {
+        if let Some(existing) = existing.as_ref() {
+            if !startup_value_matches_executable(existing, &executable) {
                 return Err(StartupError::OwnedByAnotherExecutable);
             }
         }
