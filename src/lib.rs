@@ -1,13 +1,14 @@
-pub mod codex;
 pub mod browser;
+pub mod codex;
 pub mod config;
 pub mod daemon;
 pub mod grok;
 pub mod kimi;
+pub mod model;
 pub mod ollama;
 pub mod opencode;
-pub mod model;
 pub mod security;
+pub mod startup;
 pub mod viewmodel;
 
 pub use browser::{is_allowed_browser_url, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL};
@@ -20,29 +21,28 @@ pub use config::{
     build_registry, default_config_path, load_registry, AppConfig, ConfigError, ProviderSettings,
     CONFIG_DIR_NAME, CONFIG_FILE_NAME, CONFIG_VERSION,
 };
+pub use daemon::{
+    Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,
+    RegistryError, SharedAdapter, SnapshotCache, StoreLiveReject, StoreLiveResult, SystemClock,
+};
 pub use grok::{
-    account_id_from_identity as grok_account_id_from_identity, error_snapshot as grok_error_snapshot,
-    fetch_grok_consumer_snapshots, parse_billing_response, GrokAdapterError, GrokConsumerAdapter,
+    account_id_from_identity as grok_account_id_from_identity,
+    error_snapshot as grok_error_snapshot, fetch_grok_consumer_snapshots, parse_billing_response,
+    GrokAdapterError, GrokConsumerAdapter,
 };
 pub use kimi::{
     account_id_from_credential_path, error_snapshot as kimi_error_snapshot, fetch_kimi_snapshots,
     parse_usages_response, session_available, KimiAdapter, KimiAdapterError,
 };
-pub use ollama::{
-    error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_usage_response,
-    OllamaAdapterError, OllamaCloudAdapter,
-};
-pub use opencode::{
-    opencode_data_available, OpenCodeGoAdapter, OpenCodeResetSettings,
-};
-pub use daemon::{
-    Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,
-    RegistryError, SharedAdapter, SnapshotCache, StoreLiveReject, StoreLiveResult, SystemClock,
-};
 pub use model::{
     AdapterError, Confidence, ErrorCode, Freshness, MetricKind, Provider, ProviderAdapter,
     SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
+pub use ollama::{
+    error_snapshot as ollama_error_snapshot, fetch_ollama_cloud_snapshots, parse_usage_response,
+    OllamaAdapterError, OllamaCloudAdapter,
+};
+pub use opencode::{opencode_data_available, OpenCodeGoAdapter, OpenCodeResetSettings};
 pub use security::{redact_sensitive_text, safe_identifier};
 pub use viewmodel::{
     build_tray_view, build_tray_view_focused, build_tray_view_focused_window, format_reset_label,

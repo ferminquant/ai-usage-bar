@@ -435,7 +435,10 @@ fn invariant_cached_with_error_is_schema_drift_not_healed() {
 
     assert_eq!(report.snapshots[0].freshness, Freshness::Unavailable);
     assert_eq!(
-        report.snapshots[0].error.as_ref().map(|error| error.code.clone()),
+        report.snapshots[0]
+            .error
+            .as_ref()
+            .map(|error| error.code.clone()),
         Some(ErrorCode::SchemaDrift)
     );
     assert!(report.snapshots[0]

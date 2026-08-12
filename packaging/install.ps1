@@ -183,6 +183,7 @@ if (-not $checksumByPath.ContainsKey("package-manifest.json") -or
 }
 
 $existingManifest = Join-Path $InstallRoot "package-manifest.json"
+$existingInstallation = Test-Path -LiteralPath $existingManifest -PathType Leaf
 if (Test-Path -LiteralPath $InstallRoot) {
     $existingChildren = @(Get-ChildItem -LiteralPath $InstallRoot -Force)
     if ($existingChildren.Count -gt 0 -and -not (Test-Path -LiteralPath $existingManifest -PathType Leaf)) {
@@ -192,7 +193,10 @@ if (Test-Path -LiteralPath $InstallRoot) {
 
 $expectedStartup = '"' + (Join-Path $InstallRoot "ai-usage-bar-shell.exe") + '"'
 $previousStartup = Get-RunValue -Name $StartupValueName
-if (-not $SkipStartup -and -not $Force -and
+$preserveStartupDisabled = $existingInstallation -and
+    [string]::IsNullOrWhiteSpace($previousStartup) -and -not $Force
+$registerStartup = -not $SkipStartup -and -not $preserveStartupDisabled
+if ($registerStartup -and -not $Force -and
     -not [string]::IsNullOrWhiteSpace($previousStartup) -and
     $previousStartup.Trim('"') -ine $expectedStartup.Trim('"')) {
     throw "Startup entry '$StartupValueName' already points to another application; use -Force to replace it"
@@ -236,7 +240,7 @@ try {
         throw "Synthetic install failure after swap: $TestFailureMode"
     }
 
-    if (-not $SkipStartup) {
+    if ($registerStartup) {
         Set-RunValue -Name $StartupValueName -Value $expectedStartup
         $startupChanged = $true
         if ($TestFailureMode -eq "after-startup") {
@@ -250,7 +254,7 @@ try {
         version = [string]$manifest.version
         installed_at_utc = (Get-Date).ToUniversalTime().ToString("o")
         install_root = $InstallRoot
-        startup_value_name = if ($SkipStartup) { $null } else { $StartupValueName }
+        startup_value_name = if ($registerStartup) { $StartupValueName } else { $null }
         config_path = if ($env:APPDATA) { Join-Path $env:APPDATA "AI Usage Bar\config.json" } else { $null }
         provider_data_is_outside_install_root = $true
     }
@@ -258,8 +262,10 @@ try {
 
     $installSucceeded = $true
     Write-Output ("Installed AI Usage Bar {0} to {1}" -f $manifest.version, $InstallRoot)
-    if (-not $SkipStartup) {
+    if ($registerStartup) {
         Write-Output ("Startup registration: HKCU Run/{0}" -f $StartupValueName)
+    } elseif ($preserveStartupDisabled) {
+        Write-Output "Startup registration: preserved disabled preference"
     }
 } catch {
     $originalError = $_

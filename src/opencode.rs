@@ -64,7 +64,10 @@ impl From<OpenCodeAdapterError> for AdapterError {
             OpenCodeAdapterError::Database => ErrorCode::Network,
             OpenCodeAdapterError::SchemaDrift(_) => ErrorCode::SchemaDrift,
         };
-        AdapterError { code, message: None }
+        AdapterError {
+            code,
+            message: None,
+        }
     }
 }
 
@@ -123,10 +126,20 @@ pub fn opencode_database_path() -> Option<PathBuf> {
         directories.push(PathBuf::from(local_app_data).join("opencode"));
     }
     if let Some(home) = env::var_os("USERPROFILE") {
-        directories.push(PathBuf::from(&home).join(".local").join("share").join("opencode"));
+        directories.push(
+            PathBuf::from(&home)
+                .join(".local")
+                .join("share")
+                .join("opencode"),
+        );
     }
     if let Some(home) = env::var_os("HOME") {
-        directories.push(PathBuf::from(home).join(".local").join("share").join("opencode"));
+        directories.push(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("opencode"),
+        );
     }
 
     directories
@@ -187,14 +200,9 @@ fn fetch_from_database(
     // An unrecognized model is still included at 1x so the bar does not
     // silently report zero. Downgrade the confidence to make that assumption
     // visible in copied details/diagnostics.
-    if events
-        .iter()
-        .any(|event| {
-            event.cost_usd > 0.0
-                && event.weight == 1.0
-                && is_unknown_model(&event.model_id)
-        })
-    {
+    if events.iter().any(|event| {
+        event.cost_usd > 0.0 && event.weight == 1.0 && is_unknown_model(&event.model_id)
+    }) {
         confidence = Confidence::Unknown;
     }
 
@@ -233,7 +241,10 @@ fn fetch_from_database(
     ])
 }
 
-fn read_usage_events(path: &Path, earliest_start: DateTime<Utc>) -> Result<Vec<UsageEvent>, OpenCodeAdapterError> {
+fn read_usage_events(
+    path: &Path,
+    earliest_start: DateTime<Utc>,
+) -> Result<Vec<UsageEvent>, OpenCodeAdapterError> {
     if let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
         if let Ok(events) = read_usage_events_from_connection(&connection, earliest_start) {
             return Ok(events);
@@ -361,7 +372,8 @@ impl WindowBounds {
         let rolling_start = now - ChronoDuration::seconds(FIVE_HOURS);
         let rolling_reset = now + ChronoDuration::seconds(FIVE_HOURS);
         let (weekly_start, weekly_reset) = recurring_weekly_bounds(now, settings.weekly_reset_at);
-        let (monthly_start, monthly_reset) = recurring_monthly_bounds(now, settings.monthly_reset_at);
+        let (monthly_start, monthly_reset) =
+            recurring_monthly_bounds(now, settings.monthly_reset_at);
         Self {
             rolling_start,
             weekly_start,
@@ -419,7 +431,11 @@ fn recurring_monthly_bounds(
 
 fn default_weekly_reset(now: DateTime<Utc>) -> DateTime<Utc> {
     let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
-    let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
+    let days_until_monday = if days_until_monday == 0 {
+        7
+    } else {
+        days_until_monday
+    };
     let date = now.date_naive() + ChronoDuration::days(days_until_monday as i64);
     Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).expect("valid midnight"))
 }
@@ -434,7 +450,12 @@ fn shift_month(value: DateTime<Utc>, delta: i32) -> DateTime<Utc> {
     let date = shift_month_date(value.date_naive(), delta);
     Utc.from_utc_datetime(
         &date
-            .and_hms_nano_opt(value.hour(), value.minute(), value.second(), value.nanosecond())
+            .and_hms_nano_opt(
+                value.hour(),
+                value.minute(),
+                value.second(),
+                value.nanosecond(),
+            )
             .expect("valid shifted datetime"),
     )
 }
@@ -464,26 +485,12 @@ fn model_weight_known(model: &str) -> Option<f64> {
     Some(match model {
         // Models whose published Usage tier is $15 are charged against the
         // $60 Go monthly allowance at 4x their raw model cost.
-        "grok-4.5"
-        | "gpt-5.6-luna"
-        | "kimi-k3"
-        | "mimo-v2.5-pro"
-        | "qwen3.8-max"
+        "grok-4.5" | "gpt-5.6-luna" | "kimi-k3" | "mimo-v2.5-pro" | "qwen3.8-max"
         | "deepseek-v4-pro" => 4.0,
         // Models whose published Usage tier is $60 use the raw model cost.
-        "glm-5.2"
-        | "glm-5.1"
-        | "kimi-k2.7-code"
-        | "kimi-k2.6"
-        | "mimo-v2.5"
-        | "minimax-m3"
-        | "minimax-m2.7"
-        | "minimax-m2.5"
-        | "qwen3.7-max"
-        | "qwen3.7-plus"
-        | "qwen3.6-plus"
-        | "deepseek-v4-flash"
-        | "hy3" => 1.0,
+        "glm-5.2" | "glm-5.1" | "kimi-k2.7-code" | "kimi-k2.6" | "mimo-v2.5" | "minimax-m3"
+        | "minimax-m2.7" | "minimax-m2.5" | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus"
+        | "deepseek-v4-flash" | "hy3" => 1.0,
         _ => return None,
     })
 }

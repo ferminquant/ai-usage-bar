@@ -5,9 +5,9 @@
 //! own local login/session surface.
 
 use crate::{
-    opencode_data_available, CodexAdapter, GrokConsumerAdapter, KimiAdapter, OllamaCloudAdapter,
-    OpenCodeGoAdapter, OpenCodeResetSettings, Provider, ProviderRegistry, RegistryError,
-    session_available,
+    opencode_data_available, session_available, CodexAdapter, GrokConsumerAdapter, KimiAdapter,
+    OllamaCloudAdapter, OpenCodeGoAdapter, OpenCodeResetSettings, Provider, ProviderRegistry,
+    RegistryError,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -356,10 +356,13 @@ mod tests {
             monthly_reset_at: Some(monthly),
         });
         config.save(&path).unwrap();
-        assert_eq!(AppConfig::load(&path).unwrap().opencode_reset_settings(), OpenCodeResetSettings {
-            weekly_reset_at: Some(weekly),
-            monthly_reset_at: Some(monthly),
-        });
+        assert_eq!(
+            AppConfig::load(&path).unwrap().opencode_reset_settings(),
+            OpenCodeResetSettings {
+                weekly_reset_at: Some(weekly),
+                monthly_reset_at: Some(monthly),
+            }
+        );
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("token"));
         let _ = fs::remove_file(path);

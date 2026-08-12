@@ -36,6 +36,12 @@
         "review_by": "2026-10-31"
       },
       {
+        "path": "src/startup.rs",
+        "reason": "Windows registry startup integration cannot execute under the Linux coverage runner; portable command parsing has focused unit tests and native behavior is covered by Windows CI.",
+        "issue": 13,
+        "review_by": "2026-10-31"
+      },
+      {
         "path": "src/codex.rs",
         "reason": "Provider adapter parsing and authenticated I/O are tracked with provider fixtures and diagnostics.",
         "issue": 13,

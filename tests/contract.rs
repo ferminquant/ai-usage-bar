@@ -1,9 +1,9 @@
 mod common;
 
 use ai_usage_bar::{
-    AdapterError, Confidence, ErrorCode, Freshness, KimiAdapterError, MetricKind, Provider,
-    SnapshotValidationError, Source, UsageSnapshot, WindowKind, parse_usages_response,
-    parse_usage_response,
+    parse_usage_response, parse_usages_response, AdapterError, Confidence, ErrorCode, Freshness,
+    KimiAdapterError, MetricKind, Provider, SnapshotValidationError, Source, UsageSnapshot,
+    WindowKind,
 };
 use chrono::{Duration, TimeZone, Utc};
 use common::{instant, metric_snapshot};
@@ -90,8 +90,8 @@ fn contract_ollama_fixture_normalizes_both_hosted_windows() {
 
 #[test]
 fn contract_kimi_fixture_normalizes_weekly_rolling_and_credits() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/fixtures/kimi/normal.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/fixtures/kimi/normal.json");
     let raw: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(path).expect("Kimi fixture should be readable"),
     )
