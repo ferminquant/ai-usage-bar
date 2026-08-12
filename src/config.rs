@@ -591,7 +591,7 @@ fn replace_atomically(temporary: &Path, target: &Path) -> io::Result<()> {
             None,
             None,
         )
-        .map_err(|error| io::Error::from_raw_os_error(error.code().0 as i32))
+        .map_err(|error| io::Error::from_raw_os_error(error.code().0))
     }
 }
 

@@ -304,3 +304,51 @@ pub trait ProviderAdapter {
     fn provider(&self) -> Provider;
     fn fetch(&self) -> Result<Vec<UsageSnapshot>, AdapterError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_identifiers_cover_all_supported_view_values() {
+        let providers = [
+            ("codex", Provider::Codex, &["primary"][..]),
+            ("kimi", Provider::Kimi, &["5-hour", "weekly", "total"][..]),
+            (
+                "ollama_cloud",
+                Provider::OllamaCloud,
+                &["session", "weekly"][..],
+            ),
+            ("grok_consumer", Provider::GrokConsumer, &["primary"][..]),
+            ("grok_api", Provider::GrokApi, &["primary"][..]),
+            (
+                "opencode_go",
+                Provider::OpenCodeGo,
+                &["5-hour", "weekly", "monthly"][..],
+            ),
+        ];
+        for (identifier, provider, windows) in providers {
+            assert_eq!(
+                Provider::from_identifier(identifier),
+                Some(provider.clone())
+            );
+            assert_eq!(provider.as_str(), identifier);
+            assert_eq!(provider.canonical_window_keys(), windows);
+        }
+        assert_eq!(Provider::from_identifier("unknown"), None);
+
+        let metrics = [
+            ("quota", MetricKind::Quota),
+            ("credits", MetricKind::Credits),
+            ("spend", MetricKind::Spend),
+            ("tokens", MetricKind::Tokens),
+            ("requests", MetricKind::Requests),
+            ("health", MetricKind::Health),
+        ];
+        for (identifier, metric) in metrics {
+            assert_eq!(MetricKind::from_identifier(identifier), Some(metric));
+            assert_eq!(metric.as_str(), identifier);
+        }
+        assert_eq!(MetricKind::from_identifier("unknown"), None);
+    }
+}
