@@ -19,7 +19,8 @@ pub use codex::{
 };
 pub use config::{
     build_registry, default_config_path, load_registry, AppConfig, ConfigError, ProviderSettings,
-    CONFIG_DIR_NAME, CONFIG_FILE_NAME, CONFIG_VERSION,
+    ProviderViewSettings, ResolvedView, ViewSettings, CONFIG_DIR_NAME, CONFIG_FILE_NAME,
+    CONFIG_VERSION, VIEW_VERSION,
 };
 pub use daemon::{
     Clock, ProviderRegistry, RefreshDiagnostic, RefreshPolicy, RefreshReport, RefreshService,
