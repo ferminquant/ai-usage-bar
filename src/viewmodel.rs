@@ -238,18 +238,17 @@ pub fn filter_snapshots_for_view(
             if snapshot.freshness == Freshness::Unavailable {
                 return true;
             }
-            view.windows_for(&snapshot.provider)
-                .map_or(true, |windows| {
-                    snapshot_window_key(snapshot)
-                        .map_or(false, |key| windows.iter().any(|window| window == key))
-                })
+            view.windows_for(&snapshot.provider).is_none_or(|windows| {
+                snapshot_window_key(snapshot)
+                    .is_some_and(|key| windows.iter().any(|window| window == key))
+            })
         })
         .filter(|snapshot| {
             if snapshot.freshness == Freshness::Unavailable {
                 return true;
             }
             view.metrics_for(&snapshot.provider)
-                .map_or(true, |kinds| kinds.contains(&snapshot.metric_kind))
+                .is_none_or(|kinds| kinds.contains(&snapshot.metric_kind))
         })
         .cloned()
         .collect()
@@ -874,8 +873,10 @@ mod tests {
         ollama.account_id = "ollama-test".into();
         let codex = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
 
-        let mut view = ResolvedView::default();
-        view.hidden_providers = vec![Provider::OllamaCloud];
+        let view = ResolvedView {
+            hidden_providers: vec![Provider::OllamaCloud],
+            ..ResolvedView::default()
+        };
         let filtered = filter_snapshots_for_view(&[ollama.clone(), codex.clone()], &view);
 
         assert_eq!(filtered, vec![codex]);
@@ -955,8 +956,10 @@ mod tests {
         grok.used = Some(11.0);
         grok.remaining = Some(89.0);
 
-        let mut view = ResolvedView::default();
-        view.hidden_providers = vec![Provider::Codex];
+        let view = ResolvedView {
+            hidden_providers: vec![Provider::Codex],
+            ..ResolvedView::default()
+        };
         let filtered = filter_snapshots_for_view(&[codex, grok.clone()], &view);
 
         // Focus on the now-hidden Codex; the view must fall back to Grok.
