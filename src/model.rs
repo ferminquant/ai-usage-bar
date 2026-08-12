@@ -8,7 +8,7 @@ const PROVIDER_GROK_CONSUMER: &str = "grok_consumer";
 const PROVIDER_GROK_API: &str = "grok_api";
 const PROVIDER_OPENCODE_GO: &str = "opencode_go";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Codex,
@@ -20,6 +20,20 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Parse a persisted provider identifier. Unknown identifiers are rejected
+    /// by callers rather than being converted into a placeholder provider.
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        match value {
+            PROVIDER_CODEX => Some(Self::Codex),
+            PROVIDER_KIMI => Some(Self::Kimi),
+            PROVIDER_OLLAMA_CLOUD => Some(Self::OllamaCloud),
+            PROVIDER_GROK_CONSUMER => Some(Self::GrokConsumer),
+            PROVIDER_GROK_API => Some(Self::GrokApi),
+            PROVIDER_OPENCODE_GO => Some(Self::OpenCodeGo),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Codex => PROVIDER_CODEX,
@@ -38,6 +52,27 @@ impl fmt::Display for Provider {
     }
 }
 
+impl Provider {
+    /// Canonical quota-window identifiers understood for this provider.
+    ///
+    /// These are the persisted, menu-selectable window vocabulary used by the
+    /// `view` configuration section. Provider-native aliases are normalized to
+    /// canonical keys: Ollama exposes `session`/`weekly`, Kimi
+    /// `5-hour`/`weekly`/`total`, OpenCode `5-hour`/`weekly`/`monthly`, and the
+    /// remaining providers expose their primary weekly quota as `primary`.
+    ///
+    /// Window identifiers outside this set are unknown for the provider and
+    /// are ignored safely when resolving display preferences.
+    pub fn canonical_window_keys(&self) -> &'static [&'static str] {
+        match self {
+            Self::Codex | Self::GrokConsumer | Self::GrokApi => &["primary"],
+            Self::Kimi => &["5-hour", "weekly", "total"],
+            Self::OllamaCloud => &["session", "weekly"],
+            Self::OpenCodeGo => &["5-hour", "weekly", "monthly"],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricKind {
@@ -47,6 +82,32 @@ pub enum MetricKind {
     Tokens,
     Requests,
     Health,
+}
+
+impl MetricKind {
+    /// Parse the stable snake-case identifier used by persisted preferences.
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        match value {
+            "quota" => Some(Self::Quota),
+            "credits" => Some(Self::Credits),
+            "spend" => Some(Self::Spend),
+            "tokens" => Some(Self::Tokens),
+            "requests" => Some(Self::Requests),
+            "health" => Some(Self::Health),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::Credits => "credits",
+            Self::Spend => "spend",
+            Self::Tokens => "tokens",
+            Self::Requests => "requests",
+            Self::Health => "health",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,4 +303,90 @@ impl UsageSnapshot {
 pub trait ProviderAdapter {
     fn provider(&self) -> Provider;
     fn fetch(&self) -> Result<Vec<UsageSnapshot>, AdapterError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_identifiers_cover_all_supported_view_values() {
+        let providers = [
+            ("codex", Provider::Codex, &["primary"][..]),
+            ("kimi", Provider::Kimi, &["5-hour", "weekly", "total"][..]),
+            (
+                "ollama_cloud",
+                Provider::OllamaCloud,
+                &["session", "weekly"][..],
+            ),
+            ("grok_consumer", Provider::GrokConsumer, &["primary"][..]),
+            ("grok_api", Provider::GrokApi, &["primary"][..]),
+            (
+                "opencode_go",
+                Provider::OpenCodeGo,
+                &["5-hour", "weekly", "monthly"][..],
+            ),
+        ];
+        for (identifier, provider, windows) in providers {
+            assert_eq!(
+                Provider::from_identifier(identifier),
+                Some(provider.clone())
+            );
+            assert_eq!(provider.as_str(), identifier);
+            assert_eq!(provider.canonical_window_keys(), windows);
+        }
+        assert_eq!(Provider::from_identifier("unknown"), None);
+
+        let metrics = [
+            ("quota", MetricKind::Quota),
+            ("credits", MetricKind::Credits),
+            ("spend", MetricKind::Spend),
+            ("tokens", MetricKind::Tokens),
+            ("requests", MetricKind::Requests),
+            ("health", MetricKind::Health),
+        ];
+        for (identifier, metric) in metrics {
+            assert_eq!(MetricKind::from_identifier(identifier), Some(metric));
+            assert_eq!(metric.as_str(), identifier);
+        }
+        assert_eq!(MetricKind::from_identifier("unknown"), None);
+    }
+
+    #[test]
+    fn unavailable_snapshots_reject_each_value_field_individually() {
+        let cases = [
+            (Some(10.0), None, None),
+            (None, Some(90.0), None),
+            (None, None, Some(100.0)),
+        ];
+
+        for (used, remaining, limit) in cases {
+            let snapshot = UsageSnapshot {
+                provider: Provider::Codex,
+                account_id: "test-account".into(),
+                metric_kind: MetricKind::Quota,
+                window_kind: WindowKind::Weekly,
+                unit: "percent".into(),
+                observed_at: chrono::Utc::now(),
+                source: Source::Fixture,
+                freshness: Freshness::Unavailable,
+                confidence: Confidence::Unknown,
+                used,
+                remaining,
+                limit,
+                unlimited: false,
+                resets_at: None,
+                window_label: Some("primary".into()),
+                error: Some(AdapterError {
+                    code: ErrorCode::Timeout,
+                    message: None,
+                }),
+            };
+
+            assert_eq!(
+                snapshot.validate(),
+                Err(SnapshotValidationError::UnavailableHasValues)
+            );
+        }
+    }
 }
