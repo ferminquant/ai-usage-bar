@@ -13,9 +13,10 @@ fn main() {
 mod windows_shell {
     use ai_usage_bar::{
         build_registry, build_tray_view_focused_window, default_config_path,
-        is_allowed_browser_url, provider_display_name, window_display_name, AppConfig,
-        OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService, UsageSnapshot,
-        KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
+        filter_snapshots_for_view, is_allowed_browser_url, provider_display_name,
+        switchable_providers_for_snapshots, window_display_name, AppConfig, MetricKind,
+        OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService, ResolvedView,
+        UsageSnapshot, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
     };
     use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
@@ -66,6 +67,15 @@ mod windows_shell {
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
     const MENU_SHOW_WINDOW_BASE: usize = 1200;
     const MENU_SHOW_WINDOW_MAX: usize = 8;
+    /// Checked visibility controls are separate from the focus selectors
+    /// above. Provider enablement remains in the provider configuration and
+    /// is intentionally not toggled by these menu items.
+    const MENU_VISIBLE_PROVIDER_BASE: usize = 1300;
+    const MENU_VISIBLE_PROVIDER_MAX: usize = 8;
+    const MENU_VISIBLE_WINDOW_BASE: usize = 1400;
+    const MENU_VISIBLE_WINDOW_MAX: usize = 8;
+    const MENU_VISIBLE_METRIC_BASE: usize = 1500;
+    const MENU_VISIBLE_METRIC_MAX: usize = 8;
     const STATUS_TIMER_ID: usize = 4;
     const STATUS_INTERVAL_MS: u32 = 2_500;
     const CF_UNICODETEXT_FORMAT: u32 = 13;
@@ -938,16 +948,11 @@ mod windows_shell {
         unsafe {
             let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
         }
-        let current_view = build_tray_view_focused_window(
-            &state.snapshots,
-            state.focus_provider.as_ref(),
-            state.focus_window.as_deref(),
-            chrono::Utc::now(),
-        );
+        recompute_view(state);
         state.tooltip = if state.snapshots.is_empty() {
             "AI Usage Bar — refreshing…".to_string()
         } else {
-            format!("{}\nRefreshing…", current_view.tooltip)
+            format!("{}\nRefreshing…", state.tooltip)
         };
         update_tooltip(hwnd, state);
         unsafe {
@@ -983,27 +988,16 @@ mod windows_shell {
 
         match payload.result {
             Ok(snapshots) => {
-                let view = build_tray_view_focused_window(
-                    &snapshots,
-                    state.focus_provider.as_ref(),
-                    state.focus_window.as_deref(),
-                    chrono::Utc::now(),
-                );
                 state.snapshots = snapshots;
-                state.apply_view(view);
+                recompute_view(state);
             }
             Err(error) => {
-                let view = build_tray_view_focused_window(
-                    &state.snapshots,
-                    state.focus_provider.as_ref(),
-                    state.focus_window.as_deref(),
-                    chrono::Utc::now(),
-                );
+                recompute_view(state);
                 let safe_error = ai_usage_bar::redact_sensitive_text(&error.to_string());
                 state.tooltip = if state.snapshots.is_empty() {
                     format!("AI Usage Bar — refresh failed: {safe_error}")
                 } else {
-                    format!("{}\nRefresh failed: {safe_error}", view.tooltip)
+                    format!("{}\nRefresh failed: {safe_error}", state.tooltip)
                 };
                 eprintln!("refresh error: {safe_error}");
             }
@@ -1020,19 +1014,18 @@ mod windows_shell {
             return;
         };
         // Clear any transient status so the pill only shows the provider name.
-        state.status = None;
-        unsafe {
-            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
-        }
+        clear_status_for_window(hwnd, state);
         state.focus_provider = Some(provider);
         state.focus_window = None;
-        let view = build_tray_view_focused_window(
-            &state.snapshots,
-            state.focus_provider.as_ref(),
-            state.focus_window.as_deref(),
-            chrono::Utc::now(),
-        );
-        state.apply_view(view);
+        let previous_config = state.config.clone();
+        let focused = state.focus_provider.clone();
+        state.config.set_view_defaults(focused.as_ref(), None);
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist display default: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save display preference");
+        }
+        recompute_view(state);
         update_tooltip(hwnd, state);
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1043,18 +1036,19 @@ mod windows_shell {
         let Some(state) = app_state(hwnd) else {
             return;
         };
-        state.status = None;
-        unsafe {
-            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
-        }
+        clear_status_for_window(hwnd, state);
         state.focus_window = Some(window.to_string());
-        let view = build_tray_view_focused_window(
-            &state.snapshots,
-            state.focus_provider.as_ref(),
-            state.focus_window.as_deref(),
-            chrono::Utc::now(),
-        );
-        state.apply_view(view);
+        let previous_config = state.config.clone();
+        let focused = state.focus_provider.clone();
+        state
+            .config
+            .set_view_defaults(focused.as_ref(), Some(window));
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist display default: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save display preference");
+        }
+        recompute_view(state);
         update_tooltip(hwnd, state);
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1080,6 +1074,272 @@ mod windows_shell {
             None => state.switchable_providers[0].clone(),
         };
         set_focus_provider(hwnd, next);
+    }
+
+    /// Apply the persisted display-only view settings to the raw refresh
+    /// report and normalize focus after a provider/window was hidden. The raw
+    /// snapshots stay in `AppState` so a hidden item can be shown again from
+    /// the context menu without requiring another refresh.
+    fn recompute_view(state: &mut AppState) {
+        let available = switchable_providers_for_snapshots(&state.snapshots);
+        let resolved = state.config.resolved_view(&available);
+        let filtered = filter_snapshots_for_view(&state.snapshots, &resolved);
+        let visible_candidates = switchable_providers_for_snapshots(&filtered);
+        let ordered_visible = ordered_providers(&visible_candidates, &resolved);
+
+        state.focus_provider = state
+            .focus_provider
+            .clone()
+            .filter(|provider| visible_candidates.contains(provider))
+            .or_else(|| {
+                resolved
+                    .default_provider
+                    .clone()
+                    .filter(|provider| visible_candidates.contains(provider))
+            })
+            .or_else(|| ordered_visible.first().cloned());
+
+        let default_window = state
+            .focus_provider
+            .as_ref()
+            .filter(|provider| resolved.default_provider.as_ref() == Some(provider))
+            .and(resolved.default_window.as_deref());
+        let focus_windows = state
+            .focus_provider
+            .as_ref()
+            .map(|provider| available_windows(&filtered, provider))
+            .unwrap_or_default();
+        state.focus_window = state
+            .focus_window
+            .as_deref()
+            .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
+            .map(str::to_string)
+            .or_else(|| {
+                default_window
+                    .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
+                    .map(str::to_string)
+            })
+            .or_else(|| focus_windows.first().cloned());
+
+        let mut view = build_tray_view_focused_window(
+            &filtered,
+            state.focus_provider.as_ref(),
+            state.focus_window.as_deref(),
+            Utc::now(),
+        );
+        view.switchable_providers = ordered_visible;
+        state.apply_view(view);
+    }
+
+    fn ordered_providers(available: &[Provider], view: &ResolvedView) -> Vec<Provider> {
+        let mut ordered = Vec::with_capacity(available.len());
+        if let Some(configured) = &view.provider_order {
+            for provider in configured {
+                if available.contains(provider) && !ordered.contains(provider) {
+                    ordered.push(provider.clone());
+                }
+            }
+        }
+        for provider in available {
+            if !ordered.contains(provider) {
+                ordered.push(provider.clone());
+            }
+        }
+        ordered
+    }
+
+    fn available_windows(snapshots: &[UsageSnapshot], provider: &Provider) -> Vec<String> {
+        let mut windows = Vec::new();
+        for snapshot in snapshots {
+            if &snapshot.provider != provider
+                || snapshot.unit != "percent"
+                || snapshot.used.is_none()
+            {
+                continue;
+            }
+            let Some(label) = snapshot.window_label.as_deref() else {
+                continue;
+            };
+            let Some(canonical) = canonical_window_key(provider, label) else {
+                continue;
+            };
+            if !windows.iter().any(|existing| existing == canonical) {
+                windows.push(canonical.to_string());
+            }
+        }
+        windows.sort_by_key(|window| window_sort_key(window));
+        windows
+    }
+
+    fn available_metrics(snapshots: &[UsageSnapshot], provider: &Provider) -> Vec<MetricKind> {
+        let mut metrics = Vec::new();
+        for snapshot in snapshots
+            .iter()
+            .filter(|snapshot| &snapshot.provider == provider)
+        {
+            if !metrics.contains(&snapshot.metric_kind) {
+                metrics.push(snapshot.metric_kind);
+            }
+        }
+        metrics.sort_by_key(|metric| metric.as_str());
+        metrics
+    }
+
+    fn metric_display_name(metric: MetricKind) -> &'static str {
+        match metric {
+            MetricKind::Quota => "Quota",
+            MetricKind::Credits => "Credits",
+            MetricKind::Spend => "Spend",
+            MetricKind::Tokens => "Tokens",
+            MetricKind::Requests => "Requests",
+            MetricKind::Health => "Health",
+        }
+    }
+
+    fn clear_status_for_window(hwnd: HWND, state: &mut AppState) {
+        state.status = None;
+        unsafe {
+            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+        }
+    }
+
+    fn finish_view_change(hwnd: HWND, state: &mut AppState, previous_config: AppConfig) {
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist display preference: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save display preference");
+            return;
+        }
+        clear_status_for_window(hwnd, state);
+        recompute_view(state);
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+
+    fn toggle_provider_visibility(hwnd: HWND, provider: Provider) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let available = switchable_providers_for_snapshots(&state.snapshots);
+        if !available.contains(&provider) {
+            return;
+        }
+        let resolved = state.config.resolved_view(&available);
+        let mut hidden: Vec<Provider> = available
+            .iter()
+            .filter(|candidate| resolved.is_provider_hidden(candidate))
+            .cloned()
+            .collect();
+        if let Some(index) = hidden.iter().position(|candidate| candidate == &provider) {
+            hidden.remove(index);
+        } else {
+            let visible_count = available.len().saturating_sub(hidden.len());
+            if visible_count <= 1 {
+                set_status(hwnd, state, "Keep at least one provider visible");
+                return;
+            }
+            hidden.push(provider);
+        }
+
+        let previous_config = state.config.clone();
+        state.config.set_view_hidden_providers(&hidden);
+        finish_view_change(hwnd, state, previous_config);
+    }
+
+    fn toggle_window_visibility(hwnd: HWND, provider: Provider, window: String) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let all_windows = available_windows(&state.snapshots, &provider);
+        if !all_windows.contains(&window) {
+            return;
+        }
+        let resolved = state
+            .config
+            .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
+        let mut visible: Vec<String> = resolved
+            .windows_for(&provider)
+            .map(|windows| {
+                windows
+                    .iter()
+                    .filter(|candidate| all_windows.contains(candidate))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_else(|| all_windows.clone());
+
+        if let Some(index) = visible.iter().position(|candidate| candidate == &window) {
+            if visible.len() <= 1 {
+                set_status(hwnd, state, "Keep at least one usage window visible");
+                return;
+            }
+            visible.remove(index);
+        } else {
+            visible.push(window);
+            visible.sort_by_key(|candidate| window_sort_key(candidate));
+        }
+
+        let all_visible = visible.len() == all_windows.len()
+            && all_windows
+                .iter()
+                .all(|candidate| visible.contains(candidate));
+        let visible_refs: Vec<&str> = visible.iter().map(String::as_str).collect();
+        let previous_config = state.config.clone();
+        state.config.set_view_visible_windows(
+            &provider,
+            if all_visible {
+                None
+            } else {
+                Some(&visible_refs)
+            },
+        );
+        finish_view_change(hwnd, state, previous_config);
+    }
+
+    fn toggle_metric_visibility(hwnd: HWND, provider: Provider, metric: MetricKind) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let all_metrics = available_metrics(&state.snapshots, &provider);
+        if !all_metrics.contains(&metric) {
+            return;
+        }
+        let resolved = state
+            .config
+            .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
+        let mut visible: Vec<MetricKind> = resolved
+            .metrics_for(&provider)
+            .map(|metrics| {
+                metrics
+                    .iter()
+                    .filter(|candidate| all_metrics.contains(candidate))
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_else(|| all_metrics.clone());
+
+        if let Some(index) = visible.iter().position(|candidate| candidate == &metric) {
+            if visible.len() <= 1 {
+                set_status(hwnd, state, "Keep at least one metric visible");
+                return;
+            }
+            visible.remove(index);
+        } else {
+            visible.push(metric);
+            visible.sort_by_key(|candidate| candidate.as_str());
+        }
+
+        let all_visible = visible.len() == all_metrics.len()
+            && all_metrics
+                .iter()
+                .all(|candidate| visible.contains(candidate));
+        let previous_config = state.config.clone();
+        state
+            .config
+            .set_view_visible_metrics(&provider, if all_visible { None } else { Some(&visible) });
+        finish_view_change(hwnd, state, previous_config);
     }
 
     struct ResetDialogState {
@@ -1664,6 +1924,7 @@ mod windows_shell {
             // Keep wide strings alive until TrackPopupMenu returns.
             let mut provider_labels: Vec<Vec<u16>> = Vec::new();
             let mut window_labels: Vec<Vec<u16>> = Vec::new();
+            let mut visibility_labels: Vec<Vec<u16>> = Vec::new();
             let switchable = app_state_ref(hwnd)
                 .map(|s| s.switchable_providers.clone())
                 .unwrap_or_default();
@@ -1686,6 +1947,37 @@ mod windows_shell {
                         flags,
                         MENU_SHOW_PROVIDER_BASE + index,
                         PCWSTR(provider_labels[index].as_ptr()),
+                    );
+                }
+            }
+
+            // Display visibility is deliberately separate from the focus
+            // selectors above and from provider enablement in AppConfig.
+            let all_providers = app_state_ref(hwnd)
+                .map(|state| switchable_providers_for_snapshots(&state.snapshots))
+                .unwrap_or_default();
+            let resolved_view = app_state_ref(hwnd)
+                .map(|state| state.config.resolved_view(&all_providers))
+                .unwrap_or_default();
+            if !all_providers.is_empty() {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                for (index, provider) in all_providers
+                    .iter()
+                    .take(MENU_VISIBLE_PROVIDER_MAX)
+                    .enumerate()
+                {
+                    let flags = if !resolved_view.is_provider_hidden(provider) {
+                        MF_STRING | MF_CHECKED
+                    } else {
+                        MF_STRING
+                    };
+                    let label = format!("Show {}", provider_display_name(provider));
+                    visibility_labels.push(to_wide(&label));
+                    let _ = AppendMenuW(
+                        menu,
+                        flags,
+                        MENU_VISIBLE_PROVIDER_BASE + index,
+                        PCWSTR(visibility_labels.last().unwrap().as_ptr()),
                     );
                 }
             }
@@ -1762,6 +2054,65 @@ mod windows_shell {
                 }
             }
 
+            if let Some(provider) = focused.as_ref() {
+                let visible_windows = resolved_view.windows_for(provider);
+                if !available_windows.is_empty() {
+                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                    for (index, window) in available_windows
+                        .iter()
+                        .take(MENU_VISIBLE_WINDOW_MAX)
+                        .enumerate()
+                    {
+                        let checked = visible_windows
+                            .map(|windows| windows.iter().any(|candidate| candidate == window))
+                            .unwrap_or(true);
+                        let flags = if checked {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        let label = format!("Show {}", window_display_name(provider, window));
+                        visibility_labels.push(to_wide(&label));
+                        let _ = AppendMenuW(
+                            menu,
+                            flags,
+                            MENU_VISIBLE_WINDOW_BASE + index,
+                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                        );
+                    }
+                }
+
+                let available_metrics = app_state_ref(hwnd)
+                    .map(|state| available_metrics(&state.snapshots, provider))
+                    .unwrap_or_default();
+                let visible_metrics = resolved_view.metrics_for(provider);
+                if !available_metrics.is_empty() {
+                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                    for (index, metric) in available_metrics
+                        .iter()
+                        .take(MENU_VISIBLE_METRIC_MAX)
+                        .enumerate()
+                    {
+                        let checked = visible_metrics
+                            .map(|metrics| metrics.contains(metric))
+                            .unwrap_or(true);
+                        let flags = if checked {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        let label = format!("Show {}", metric_display_name(*metric));
+                        visibility_labels.push(to_wide(&label));
+                        let _ = AppendMenuW(
+                            menu,
+                            flags,
+                            MENU_VISIBLE_METRIC_BASE + index,
+                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                        );
+                    }
+                }
+            }
+
             let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
             let kimi_focused = focused.as_ref() == Some(&Provider::Kimi);
             let opencode_focused = focused.as_ref() == Some(&Provider::OpenCodeGo);
@@ -1835,6 +2186,7 @@ mod windows_shell {
             // Keep labels live until here.
             let _ = provider_labels;
             let _ = window_labels;
+            let _ = visibility_labels;
 
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
@@ -1860,6 +2212,40 @@ mod windows_shell {
                 {
                     if let Some(window) = available_windows.get(id - MENU_SHOW_WINDOW_BASE) {
                         set_focus_window(hwnd, window);
+                    }
+                }
+                id if (MENU_VISIBLE_PROVIDER_BASE
+                    ..MENU_VISIBLE_PROVIDER_BASE + MENU_VISIBLE_PROVIDER_MAX)
+                    .contains(&id) =>
+                {
+                    if let Some(provider) = all_providers.get(id - MENU_VISIBLE_PROVIDER_BASE) {
+                        toggle_provider_visibility(hwnd, provider.clone());
+                    }
+                }
+                id if (MENU_VISIBLE_WINDOW_BASE
+                    ..MENU_VISIBLE_WINDOW_BASE + MENU_VISIBLE_WINDOW_MAX)
+                    .contains(&id) =>
+                {
+                    if let (Some(provider), Some(window)) = (
+                        focused.clone(),
+                        available_windows
+                            .get(id - MENU_VISIBLE_WINDOW_BASE)
+                            .cloned(),
+                    ) {
+                        toggle_window_visibility(hwnd, provider, window);
+                    }
+                }
+                id if (MENU_VISIBLE_METRIC_BASE
+                    ..MENU_VISIBLE_METRIC_BASE + MENU_VISIBLE_METRIC_MAX)
+                    .contains(&id) =>
+                {
+                    if let Some(provider) = focused.clone() {
+                        if let Some(metric) = app_state_ref(hwnd)
+                            .map(|state| available_metrics(&state.snapshots, &provider))
+                            .and_then(|metrics| metrics.get(id - MENU_VISIBLE_METRIC_BASE).copied())
+                        {
+                            toggle_metric_visibility(hwnd, provider, metric);
+                        }
                     }
                 }
                 _ => {}

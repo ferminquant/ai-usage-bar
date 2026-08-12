@@ -783,6 +783,34 @@ mod tests {
     }
 
     #[test]
+    fn view_visibility_preferences_can_be_cleared_back_to_all_rows() {
+        let available = [Provider::OllamaCloud, Provider::Kimi];
+        let mut config = AppConfig::default();
+
+        config.set_view_hidden_providers(&[Provider::Kimi]);
+        config.set_view_visible_windows(&Provider::OllamaCloud, Some(&["weekly"]));
+        config.set_view_visible_metrics(&Provider::OllamaCloud, Some(&[MetricKind::Quota]));
+        let filtered = config.resolved_view(&available);
+        assert_eq!(filtered.hidden_providers, vec![Provider::Kimi]);
+        assert_eq!(
+            filtered.windows_for(&Provider::OllamaCloud),
+            Some(["weekly".to_string()].as_slice())
+        );
+        assert_eq!(
+            filtered.metrics_for(&Provider::OllamaCloud),
+            Some([MetricKind::Quota].as_slice())
+        );
+
+        config.set_view_hidden_providers(&[]);
+        config.set_view_visible_windows(&Provider::OllamaCloud, None);
+        config.set_view_visible_metrics(&Provider::OllamaCloud, None);
+        let restored = config.resolved_view(&available);
+        assert!(restored.hidden_providers.is_empty());
+        assert!(restored.windows_for(&Provider::OllamaCloud).is_none());
+        assert!(restored.metrics_for(&Provider::OllamaCloud).is_none());
+    }
+
+    #[test]
     fn unknown_view_identifiers_are_ignored_and_contradictions_fall_back() {
         let config = AppConfig::parse(
             r#"{

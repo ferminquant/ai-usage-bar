@@ -1,3 +1,4 @@
+use crate::config::ResolvedView;
 use crate::model::{Freshness, MetricKind, Provider, UsageSnapshot};
 use crate::security::{redact_sensitive_text, safe_identifier};
 use chrono::{DateTime, Utc};
@@ -183,6 +184,91 @@ fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
     }
 
     format!("{label} {window_kind}")
+}
+
+/// Canonical quota-window key for a snapshot, matching
+/// [`Provider::canonical_window_keys`]. Returns `None` for window labels that
+/// are not part of the provider's canonical vocabulary.
+pub fn snapshot_window_key(snapshot: &UsageSnapshot) -> Option<&'static str> {
+    let label = snapshot.window_label.as_deref()?;
+    match snapshot.provider {
+        Provider::OllamaCloud => match label {
+            "session" => Some("session"),
+            "weekly" => Some("weekly"),
+            _ => None,
+        },
+        Provider::Kimi => match label {
+            "5-hour" => Some("5-hour"),
+            "weekly" | "primary" => Some("weekly"),
+            "total" | "monthly" => Some("total"),
+            _ => None,
+        },
+        Provider::OpenCodeGo => match label {
+            "5-hour" => Some("5-hour"),
+            "weekly" => Some("weekly"),
+            "monthly" | "total" => Some("monthly"),
+            _ => None,
+        },
+        _ => match label {
+            "primary" => Some("primary"),
+            _ => None,
+        },
+    }
+}
+
+/// Filter snapshots down to those exposed by resolved display preferences.
+///
+/// Hides providers listed in [`ResolvedView::hidden_providers`], restricts each
+/// provider to its `visible_windows` and `visible_metrics`. An absent per-
+/// provider preference keeps every reported row; an explicit empty list hides
+/// all rows of that kind. This never touches provider `enabled`, so scheduling
+/// stays independent of display visibility.
+pub fn filter_snapshots_for_view(
+    snapshots: &[UsageSnapshot],
+    view: &ResolvedView,
+) -> Vec<UsageSnapshot> {
+    snapshots
+        .iter()
+        .filter(|snapshot| !view.is_provider_hidden(&snapshot.provider))
+        .filter(|snapshot| {
+            // Keep an unavailable provider row visible so a display filter
+            // does not turn an authentication/schema error into a silent
+            // disappearance. There is no usable window/metric to filter in
+            // this state; the diagnostic row is still useful to the user.
+            if snapshot.freshness == Freshness::Unavailable {
+                return true;
+            }
+            view.windows_for(&snapshot.provider)
+                .map_or(true, |windows| {
+                    snapshot_window_key(snapshot)
+                        .map_or(false, |key| windows.iter().any(|window| window == key))
+                })
+        })
+        .filter(|snapshot| {
+            if snapshot.freshness == Freshness::Unavailable {
+                return true;
+            }
+            view.metrics_for(&snapshot.provider)
+                .map_or(true, |kinds| kinds.contains(&snapshot.metric_kind))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Providers that currently expose at least one compact percentage row.
+/// Unlike the resolved display view, this intentionally ignores visibility so
+/// the shell can offer a way to unhide a provider that is currently hidden.
+pub fn switchable_providers_for_snapshots(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
+    let mut providers = Vec::new();
+    for snapshot in snapshots
+        .iter()
+        .filter(|snapshot| is_compact_candidate(snapshot))
+    {
+        if !providers.contains(&snapshot.provider) {
+            providers.push(snapshot.provider.clone());
+        }
+    }
+    providers
 }
 
 /// Canonical label used by the Windows context menu for provider windows.
@@ -372,12 +458,7 @@ pub fn build_tray_view_focused_window(
         .filter(|s| s.freshness == Freshness::Unavailable)
         .count();
 
-    let mut switchable = Vec::new();
-    for snapshot in snapshots.iter().filter(|s| is_compact_candidate(s)) {
-        if !switchable.contains(&snapshot.provider) {
-            switchable.push(snapshot.provider.clone());
-        }
-    }
+    let switchable = switchable_providers_for_snapshots(snapshots);
 
     let primary = focus
         .and_then(|wanted| {
@@ -774,6 +855,142 @@ mod tests {
         ]);
         assert!(view.tooltip.contains("Ollama"));
         assert!(!view.tooltip.ends_with("\n..."));
+    }
+
+    #[test]
+    fn filter_keeps_everything_when_view_is_default() {
+        let mut session = make_snapshot(Some(37.0), Freshness::Live, Some("session"));
+        session.provider = Provider::OllamaCloud;
+        session.account_id = "ollama-test".into();
+        let snapshots = vec![session];
+        let filtered = filter_snapshots_for_view(&snapshots, &ResolvedView::default());
+        assert_eq!(filtered, snapshots);
+    }
+
+    #[test]
+    fn filter_hides_configured_providers_but_keeps_enablement_untouched() {
+        let mut ollama = make_snapshot(Some(37.0), Freshness::Live, Some("session"));
+        ollama.provider = Provider::OllamaCloud;
+        ollama.account_id = "ollama-test".into();
+        let codex = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+
+        let mut view = ResolvedView::default();
+        view.hidden_providers = vec![Provider::OllamaCloud];
+        let filtered = filter_snapshots_for_view(&[ollama.clone(), codex.clone()], &view);
+
+        assert_eq!(filtered, vec![codex]);
+        // Visibility filtering never mutates provider enablement.
+        assert_eq!(view.hidden_providers, vec![Provider::OllamaCloud]);
+    }
+
+    #[test]
+    fn filter_restricts_windows_and_hides_unlisted_rows() {
+        let mut session = make_snapshot(Some(37.0), Freshness::Live, Some("session"));
+        session.provider = Provider::OllamaCloud;
+        session.account_id = "ollama-test".into();
+        let mut weekly = session.clone();
+        weekly.used = Some(18.4);
+        weekly.remaining = Some(81.6);
+        weekly.window_label = Some("weekly".into());
+        let mut secondary = session.clone();
+        secondary.window_label = Some("secondary".into());
+
+        let mut view = ResolvedView::default();
+        view.visible_windows
+            .insert(Provider::OllamaCloud, vec!["session".to_string()]);
+        let filtered =
+            filter_snapshots_for_view(&[session.clone(), weekly.clone(), secondary.clone()], &view);
+
+        // Only the canonical `session` row survives; `weekly` is excluded and
+        // the unknown `secondary` row is treated as hidden under a filter.
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].window_label.as_deref(), Some("session"));
+    }
+
+    #[test]
+    fn filter_restricts_metric_kinds() {
+        let mut quota = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        quota.metric_kind = MetricKind::Quota;
+        let mut credits = quota.clone();
+        credits.metric_kind = MetricKind::Credits;
+        credits.used = Some(12.0);
+        credits.remaining = None;
+        credits.unit = "USD".into();
+
+        let mut view = ResolvedView::default();
+        view.visible_metrics
+            .insert(Provider::Codex, vec![MetricKind::Quota]);
+        let filtered = filter_snapshots_for_view(&[quota, credits], &view);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].metric_kind, MetricKind::Quota);
+    }
+
+    #[test]
+    fn filter_keeps_unavailable_diagnostics_visible_under_row_filters() {
+        let mut unavailable = make_snapshot(None, Freshness::Unavailable, None);
+        unavailable.provider = Provider::OllamaCloud;
+        unavailable.account_id = "ollama-test".into();
+        unavailable.error = Some(AdapterError {
+            code: ErrorCode::AuthExpired,
+            message: None,
+        });
+
+        let mut view = ResolvedView::default();
+        view.visible_windows
+            .insert(Provider::OllamaCloud, vec!["weekly".to_string()]);
+        view.visible_metrics
+            .insert(Provider::OllamaCloud, vec![MetricKind::Credits]);
+
+        let filtered = filter_snapshots_for_view(&[unavailable.clone()], &view);
+        assert_eq!(filtered, vec![unavailable]);
+    }
+
+    #[test]
+    fn hiding_focused_provider_falls_back_to_first_visible_provider() {
+        let codex = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        let mut grok = codex.clone();
+        grok.provider = Provider::GrokConsumer;
+        grok.account_id = "grok-test".into();
+        grok.used = Some(11.0);
+        grok.remaining = Some(89.0);
+
+        let mut view = ResolvedView::default();
+        view.hidden_providers = vec![Provider::Codex];
+        let filtered = filter_snapshots_for_view(&[codex, grok.clone()], &view);
+
+        // Focus on the now-hidden Codex; the view must fall back to Grok.
+        let vm =
+            build_tray_view_focused_window(&filtered, Some(&Provider::Codex), None, Utc::now());
+        assert_eq!(vm.focus_provider, Some(Provider::GrokConsumer));
+        assert_eq!(vm.used_percent, Some(11.0));
+        assert_eq!(vm.switchable_providers, vec![grok.provider]);
+    }
+
+    #[test]
+    fn hiding_focused_window_falls_back_to_default_window() {
+        let mut session = make_snapshot(Some(37.0), Freshness::Live, Some("session"));
+        session.provider = Provider::OllamaCloud;
+        session.account_id = "ollama-test".into();
+        let mut weekly = session.clone();
+        weekly.used = Some(18.4);
+        weekly.remaining = Some(81.6);
+        weekly.window_label = Some("weekly".into());
+
+        let mut view = ResolvedView::default();
+        view.visible_windows
+            .insert(Provider::OllamaCloud, vec!["session".to_string()]);
+        let filtered = filter_snapshots_for_view(&[session.clone(), weekly.clone()], &view);
+
+        // Focus the now-hidden weekly window; Ollama must fall back to session.
+        let vm = build_tray_view_focused_window(
+            &filtered,
+            Some(&Provider::OllamaCloud),
+            Some("weekly"),
+            Utc::now(),
+        );
+        assert_eq!(vm.focus_provider, Some(Provider::OllamaCloud));
+        assert_eq!(vm.used_percent, Some(37.0));
     }
 
     #[test]
