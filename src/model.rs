@@ -351,4 +351,42 @@ mod tests {
         }
         assert_eq!(MetricKind::from_identifier("unknown"), None);
     }
+
+    #[test]
+    fn unavailable_snapshots_reject_each_value_field_individually() {
+        let cases = [
+            (Some(10.0), None, None),
+            (None, Some(90.0), None),
+            (None, None, Some(100.0)),
+        ];
+
+        for (used, remaining, limit) in cases {
+            let snapshot = UsageSnapshot {
+                provider: Provider::Codex,
+                account_id: "test-account".into(),
+                metric_kind: MetricKind::Quota,
+                window_kind: WindowKind::Weekly,
+                unit: "percent".into(),
+                observed_at: chrono::Utc::now(),
+                source: Source::Fixture,
+                freshness: Freshness::Unavailable,
+                confidence: Confidence::Unknown,
+                used,
+                remaining,
+                limit,
+                unlimited: false,
+                resets_at: None,
+                window_label: Some("primary".into()),
+                error: Some(AdapterError {
+                    code: ErrorCode::Timeout,
+                    message: None,
+                }),
+            };
+
+            assert_eq!(
+                snapshot.validate(),
+                Err(SnapshotValidationError::UnavailableHasValues)
+            );
+        }
+    }
 }
