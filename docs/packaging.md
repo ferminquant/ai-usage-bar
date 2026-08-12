@@ -119,7 +119,7 @@ After downloading the ZIP and its matching `.zip.sha256` sidecar into the same
 directory, run this in PowerShell:
 
 ```powershell
-$packagePath = (Get-Item .\ai-usage-bar-0.1.4-windows-x64.zip).FullName
+$packagePath = (Get-Item .\ai-usage-bar-0.1.5-windows-x64.zip).FullName
 $checksumPath = "$packagePath.sha256"
 $expected = ((Get-Content -LiteralPath $checksumPath -Raw) -split '\s+')[0].ToLowerInvariant()
 $actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -127,7 +127,7 @@ if ($actual -ne $expected) {
     throw "ZIP checksum mismatch. Expected $expected, got $actual."
 }
 
-$extractPath = Join-Path $env:TEMP "ai-usage-bar-0.1.4-release"
+$extractPath = Join-Path $env:TEMP "ai-usage-bar-0.1.5-release"
 if (Test-Path -LiteralPath $extractPath) {
     Remove-Item -LiteralPath $extractPath -Recurse -Force
 }
@@ -197,8 +197,8 @@ versioned package:
 
 1. Update the package version in `Cargo.toml`.
 2. Create an annotated tag with the same version, for example
-   `git tag -a v0.1.4 -m "AI Usage Bar v0.1.4"`.
-3. Push the tag with `git push origin v0.1.4`.
+   `git tag -a v0.1.5 -m "AI Usage Bar v0.1.5"`.
+3. Push the tag with `git push origin v0.1.5`.
 
 The workflow accepts only `vX.Y.Z` tags and refuses to publish when the tag
 does not exactly match `Cargo.toml`. It builds both Windows entrypoints with
