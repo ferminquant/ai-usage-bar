@@ -1959,26 +1959,36 @@ mod windows_shell {
             let resolved_view = app_state_ref(hwnd)
                 .map(|state| state.config.resolved_view(&all_providers))
                 .unwrap_or_default();
-            if !all_providers.is_empty() {
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
-                for (index, provider) in all_providers
-                    .iter()
-                    .take(MENU_VISIBLE_PROVIDER_MAX)
-                    .enumerate()
-                {
-                    let flags = if !resolved_view.is_provider_hidden(provider) {
-                        MF_STRING | MF_CHECKED
-                    } else {
-                        MF_STRING
-                    };
-                    let label = format!("Show {}", provider_display_name(provider));
-                    visibility_labels.push(to_wide(&label));
-                    let _ = AppendMenuW(
-                        menu,
-                        flags,
-                        MENU_VISIBLE_PROVIDER_BASE + index,
-                        PCWSTR(visibility_labels.last().unwrap().as_ptr()),
-                    );
+
+            // All visibility controls live in one top-level "Show/hide"
+            // submenu. Command IDs and checked state are unchanged, so the
+            // dispatch, persistence, fallback, and restore behavior is
+            // identical to the previous flat layout.
+            let submenu = CreatePopupMenu().ok();
+            if let Some(submenu) = submenu.as_ref() {
+                if !all_providers.is_empty() {
+                    if GetMenuItemCount(Some(*submenu)) > 0 {
+                        let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                    }
+                    for (index, provider) in all_providers
+                        .iter()
+                        .take(MENU_VISIBLE_PROVIDER_MAX)
+                        .enumerate()
+                    {
+                        let flags = if !resolved_view.is_provider_hidden(provider) {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        let label = format!("Show {}", provider_display_name(provider));
+                        visibility_labels.push(to_wide(&label));
+                        let _ = AppendMenuW(
+                            *submenu,
+                            flags,
+                            MENU_VISIBLE_PROVIDER_BASE + index,
+                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                        );
+                    }
                 }
             }
 
@@ -2054,10 +2064,12 @@ mod windows_shell {
                 }
             }
 
-            if let Some(provider) = focused.as_ref() {
+            if let (Some(submenu), Some(provider)) = (submenu.as_ref(), focused.as_ref()) {
                 let visible_windows = resolved_view.windows_for(provider);
                 if !available_windows.is_empty() {
-                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                    if GetMenuItemCount(Some(*submenu)) > 0 {
+                        let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                    }
                     for (index, window) in available_windows
                         .iter()
                         .take(MENU_VISIBLE_WINDOW_MAX)
@@ -2074,7 +2086,7 @@ mod windows_shell {
                         let label = format!("Show {}", window_display_name(provider, window));
                         visibility_labels.push(to_wide(&label));
                         let _ = AppendMenuW(
-                            menu,
+                            *submenu,
                             flags,
                             MENU_VISIBLE_WINDOW_BASE + index,
                             PCWSTR(visibility_labels.last().unwrap().as_ptr()),
@@ -2087,7 +2099,9 @@ mod windows_shell {
                     .unwrap_or_default();
                 let visible_metrics = resolved_view.metrics_for(provider);
                 if !available_metrics.is_empty() {
-                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+                    if GetMenuItemCount(Some(*submenu)) > 0 {
+                        let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                    }
                     for (index, metric) in available_metrics
                         .iter()
                         .take(MENU_VISIBLE_METRIC_MAX)
@@ -2104,7 +2118,7 @@ mod windows_shell {
                         let label = format!("Show {}", metric_display_name(*metric));
                         visibility_labels.push(to_wide(&label));
                         let _ = AppendMenuW(
-                            menu,
+                            *submenu,
                             flags,
                             MENU_VISIBLE_METRIC_BASE + index,
                             PCWSTR(visibility_labels.last().unwrap().as_ptr()),
@@ -2112,6 +2126,26 @@ mod windows_shell {
                     }
                 }
             }
+
+            // Attach the submenu only when it holds at least one control. If
+            // attaching it fails, destroy the unattached popup immediately;
+            // the parent menu can only clean up submenus it owns.
+            let _ = submenu.and_then(|handle| {
+                if GetMenuItemCount(Some(handle)) <= 0 {
+                    let _ = DestroyMenu(handle);
+                    return None;
+                }
+
+                let separator_added = AppendMenuW(menu, MF_SEPARATOR, 0, w!("")).is_ok();
+                let attached = separator_added
+                    && AppendMenuW(menu, MF_POPUP, handle.0 as usize, w!("Show/hide")).is_ok();
+                if attached {
+                    Some(handle)
+                } else {
+                    let _ = DestroyMenu(handle);
+                    None
+                }
+            });
 
             let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
             let kimi_focused = focused.as_ref() == Some(&Provider::Kimi);
