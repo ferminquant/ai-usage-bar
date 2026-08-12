@@ -298,6 +298,22 @@ try {
     }
     $summary.checks.upgrade_preserves_config = "passed"
 
+    # Simulate the shell's right-click "Run on Windows startup" toggle and
+    # verify a later upgrade does not silently re-enable the user's choice.
+    Remove-ItemProperty -LiteralPath $runKey -Name $startupValueName -ErrorAction Stop
+    Invoke-PackageScript -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
+    }
+    $disabledUpgradeStartup = Get-RunValue -Name $startupValueName
+    $disabledUpgradeState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
+        ConvertFrom-Json
+    if ($null -ne $disabledUpgradeStartup -or $null -ne $disabledUpgradeState.startup_value_name) {
+        throw "Upgrade re-enabled a startup registration that the user disabled"
+    }
+    $summary.checks.upgrade_preserves_disabled_startup = "passed"
+
     Invoke-PackageScript -ScriptPath $uninstallScript -Parameters @{
         InstallRoot = $installRoot
         StartupValueName = $startupValueName

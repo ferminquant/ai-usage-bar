@@ -97,6 +97,14 @@ daemon executable to install. The package therefore starts one shell process,
 which contains the local refresh/cache lifecycle already covered by the Rust
 tests.
 
+The shell's right-click menu includes **Run on Windows startup**. It toggles
+the same per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+entry used by the installer and shows a checkmark when the current shell is
+registered. Disabling it removes only an entry that points to this shell. A
+conflicting entry is left untouched and reported as an error. Upgrades
+preserve a disabled startup preference; a first install enables startup by
+default unless `-SkipStartup` is supplied.
+
 ## Verify and install a published release
 
 Published releases remain manual. They may be Authenticode-signed or explicitly

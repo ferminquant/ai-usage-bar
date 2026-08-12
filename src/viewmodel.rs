@@ -251,7 +251,9 @@ fn is_compact_candidate(s: &UsageSnapshot) -> bool {
         MetricKind::Quota | MetricKind::Credits | MetricKind::Requests
     ) && s.unit == "percent"
         && match s.provider {
-            Provider::OllamaCloud => matches!(s.window_label.as_deref(), Some("session" | "weekly")),
+            Provider::OllamaCloud => {
+                matches!(s.window_label.as_deref(), Some("session" | "weekly"))
+            }
             Provider::Kimi => matches!(
                 s.window_label.as_deref(),
                 Some("5-hour" | "weekly" | "primary")
@@ -380,9 +382,9 @@ pub fn build_tray_view_focused_window(
     let primary = focus
         .and_then(|wanted| {
             focus_window.and_then(|window| {
-                snapshots.iter().find(|s| {
-                    is_window_candidate(s, window) && &s.provider == wanted
-                })
+                snapshots
+                    .iter()
+                    .find(|s| is_window_candidate(s, window) && &s.provider == wanted)
             })
         })
         .or_else(|| first_compact_candidate(snapshots, focus))

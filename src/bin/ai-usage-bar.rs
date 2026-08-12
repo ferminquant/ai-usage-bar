@@ -58,7 +58,10 @@ fn print_provider(name: &str, snapshots: &[UsageSnapshot]) {
             .as_deref()
             .map(redact_sensitive_text)
             .unwrap_or_else(|| "—".to_string());
-        let used = s.used.map(|u| format!("{u:.0}")).unwrap_or_else(|| "—".into());
+        let used = s
+            .used
+            .map(|u| format!("{u:.0}"))
+            .unwrap_or_else(|| "—".into());
         let limit = s
             .limit
             .map(|l| format!("{l:.0}"))

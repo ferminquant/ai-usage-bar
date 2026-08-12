@@ -21,7 +21,9 @@ mod tests {
         assert!(is_allowed_browser_url(OLLAMA_USAGE_URL));
         assert!(is_allowed_browser_url(KIMI_CONSOLE_URL));
         assert!(!is_allowed_browser_url("http://ollama.com/settings"));
-        assert!(!is_allowed_browser_url("https://ollama.com/settings?token=secret"));
+        assert!(!is_allowed_browser_url(
+            "https://ollama.com/settings?token=secret"
+        ));
         assert!(!is_allowed_browser_url("https://evil.example/"));
     }
 }

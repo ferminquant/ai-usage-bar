@@ -243,13 +243,14 @@ pub fn parse_rate_limits_response(
     let snapshots = if let Some(by_id) = resp.rate_limits_by_limit_id {
         let mut all = Vec::new();
         for (_id, snap) in by_id {
-            all.extend(parse_snapshot(&snap, account_id, observed_at)
-                .map_err(CodexAdapterError::SchemaDrift)?);
+            all.extend(
+                parse_snapshot(&snap, account_id, observed_at)
+                    .map_err(CodexAdapterError::SchemaDrift)?,
+            );
         }
         all
     } else if let Some(snap) = resp.rate_limits {
-        parse_snapshot(&snap, account_id, observed_at)
-            .map_err(CodexAdapterError::SchemaDrift)?
+        parse_snapshot(&snap, account_id, observed_at).map_err(CodexAdapterError::SchemaDrift)?
     } else {
         return Err(CodexAdapterError::SchemaDrift(
             "no rateLimits or rateLimitsByLimitId".to_string(),
@@ -334,9 +335,9 @@ impl JsonRpcRequest {
 fn find_codex_binary() -> Result<String, CodexAdapterError> {
     let candidates = [
         std::env::var("CODEX_BIN").ok(),
-        std::env::var("LOCALAPPDATA").ok().map(|d| {
-            format!("{d}\\OpenAI\\Codex\\bin\\codex.exe")
-        }),
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|d| format!("{d}\\OpenAI\\Codex\\bin\\codex.exe")),
     ];
     for candidate in candidates.into_iter().flatten() {
         if std::path::Path::new(&candidate).exists() {
@@ -373,7 +374,9 @@ fn read_response(
             .read_line(&mut buf)
             .map_err(|e| CodexAdapterError::Io(e.to_string()))?;
         if n == 0 {
-            return Err(CodexAdapterError::Io("app-server closed stdout".to_string()));
+            return Err(CodexAdapterError::Io(
+                "app-server closed stdout".to_string(),
+            ));
         }
         let trimmed = buf.trim();
         if trimmed.is_empty() {
@@ -385,11 +388,12 @@ fn read_response(
         };
         if msg.get("id").and_then(|i| i.as_str()) == Some(expected_id) {
             if let Some(err) = msg.get("error") {
-                return Err(CodexAdapterError::SchemaDrift(
-                    err.to_string(),
-                ));
+                return Err(CodexAdapterError::SchemaDrift(err.to_string()));
             }
-            return Ok(msg.get("result").cloned().unwrap_or(serde_json::Value::Null));
+            return Ok(msg
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
         }
     }
 }
@@ -494,7 +498,10 @@ mod tests {
         let account_id = "codex-deadbeef";
         let snaps = parse_rate_limits_response(&raw, fixture_time(), account_id).unwrap();
         assert!(!snaps.is_empty());
-        let primary = snaps.iter().find(|s| s.window_label == Some("primary".into())).unwrap();
+        let primary = snaps
+            .iter()
+            .find(|s| s.window_label == Some("primary".into()))
+            .unwrap();
         assert_eq!(primary.provider, Provider::Codex);
         assert_eq!(primary.metric_kind, MetricKind::Quota);
         assert_eq!(primary.window_kind, WindowKind::Weekly);
@@ -504,7 +511,10 @@ mod tests {
         assert_eq!(primary.unit, "percent");
         assert_eq!(primary.freshness, Freshness::Live);
         assert_eq!(primary.resets_at, Some(epoch_to_datetime(1786036566)));
-        let credits = snaps.iter().find(|s| s.metric_kind == MetricKind::Credits).unwrap();
+        let credits = snaps
+            .iter()
+            .find(|s| s.metric_kind == MetricKind::Credits)
+            .unwrap();
         assert_eq!(credits.unlimited, false);
         assert_eq!(credits.used, Some(0.0));
     }
@@ -513,8 +523,14 @@ mod tests {
     fn parse_multiple_windows_fixture() {
         let raw = load_fixture("multiple_windows.json");
         let snaps = parse_rate_limits_response(&raw, fixture_time(), "codex-test").unwrap();
-        let primary = snaps.iter().find(|s| s.window_label == Some("primary".into())).unwrap();
-        let secondary = snaps.iter().find(|s| s.window_label == Some("secondary".into())).unwrap();
+        let primary = snaps
+            .iter()
+            .find(|s| s.window_label == Some("primary".into()))
+            .unwrap();
+        let secondary = snaps
+            .iter()
+            .find(|s| s.window_label == Some("secondary".into()))
+            .unwrap();
         assert_eq!(primary.used, Some(65.0));
         assert_eq!(primary.window_kind, WindowKind::Weekly);
         assert_eq!(secondary.used, Some(80.0));
@@ -525,7 +541,10 @@ mod tests {
     fn parse_unlimited_credits_fixture() {
         let raw = load_fixture("unlimited_or_missing.json");
         let snaps = parse_rate_limits_response(&raw, fixture_time(), "codex-test").unwrap();
-        let credits = snaps.iter().find(|s| s.metric_kind == MetricKind::Credits).unwrap();
+        let credits = snaps
+            .iter()
+            .find(|s| s.metric_kind == MetricKind::Credits)
+            .unwrap();
         assert!(credits.unlimited);
         assert_eq!(credits.used, None);
     }
@@ -603,10 +622,9 @@ mod tests {
 
     #[test]
     fn adapter_error_drops_raw_subprocess_text() {
-        let error: AdapterError = CodexAdapterError::Io(
-            "Authorization: Bearer short-token and parser payload".into(),
-        )
-        .into();
+        let error: AdapterError =
+            CodexAdapterError::Io("Authorization: Bearer short-token and parser payload".into())
+                .into();
 
         assert_eq!(error.code, ErrorCode::Network);
         assert_eq!(error.message, None);
@@ -624,7 +642,10 @@ mod tests {
             }
         });
         let snaps = parse_rate_limits_response(&raw, fixture_time(), "codex-test").unwrap();
-        let primary = snaps.iter().find(|s| s.window_label == Some("primary".into())).unwrap();
+        let primary = snaps
+            .iter()
+            .find(|s| s.window_label == Some("primary".into()))
+            .unwrap();
         assert_eq!(primary.used, Some(100.0));
         assert_eq!(primary.remaining, Some(0.0));
     }

@@ -28,7 +28,8 @@ Typical interactions:
 - **Click** the pill to cycle the focused provider.
 - **Hover** to see live, cached, stale, unavailable, and not-configured states.
 - **Right-click** to choose a provider or quota window, refresh, copy details,
-  open a provider's usage page, or edit OpenCode reset anchors.
+  open a provider's usage page, edit OpenCode reset anchors, or enable/disable
+  running automatically when Windows starts.
 
 ## Supported providers
 

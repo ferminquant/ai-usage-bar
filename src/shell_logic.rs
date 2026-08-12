@@ -51,11 +51,7 @@ pub(crate) fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
             };
             lines.push(format!(
                 "  [{}] {:?} {} — {}, resets {}",
-                metric.label,
-                metric.metric_kind,
-                metric.window_kind,
-                value,
-                resets
+                metric.label, metric.metric_kind, metric.window_kind, value, resets
             ));
             lines.push(format!("    observed: {}", metric.observed_at));
             lines.push(format!(
@@ -78,8 +74,7 @@ pub(crate) fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
 mod tests {
     use super::*;
     use ai_usage_bar::{
-        Confidence, ErrorCode, Freshness, MetricKind, Provider, Source, UsageSnapshot,
-        WindowKind,
+        Confidence, ErrorCode, Freshness, MetricKind, Provider, Source, UsageSnapshot, WindowKind,
     };
     use chrono::Utc;
 

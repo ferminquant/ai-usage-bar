@@ -12,10 +12,10 @@ fn main() {
 #[cfg(windows)]
 mod windows_shell {
     use ai_usage_bar::{
-        build_registry, build_tray_view_focused_window, default_config_path, provider_display_name,
-        window_display_name, is_allowed_browser_url, AppConfig, KIMI_CONSOLE_URL,
-        OLLAMA_USAGE_URL, OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService,
-        UsageSnapshot,
+        build_registry, build_tray_view_focused_window, default_config_path,
+        is_allowed_browser_url, provider_display_name, window_display_name, AppConfig,
+        OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService, UsageSnapshot,
+        KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
     };
     use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
@@ -25,17 +25,15 @@ mod windows_shell {
     use std::sync::{Arc, Once};
     use std::thread;
 
-    use super::shell_logic::{
-        normalize_used_percent, render_detail_text, usage_band, UsageBand,
-    };
+    use super::shell_logic::{normalize_used_percent, render_detail_text, usage_band, UsageBand};
 
     use windows::core::*;
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Controls::*;
     use windows::Win32::UI::HiDpi::*;
@@ -62,6 +60,7 @@ mod windows_shell {
     const MENU_OPEN_OLLAMA_USAGE: usize = 1004;
     const MENU_OPEN_KIMI_CONSOLE: usize = 1005;
     const MENU_CONFIG_OPENCODE_RESETS: usize = 1006;
+    const MENU_TOGGLE_STARTUP: usize = 1007;
     /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
     const MENU_SHOW_PROVIDER_BASE: usize = 1100;
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
@@ -280,12 +279,7 @@ mod windows_shell {
         }
     }
 
-    fn paint_widget(
-        hwnd: HWND,
-        used_percent: Option<f64>,
-        refreshing: bool,
-        status: Option<&str>,
-    ) {
+    fn paint_widget(hwnd: HWND, used_percent: Option<f64>, refreshing: bool, status: Option<&str>) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
@@ -610,7 +604,8 @@ mod windows_shell {
             let text_w = (text_rect.right - text_rect.left).max(1);
             let text_h = (text_rect.bottom - text_rect.top).max(1);
             (
-                (text_w + TOOLTIP_CHROME_PAD_X).clamp(40, TOOLTIP_MAX_WIDTH_PX + TOOLTIP_CHROME_PAD_X),
+                (text_w + TOOLTIP_CHROME_PAD_X)
+                    .clamp(40, TOOLTIP_MAX_WIDTH_PX + TOOLTIP_CHROME_PAD_X),
                 text_h + TOOLTIP_CHROME_PAD_Y,
             )
         }
@@ -633,11 +628,7 @@ mod windows_shell {
     }
 
     /// Compute top-left track point so the tip box never intersects the pill.
-    fn tooltip_origin_clear_of_pill(
-        widget_rect: RECT,
-        tip_w: i32,
-        tip_h: i32,
-    ) -> (i32, i32) {
+    fn tooltip_origin_clear_of_pill(widget_rect: RECT, tip_w: i32, tip_h: i32) -> (i32, i32) {
         let gap = TOOLTIP_PILL_GAP_PX;
         // Prefer fully above: tip.bottom + gap == widget.top
         let above_y = widget_rect.top - tip_h - gap;
@@ -899,6 +890,41 @@ mod windows_shell {
         }
     }
 
+    fn toggle_startup_registration(hwnd: HWND) {
+        let enabled = match ai_usage_bar::startup::auto_start_enabled() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                eprintln!("could not read startup registration: {error}");
+                if let Some(state) = app_state(hwnd) {
+                    set_status(hwnd, state, "Could not read startup setting");
+                }
+                return;
+            }
+        };
+        let next_enabled = !enabled;
+        match ai_usage_bar::startup::set_auto_start_enabled(next_enabled) {
+            Ok(()) => {
+                if let Some(state) = app_state(hwnd) {
+                    set_status(
+                        hwnd,
+                        state,
+                        if next_enabled {
+                            "Run on Windows startup enabled"
+                        } else {
+                            "Run on Windows startup disabled"
+                        },
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("could not update startup registration: {error}");
+                if let Some(state) = app_state(hwnd) {
+                    set_status(hwnd, state, "Could not update startup setting");
+                }
+            }
+        }
+    }
+
     fn begin_refresh(hwnd: HWND) {
         let Some(state) = app_state(hwnd) else {
             return;
@@ -1044,15 +1070,13 @@ mod windows_shell {
             return;
         }
         let current = state.focus_provider.clone();
-        let next = match current.as_ref().and_then(|c| {
-            state
-                .switchable_providers
-                .iter()
-                .position(|p| p == c)
-        }) {
-            Some(idx) => state.switchable_providers
-                [(idx + 1) % state.switchable_providers.len()]
-            .clone(),
+        let next = match current
+            .as_ref()
+            .and_then(|c| state.switchable_providers.iter().position(|p| p == c))
+        {
+            Some(idx) => {
+                state.switchable_providers[(idx + 1) % state.switchable_providers.len()].clone()
+            }
             None => state.switchable_providers[0].clone(),
         };
         set_focus_provider(hwnd, next);
@@ -1079,10 +1103,7 @@ mod windows_shell {
         let Some(value) = value else {
             return String::new();
         };
-        let total_minutes = value
-            .signed_duration_since(now)
-            .num_minutes()
-            .max(0);
+        let total_minutes = value.signed_duration_since(now).num_minutes().max(0);
         let days = total_minutes / (24 * 60);
         let hours = (total_minutes / 60) % 24;
         let minutes = total_minutes % 60;
@@ -1113,8 +1134,7 @@ mod windows_shell {
         let mut total_seconds = 0_i64;
         for pair in tokens.chunks_exact(2) {
             let amount = pair[0].parse::<i64>().map_err(|_| {
-                "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\""
-                    .to_string()
+                "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\"".to_string()
             })?;
             if amount < 0 {
                 return Err("Countdown values cannot be negative".to_string());
@@ -1125,8 +1145,7 @@ mod windows_shell {
                 "minute" | "minutes" => 60,
                 _ => {
                     return Err(
-                        "Use days, hours, and minutes, for example \"2 days 10 hours\""
-                            .to_string(),
+                        "Use days, hours, and minutes, for example \"2 days 10 hours\"".to_string(),
                     )
                 }
             };
@@ -1172,7 +1191,10 @@ mod windows_shell {
             .from_local_datetime(&local)
             .single()
             .map(|instant| Some(instant.with_timezone(&Utc)))
-            .ok_or_else(|| "That local time is ambiguous or invalid because of a daylight-saving transition".to_string())
+            .ok_or_else(|| {
+                "That local time is ambiguous or invalid because of a daylight-saving transition"
+                    .to_string()
+            })
     }
 
     fn window_text(hwnd: HWND) -> String {
@@ -1300,10 +1322,15 @@ mod windows_shell {
         }
     }
 
-    fn run_opencode_reset_dialog(parent: HWND, settings: OpenCodeResetSettings) -> Option<OpenCodeResetSettings> {
+    fn run_opencode_reset_dialog(
+        parent: HWND,
+        settings: OpenCodeResetSettings,
+    ) -> Option<OpenCodeResetSettings> {
         static REGISTER_CLASS: Once = Once::new();
         unsafe {
-            let hinst = GetModuleHandleW(None).ok().map(|module| HINSTANCE(module.0))?;
+            let hinst = GetModuleHandleW(None)
+                .ok()
+                .map(|module| HINSTANCE(module.0))?;
             REGISTER_CLASS.call_once(|| {
                 let class = WNDCLASSW {
                     lpfnWndProc: Some(reset_dialog_wnd_proc),
@@ -1348,7 +1375,8 @@ mod windows_shell {
             SetWindowLongPtrW(dialog, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
 
             let label_style = WS_CHILD | WS_VISIBLE;
-            let edit_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+            let edit_style =
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
             let button_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
             let now = Utc::now();
             let _ = create_reset_dialog_control(
@@ -1511,7 +1539,8 @@ mod windows_shell {
             let registry = build_registry(&config)
                 .map_err(|error| format!("could not reload providers: {error}"))?;
             state.config = config;
-            state.refresh_service = Arc::new(RefreshService::new(registry, RefreshPolicy::default()));
+            state.refresh_service =
+                Arc::new(RefreshService::new(registry, RefreshPolicy::default()));
             Ok::<(), String>(())
         })();
         match result {
@@ -1534,7 +1563,9 @@ mod windows_shell {
     }
 
     fn open_opencode_reset_dialog(hwnd: HWND) {
-        let Some(settings) = app_state_ref(hwnd).map(|state| state.config.opencode_reset_settings()) else {
+        let Some(settings) =
+            app_state_ref(hwnd).map(|state| state.config.opencode_reset_settings())
+        else {
             return;
         };
         if let Some(updated) = run_opencode_reset_dialog(hwnd, settings) {
@@ -1618,6 +1649,17 @@ mod windows_shell {
                 return;
             };
             let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("Refresh"));
+            let startup_flags = if ai_usage_bar::startup::auto_start_enabled().unwrap_or(false) {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            let _ = AppendMenuW(
+                menu,
+                startup_flags,
+                MENU_TOGGLE_STARTUP,
+                w!("Run on Windows startup"),
+            );
 
             // Keep wide strings alive until TrackPopupMenu returns.
             let mut provider_labels: Vec<Vec<u16>> = Vec::new();
@@ -1628,10 +1670,7 @@ mod windows_shell {
             let focused = app_state_ref(hwnd).and_then(|s| s.focus_provider.clone());
             if !switchable.is_empty() {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
-                for (index, provider) in switchable
-                    .iter()
-                    .take(MENU_SHOW_PROVIDER_MAX)
-                    .enumerate()
+                for (index, provider) in switchable.iter().take(MENU_SHOW_PROVIDER_MAX).enumerate()
                 {
                     let checked = focused.as_ref() == Some(provider);
                     let flags = if checked {
@@ -1802,6 +1841,7 @@ mod windows_shell {
                 MENU_OPEN_OLLAMA_USAGE => open_ollama_usage_page(hwnd),
                 MENU_OPEN_KIMI_CONSOLE => open_kimi_console(hwnd),
                 MENU_CONFIG_OPENCODE_RESETS => open_opencode_reset_dialog(hwnd),
+                MENU_TOGGLE_STARTUP => toggle_startup_registration(hwnd),
                 MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);
@@ -1815,8 +1855,7 @@ mod windows_shell {
                         set_focus_provider(hwnd, provider);
                     }
                 }
-                id if (MENU_SHOW_WINDOW_BASE
-                    ..MENU_SHOW_WINDOW_BASE + MENU_SHOW_WINDOW_MAX)
+                id if (MENU_SHOW_WINDOW_BASE..MENU_SHOW_WINDOW_BASE + MENU_SHOW_WINDOW_MAX)
                     .contains(&id) =>
                 {
                     if let Some(window) = available_windows.get(id - MENU_SHOW_WINDOW_BASE) {
@@ -1851,12 +1890,7 @@ mod windows_shell {
                         )
                     })
                     .unwrap_or((None, false, None));
-                paint_widget(
-                    hwnd,
-                    used_percent,
-                    refreshing,
-                    status.as_deref(),
-                );
+                paint_widget(hwnd, used_percent, refreshing, status.as_deref());
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -2037,10 +2071,7 @@ mod windows_shell {
                 }
             };
 
-            let refresh_service = Arc::new(RefreshService::new(
-                registry,
-                RefreshPolicy::default(),
-            ));
+            let refresh_service = Arc::new(RefreshService::new(registry, RefreshPolicy::default()));
             let state_ptr = Box::into_raw(Box::new(AppState::loading(
                 refresh_service,
                 config,

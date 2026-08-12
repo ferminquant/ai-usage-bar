@@ -514,7 +514,9 @@ fn successful_refresh(
     for snapshot in snapshots {
         if let Err(_reason) = snapshot.validate() {
             saw_schema_drift = true;
-            output.push(invalid_window_outcome(provider, &snapshot, &cache, policy, now));
+            output.push(invalid_window_outcome(
+                provider, &snapshot, &cache, policy, now,
+            ));
             continue;
         }
 
@@ -1250,11 +1252,7 @@ mod tests {
         let registry = ProviderRegistry::new();
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
-        for provider in [
-            Provider::Codex,
-            Provider::Kimi,
-            Provider::OllamaCloud,
-        ] {
+        for provider in [Provider::Codex, Provider::Kimi, Provider::OllamaCloud] {
             registry
                 .register(TrackingAdapter {
                     provider,

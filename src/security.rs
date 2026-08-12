@@ -30,9 +30,9 @@ pub fn safe_identifier(value: &str) -> String {
     let trimmed = value.trim();
     let safe = !trimmed.is_empty()
         && trimmed.len() <= 128
-        && trimmed.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        });
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
     if safe {
         trimmed.to_string()
     } else {
@@ -91,11 +91,7 @@ fn marked_value_ranges(input: &str) -> Vec<(usize, usize)> {
             }
             let is_header = matches!(
                 *marker,
-                "proxy-authorization"
-                    | "authorization"
-                    | "set-cookie"
-                    | "cookie"
-                    | "api-key"
+                "proxy-authorization" | "authorization" | "set-cookie" | "cookie" | "api-key"
             );
             cursor += 1;
             while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
@@ -204,16 +200,15 @@ fn bare_token_ranges(input: &str) -> Vec<(usize, usize)> {
 }
 
 fn has_identifier_boundaries(bytes: &[u8], start: usize, end: usize) -> bool {
-    let before_is_identifier = start > 0
-        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
-    let after_is_identifier = end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+    let before_is_identifier =
+        start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+    let after_is_identifier =
+        end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
     !before_is_identifier && !after_is_identifier
 }
 
 fn has_prefix_boundary(bytes: &[u8], start: usize) -> bool {
-    start == 0
-        || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+    start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
 }
 
 fn line_end(input: &str, start: usize) -> usize {
@@ -235,7 +230,10 @@ fn value_end(input: &str, start: usize) -> usize {
     }
     let mut end = start;
     while end < bytes.len()
-        && !matches!(bytes[end], b'\r' | b'\n' | b' ' | b'\t' | b',' | b';' | b'&' | b'#' | b'}' | b']' | b')')
+        && !matches!(
+            bytes[end],
+            b'\r' | b'\n' | b' ' | b'\t' | b',' | b';' | b'&' | b'#' | b'}' | b']' | b')'
+        )
     {
         end += 1;
     }

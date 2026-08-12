@@ -16,8 +16,7 @@ const GROK_PROVIDER: Provider = Provider::GrokConsumer;
 const GROK_SOURCE: Source = Source::Cli;
 const GROK_CONFIDENCE: Confidence = Confidence::Exact;
 
-const DEFAULT_BILLING_URL: &str =
-    "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const DEFAULT_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const DEFAULT_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const TOKEN_AUTH_HEADER: &str = "xai-grok-cli";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -405,25 +404,14 @@ fn resolve_usage_percent(config: &BillingConfig) -> Result<f64, GrokAdapterError
         .prepaid_balance
         .as_ref()
         .is_none_or(|balance| balance.val == 0);
-    let no_product_usage = config
-        .product_usage
-        .as_ref()
-        .is_none_or(Vec::is_empty);
+    let no_product_usage = config.product_usage.as_ref().is_none_or(Vec::is_empty);
     let has_valid_period = config.current_period.as_ref().is_some_and(|period| {
-        period
-            .period_type
-            .as_deref()
-            .is_some_and(|period_type| {
-                matches!(
-                    window_kind_from_period(Some(period_type)),
-                    WindowKind::Daily | WindowKind::Weekly | WindowKind::Monthly
-                )
-            })
-            && period
-                .end
-                .as_deref()
-                .and_then(parse_rfc3339)
-                .is_some()
+        period.period_type.as_deref().is_some_and(|period_type| {
+            matches!(
+                window_kind_from_period(Some(period_type)),
+                WindowKind::Daily | WindowKind::Weekly | WindowKind::Monthly
+            )
+        }) && period.end.as_deref().and_then(parse_rfc3339).is_some()
     });
     let zero_usage_period = config.credit_usage_percent.is_none()
         && config.monthly_limit.is_none()
@@ -492,7 +480,8 @@ pub fn parse_billing_response(
     match resolve_usage_percent(&config) {
         Ok(used_percent) => {
             let period = config.current_period.as_ref();
-            let window_kind = window_kind_from_period(period.and_then(|p| p.period_type.as_deref()));
+            let window_kind =
+                window_kind_from_period(period.and_then(|p| p.period_type.as_deref()));
             let resets_at = period
                 .and_then(|p| p.end.as_deref())
                 .or(config.billing_period_end.as_deref())
@@ -591,7 +580,10 @@ pub fn error_snapshot(
 // HTTP fetch
 // ---------------------------------------------------------------------------
 
-fn http_get_billing(access_token: &str, user_id: &str) -> Result<serde_json::Value, GrokAdapterError> {
+fn http_get_billing(
+    access_token: &str,
+    user_id: &str,
+) -> Result<serde_json::Value, GrokAdapterError> {
     let billing_url =
         std::env::var("GROK_BILLING_URL").unwrap_or_else(|_| DEFAULT_BILLING_URL.to_string());
     let version = std::env::var("GROK_CLIENT_VERSION").unwrap_or_else(|_| "0.1.0".into());
@@ -817,7 +809,11 @@ mod tests {
 
     #[test]
     fn error_snapshot_is_unavailable_without_message() {
-        let snap = error_snapshot("grok-consumer-test", fixture_time(), GrokAdapterError::Timeout);
+        let snap = error_snapshot(
+            "grok-consumer-test",
+            fixture_time(),
+            GrokAdapterError::Timeout,
+        );
         assert_eq!(snap.freshness, Freshness::Unavailable);
         assert!(snap.used.is_none());
         assert_eq!(snap.error.as_ref().unwrap().code, ErrorCode::Timeout);
@@ -850,10 +846,8 @@ mod tests {
     }
 
     fn tempfile_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ai-usage-bar-grok-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ai-usage-bar-grok-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

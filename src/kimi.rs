@@ -67,7 +67,10 @@ impl From<KimiAdapterError> for AdapterError {
             KimiAdapterError::RateLimited => ErrorCode::RateLimited,
         };
         // Never attach upstream bodies or tokens — redacted code only.
-        AdapterError { code, message: None }
+        AdapterError {
+            code,
+            message: None,
+        }
     }
 }
 
@@ -237,10 +240,7 @@ fn refresh_access_token(
     Err(KimiAdapterError::Network)
 }
 
-fn refresh_once(
-    token_url: &str,
-    body: &str,
-) -> Result<TokenRefreshResponse, KimiAdapterError> {
+fn refresh_once(token_url: &str, body: &str) -> Result<TokenRefreshResponse, KimiAdapterError> {
     let response = ureq::post(token_url)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("Accept", "application/json")
@@ -401,7 +401,10 @@ fn simple_hash(bytes: &[u8]) -> u64 {
 /// Stable redacted account id derived from the local credential path; never
 /// exposes the username or path. Stable across token refreshes.
 pub fn account_id_from_credential_path(path: &Path) -> String {
-    format!("kimi-{:016x}", simple_hash(path.to_string_lossy().as_bytes()))
+    format!(
+        "kimi-{:016x}",
+        simple_hash(path.to_string_lossy().as_bytes())
+    )
 }
 
 fn parse_decimal(value: Option<&serde_json::Value>) -> Option<f64> {
@@ -1051,8 +1054,12 @@ mod tests {
         assert!(snapshots
             .iter()
             .all(|snapshot| snapshot.window_label.as_deref() != Some(TOTAL_LABEL)));
-        assert!(snapshots.iter().any(|snapshot| snapshot.window_kind == WindowKind::Rolling));
-        assert!(snapshots.iter().any(|snapshot| snapshot.window_kind == WindowKind::Weekly));
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.window_kind == WindowKind::Rolling));
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.window_kind == WindowKind::Weekly));
     }
 
     #[test]
@@ -1068,11 +1075,9 @@ mod tests {
     fn wallet_absent_means_no_credits_snapshot() {
         let raw = load_fixture("multiple_windows.json");
         let snapshots = parse_usages_response(&raw, fixture_time(), "kimi-test").unwrap();
-        assert!(
-            snapshots
-                .iter()
-                .all(|snapshot| snapshot.metric_kind != MetricKind::Credits)
-        );
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| snapshot.metric_kind != MetricKind::Credits));
     }
 
     #[test]

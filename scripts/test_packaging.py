@@ -20,6 +20,7 @@ class PackagingContractTests(unittest.TestCase):
         cls.install = (PACKAGING / "install.ps1").read_text(encoding="utf-8")
         cls.uninstall = (PACKAGING / "uninstall.ps1").read_text(encoding="utf-8")
         cls.smoke = (PACKAGING / "smoke-test.ps1").read_text(encoding="utf-8")
+        cls.shell = (ROOT / "src" / "bin" / "shell.rs").read_text(encoding="utf-8")
         cls.workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
@@ -53,6 +54,14 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("$installSucceeded", self.install)
         self.assertIn("APPDATA", self.install)
         self.assertIn("provider_data_is_outside_install_root", self.install)
+        self.assertIn("$existingInstallation", self.install)
+        self.assertIn("$preserveStartupDisabled", self.install)
+        self.assertIn("preserved disabled preference", self.install)
+
+    def test_shell_menu_exposes_startup_toggle(self):
+        self.assertIn("MENU_TOGGLE_STARTUP", self.shell)
+        self.assertIn("Run on Windows startup", self.shell)
+        self.assertIn("set_auto_start_enabled", self.shell)
 
     def test_uninstaller_requires_marker_and_does_not_remove_config(self):
         self.assertIn("package-manifest.json", self.uninstall)
@@ -70,6 +79,7 @@ class PackagingContractTests(unittest.TestCase):
             "shell.stderr.log",
             "config_path_is_read",
             "upgrade_preserves_config",
+            "upgrade_preserves_disabled_startup",
             "uninstall_preserves_user_data",
             "startup_value_name",
             "rollback_recovery",
