@@ -13,10 +13,10 @@ fn main() {
 mod windows_shell {
     use ai_usage_bar::{
         build_registry, build_tray_view_focused_window, default_config_path,
-        filter_snapshots_for_view, is_allowed_browser_url, provider_display_name,
-        switchable_providers_for_snapshots, window_display_name, AppConfig, MetricKind,
-        OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService, ResolvedView,
-        UsageSnapshot, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
+        filter_snapshots_for_view, format_reset_label, is_allowed_browser_url,
+        provider_display_name, switchable_providers_for_snapshots, window_display_name, AppConfig,
+        Freshness, MetricKind, OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService,
+        ResolvedView, UsageSnapshot, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
     };
     use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
@@ -1911,6 +1911,781 @@ mod windows_shell {
         }
     }
 
+    const CONTROL_PANEL_CLASS: PCWSTR = w!("AIUsageBarControlPanel");
+    const PANEL_CARD_WIDTH: i32 = 360;
+    const PANEL_MARGIN: i32 = 16;
+    const PANEL_GAP: i32 = 12;
+    const PANEL_ROW_HEIGHT: i32 = 30;
+    const PANEL_HEADER_HEIGHT: i32 = 56;
+    const PANEL_CARD_PADDING: i32 = 12;
+
+    #[derive(Clone)]
+    enum PanelAction {
+        None,
+        FocusProvider(Provider),
+        ToggleProvider(Provider),
+        ToggleWindow(Provider, String),
+        ToggleMetric(Provider, MetricKind),
+        Refresh,
+        ToggleStartup,
+        More,
+    }
+
+    struct PanelRow {
+        rect: RECT,
+        label: String,
+        value: String,
+        checked: bool,
+        toggleable: bool,
+        action: PanelAction,
+    }
+
+    struct PanelCard {
+        rect: RECT,
+        provider: Provider,
+        title: String,
+        visible: bool,
+        focused: bool,
+        eye_rect: RECT,
+        rows: Vec<PanelRow>,
+    }
+
+    struct PanelButton {
+        rect: RECT,
+        label: String,
+        action: PanelAction,
+    }
+
+    struct PanelLayout {
+        width: i32,
+        height: i32,
+        cards: Vec<PanelCard>,
+        buttons: Vec<PanelButton>,
+    }
+
+    struct PanelState {
+        layout: PanelLayout,
+        result: Option<PanelAction>,
+    }
+
+    fn rect_contains(rect: RECT, point: POINT) -> bool {
+        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+    }
+
+    fn panel_snapshot_value(snapshot: &UsageSnapshot, now: DateTime<Utc>) -> String {
+        if snapshot.unit == "percent" {
+            let remaining = snapshot
+                .remaining
+                .or_else(|| snapshot.used.map(|used| 100.0 - used));
+            let amount = remaining
+                .map(|value| format!("{:.0}% left", value.clamp(0.0, 100.0)))
+                .unwrap_or_else(|| "—".to_string());
+            let reset = snapshot
+                .resets_at
+                .map(|value| format_reset_label(Some(&value.to_rfc3339()), now))
+                .unwrap_or_else(|| "—".to_string());
+            return format!("{amount} · {reset}");
+        }
+
+        let amount = snapshot
+            .used
+            .map(|value| format!("{value:.0} {}", snapshot.unit))
+            .unwrap_or_else(|| "—".to_string());
+        if snapshot.unlimited {
+            format!("{amount} · unlimited")
+        } else {
+            amount
+        }
+    }
+
+    fn panel_providers(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
+        let mut providers = Vec::new();
+        for snapshot in snapshots {
+            if !providers.contains(&snapshot.provider) {
+                providers.push(snapshot.provider.clone());
+            }
+        }
+        providers
+    }
+
+    fn panel_status_row(snapshot: &UsageSnapshot) -> PanelRow {
+        let value = if let Some(error) = &snapshot.error {
+            error.code.as_str().replace('_', " ")
+        } else {
+            match snapshot.freshness {
+                Freshness::Unavailable => "Unavailable".to_string(),
+                Freshness::NotConfigured => "Not configured".to_string(),
+                Freshness::NotApplicable => "Not applicable".to_string(),
+                Freshness::Stale => "Stale".to_string(),
+                Freshness::Cached => "Cached".to_string(),
+                Freshness::Live => "Live".to_string(),
+            }
+        };
+        PanelRow {
+            rect: RECT::default(),
+            label: "Status".to_string(),
+            value,
+            checked: false,
+            toggleable: false,
+            action: PanelAction::None,
+        }
+    }
+
+    fn panel_card_rows(
+        snapshots: &[UsageSnapshot],
+        provider: &Provider,
+        view: &ResolvedView,
+        now: DateTime<Utc>,
+    ) -> Vec<PanelRow> {
+        let mut rows = Vec::new();
+        for window in available_windows(snapshots, provider) {
+            let snapshot = snapshots.iter().find(|candidate| {
+                &candidate.provider == provider
+                    && candidate.metric_kind == MetricKind::Quota
+                    && candidate
+                        .window_label
+                        .as_deref()
+                        .and_then(|label| canonical_window_key(provider, label))
+                        == Some(window.as_str())
+            });
+            let value = snapshot
+                .map(|snapshot| panel_snapshot_value(snapshot, now))
+                .unwrap_or_else(|| "—".to_string());
+            let checked = view
+                .windows_for(provider)
+                .map(|windows| windows.iter().any(|candidate| candidate == &window))
+                .unwrap_or(true);
+            rows.push(PanelRow {
+                rect: RECT::default(),
+                label: window_display_name(provider, &window),
+                value,
+                checked,
+                toggleable: true,
+                action: PanelAction::ToggleWindow(provider.clone(), window),
+            });
+        }
+
+        for metric in available_metrics(snapshots, provider) {
+            let snapshot = snapshots.iter().find(|candidate| {
+                &candidate.provider == provider && candidate.metric_kind == metric
+            });
+            let value = snapshot
+                .map(|snapshot| panel_snapshot_value(snapshot, now))
+                .unwrap_or_else(|| "—".to_string());
+            rows.push(PanelRow {
+                rect: RECT::default(),
+                label: metric_display_name(metric).to_string(),
+                value,
+                checked: view.is_metric_visible(provider, metric),
+                toggleable: true,
+                action: PanelAction::ToggleMetric(provider.clone(), metric),
+            });
+        }
+        if rows.is_empty() {
+            if let Some(snapshot) = snapshots.iter().find(|candidate| {
+                &candidate.provider == provider
+                    && matches!(
+                        candidate.freshness,
+                        Freshness::Unavailable
+                            | Freshness::NotConfigured
+                            | Freshness::NotApplicable
+                    )
+            }) {
+                rows.push(panel_status_row(snapshot));
+            }
+        }
+        rows
+    }
+
+    fn build_control_panel_layout(hwnd: HWND) -> Option<PanelLayout> {
+        let state = app_state_ref(hwnd)?;
+        let providers = panel_providers(&state.snapshots);
+        if providers.is_empty() {
+            return None;
+        }
+        let view = state.config.resolved_view(&providers);
+        let now = Utc::now();
+        let mut cards = Vec::new();
+        for provider in providers {
+            let rows = panel_card_rows(&state.snapshots, &provider, &view, now);
+            let card_height = PANEL_HEADER_HEIGHT
+                + (rows.len() as i32 * PANEL_ROW_HEIGHT)
+                + PANEL_CARD_PADDING * 2;
+            cards.push(PanelCard {
+                rect: RECT {
+                    left: 0,
+                    top: 0,
+                    right: PANEL_CARD_WIDTH,
+                    bottom: card_height,
+                },
+                title: provider_display_name(&provider).to_string(),
+                visible: !view.is_provider_hidden(&provider),
+                focused: state.focus_provider.as_ref() == Some(&provider),
+                eye_rect: RECT::default(),
+                provider,
+                rows,
+            });
+        }
+
+        let columns = cards.len().clamp(1, 2) as i32;
+        let rows = (cards.len() as i32 + columns - 1) / columns;
+        let width = PANEL_MARGIN * 2 + columns * PANEL_CARD_WIDTH + (columns - 1) * PANEL_GAP;
+        let mut y = PANEL_MARGIN + PANEL_HEADER_HEIGHT;
+        for row_index in 0..rows {
+            let start = (row_index * columns) as usize;
+            let end = (start + columns as usize).min(cards.len());
+            let row_height = cards[start..end]
+                .iter()
+                .map(|card| card.rect.bottom - card.rect.top)
+                .max()
+                .unwrap_or(0);
+            for (column, card) in cards[start..end].iter_mut().enumerate() {
+                let left = PANEL_MARGIN + column as i32 * (PANEL_CARD_WIDTH + PANEL_GAP);
+                let card_height = card.rect.bottom - card.rect.top;
+                card.rect.left = left;
+                card.rect.top = y;
+                card.rect.right = left + PANEL_CARD_WIDTH;
+                card.rect.bottom = y + card_height;
+                card.eye_rect = RECT {
+                    left: card.rect.right - 42,
+                    top: card.rect.top + 14,
+                    right: card.rect.right - 12,
+                    bottom: card.rect.top + 42,
+                };
+                let mut row_y = card.rect.top + PANEL_HEADER_HEIGHT;
+                for item in &mut card.rows {
+                    item.rect = RECT {
+                        left: card.rect.left + PANEL_CARD_PADDING,
+                        top: row_y,
+                        right: card.rect.right - PANEL_CARD_PADDING,
+                        bottom: row_y + PANEL_ROW_HEIGHT,
+                    };
+                    row_y += PANEL_ROW_HEIGHT;
+                }
+            }
+            y += row_height + PANEL_GAP;
+        }
+
+        let footer_top = y - PANEL_GAP + 4;
+        let footer_y = footer_top + 8;
+        let button_width = 108;
+        let mut buttons = Vec::new();
+        for (index, (label, action)) in [
+            ("Refresh", PanelAction::Refresh),
+            (
+                if ai_usage_bar::startup::auto_start_enabled().unwrap_or(false) {
+                    "Startup ✓"
+                } else {
+                    "Startup"
+                },
+                PanelAction::ToggleStartup,
+            ),
+            ("More…", PanelAction::More),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let left = PANEL_MARGIN + index as i32 * (button_width + PANEL_GAP);
+            buttons.push(PanelButton {
+                rect: RECT {
+                    left,
+                    top: footer_y,
+                    right: left + button_width,
+                    bottom: footer_y + 32,
+                },
+                label: label.to_string(),
+                action,
+            });
+        }
+
+        Some(PanelLayout {
+            width,
+            height: footer_y + 32 + PANEL_MARGIN,
+            cards,
+            buttons,
+        })
+    }
+
+    fn panel_state(hwnd: HWND) -> Option<&'static mut PanelState> {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut PanelState;
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr })
+        }
+    }
+
+    fn draw_checkbox(hdc: HDC, rect: RECT, checked: bool, enabled: bool) {
+        let color = if enabled { COLOR_MUTED } else { COLOR_BORDER };
+        stroke_round_rect(hdc, rect, 3, color);
+        if checked {
+            draw_text(
+                hdc,
+                RECT {
+                    left: rect.left,
+                    top: rect.top - 1,
+                    right: rect.right,
+                    bottom: rect.bottom + 1,
+                },
+                "✓",
+                13,
+                FW_BOLD,
+                if enabled { COLOR_GREEN } else { COLOR_NEUTRAL },
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+            );
+        }
+    }
+
+    fn paint_control_panel(hwnd: HWND) {
+        let Some(state) = panel_state(hwnd) else {
+            return;
+        };
+        unsafe {
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut paint);
+            let client = RECT {
+                left: 0,
+                top: 0,
+                right: state.layout.width,
+                bottom: state.layout.height,
+            };
+            fill_rect(hdc, client, COLOR_OUTER);
+            draw_text(
+                hdc,
+                RECT {
+                    left: PANEL_MARGIN,
+                    top: 10,
+                    right: state.layout.width - PANEL_MARGIN,
+                    bottom: 34,
+                },
+                "AI Usage",
+                17,
+                FW_BOLD,
+                COLOR_TEXT,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+            draw_text(
+                hdc,
+                RECT {
+                    left: PANEL_MARGIN,
+                    top: 34,
+                    right: state.layout.width - PANEL_MARGIN,
+                    bottom: 52,
+                },
+                "Choose the provider shown in the pill",
+                10,
+                FW_NORMAL,
+                COLOR_MUTED,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+
+            for card in &state.layout.cards {
+                let background = if card.visible {
+                    COLOR_BACKGROUND
+                } else {
+                    COLOR_OUTER
+                };
+                let border = if card.focused {
+                    COLOR_GREEN
+                } else if card.visible {
+                    COLOR_CARD_BORDER
+                } else {
+                    COLOR_BORDER
+                };
+                fill_round_rect(hdc, card.rect, 10, background);
+                stroke_round_rect(hdc, card.rect, 10, border);
+                draw_text(
+                    hdc,
+                    RECT {
+                        left: card.rect.left + PANEL_CARD_PADDING,
+                        top: card.rect.top + 12,
+                        right: card.eye_rect.left - 4,
+                        bottom: card.rect.top + 40,
+                    },
+                    &card.title,
+                    14,
+                    FW_BOLD,
+                    if card.visible {
+                        COLOR_TEXT
+                    } else {
+                        COLOR_NEUTRAL
+                    },
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+                );
+                draw_checkbox(hdc, card.eye_rect, card.visible, true);
+
+                for row in &card.rows {
+                    let text_color = if card.visible && row.checked {
+                        COLOR_TEXT
+                    } else {
+                        COLOR_NEUTRAL
+                    };
+                    draw_text(
+                        hdc,
+                        RECT {
+                            left: row.rect.left,
+                            top: row.rect.top,
+                            right: row.rect.left + 82,
+                            bottom: row.rect.bottom,
+                        },
+                        &row.label,
+                        11,
+                        FW_NORMAL,
+                        text_color,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+                    );
+                    draw_text(
+                        hdc,
+                        RECT {
+                            left: row.rect.left + 80,
+                            top: row.rect.top,
+                            right: row.rect.right - 30,
+                            bottom: row.rect.bottom,
+                        },
+                        &row.value,
+                        10,
+                        FW_NORMAL,
+                        if card.visible && row.checked {
+                            COLOR_MUTED
+                        } else {
+                            COLOR_BORDER
+                        },
+                        DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS,
+                    );
+                    if row.toggleable {
+                        draw_checkbox(
+                            hdc,
+                            RECT {
+                                left: row.rect.right - 20,
+                                top: row.rect.top + 7,
+                                right: row.rect.right - 4,
+                                bottom: row.rect.top + 23,
+                            },
+                            row.checked,
+                            card.visible,
+                        );
+                    }
+                }
+            }
+
+            for button in &state.layout.buttons {
+                fill_round_rect(hdc, button.rect, 6, COLOR_BACKGROUND);
+                stroke_round_rect(hdc, button.rect, 6, COLOR_CARD_BORDER);
+                draw_text(
+                    hdc,
+                    button.rect,
+                    &button.label,
+                    11,
+                    FW_NORMAL,
+                    COLOR_TEXT,
+                    DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+                );
+            }
+            let _ = EndPaint(hwnd, &paint);
+        }
+    }
+
+    fn panel_action_at(state: &PanelState, point: POINT) -> Option<PanelAction> {
+        for card in &state.layout.cards {
+            if rect_contains(card.eye_rect, point) {
+                return Some(PanelAction::ToggleProvider(card.provider.clone()));
+            }
+            if !rect_contains(card.rect, point) {
+                continue;
+            }
+            for row in &card.rows {
+                if rect_contains(row.rect, point) && card.visible && row.toggleable {
+                    return Some(row.action.clone());
+                }
+            }
+            return Some(if card.visible {
+                PanelAction::FocusProvider(card.provider.clone())
+            } else {
+                PanelAction::ToggleProvider(card.provider.clone())
+            });
+        }
+        state
+            .layout
+            .buttons
+            .iter()
+            .find(|button| rect_contains(button.rect, point))
+            .map(|button| button.action.clone())
+    }
+
+    unsafe extern "system" fn control_panel_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                paint_control_panel(hwnd);
+                LRESULT(0)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_MOUSEMOVE => {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    ..Default::default()
+                };
+                let _ = TrackMouseEvent(&mut tracking);
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                let point = POINT {
+                    x: (lparam.0 as i16) as i32,
+                    y: ((lparam.0 >> 16) as i16) as i32,
+                };
+                let action = panel_state(hwnd).and_then(|state| panel_action_at(state, point));
+                let has_action = action.is_some();
+                if let Some(state) = panel_state(hwnd) {
+                    state.result = action;
+                }
+                if has_action {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_KILLFOCUS => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_NCDESTROY => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    fn show_more_menu(hwnd: HWND) {
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                return;
+            };
+            let focused = app_state_ref(hwnd).and_then(|state| state.focus_provider.clone());
+            let has_provider_action = matches!(
+                focused.as_ref(),
+                Some(&Provider::OllamaCloud) | Some(&Provider::Kimi) | Some(&Provider::OpenCodeGo)
+            );
+            if has_provider_action {
+                match focused {
+                    Some(Provider::OllamaCloud) => {
+                        let _ = AppendMenuW(
+                            menu,
+                            MF_STRING,
+                            MENU_OPEN_OLLAMA_USAGE,
+                            w!("Open usage page"),
+                        );
+                    }
+                    Some(Provider::Kimi) => {
+                        let _ = AppendMenuW(
+                            menu,
+                            MF_STRING,
+                            MENU_OPEN_KIMI_CONSOLE,
+                            w!("Open console"),
+                        );
+                    }
+                    Some(Provider::OpenCodeGo) => {
+                        let _ = AppendMenuW(
+                            menu,
+                            MF_STRING,
+                            MENU_CONFIG_OPENCODE_RESETS,
+                            w!("Configure reset times…"),
+                        );
+                    }
+                    _ => {}
+                }
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
+            }
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                MENU_COPY_DETAILS,
+                w!("Copy details to clipboard"),
+            );
+            let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
+            let mut widget_rect = RECT::default();
+            let (x, y) = if GetWindowRect(hwnd, &mut widget_rect).is_ok() {
+                (widget_rect.left, widget_rect.top - 2)
+            } else {
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                (point.x, point.y)
+            };
+            let _ = SetForegroundWindow(hwnd);
+            let command = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+                x,
+                y,
+                Some(0),
+                hwnd,
+                None,
+            )
+            .0 as usize;
+            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(menu);
+            match command {
+                MENU_OPEN_OLLAMA_USAGE => open_ollama_usage_page(hwnd),
+                MENU_OPEN_KIMI_CONSOLE => open_kimi_console(hwnd),
+                MENU_CONFIG_OPENCODE_RESETS => open_opencode_reset_dialog(hwnd),
+                MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
+                MENU_QUIT => {
+                    let _ = DestroyWindow(hwnd);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn dispatch_panel_action(hwnd: HWND, action: PanelAction) {
+        match action {
+            PanelAction::FocusProvider(provider) => set_focus_provider(hwnd, provider),
+            PanelAction::None => {}
+            PanelAction::ToggleProvider(provider) => toggle_provider_visibility(hwnd, provider),
+            PanelAction::ToggleWindow(provider, window) => {
+                toggle_window_visibility(hwnd, provider, window)
+            }
+            PanelAction::ToggleMetric(provider, metric) => {
+                toggle_metric_visibility(hwnd, provider, metric)
+            }
+            PanelAction::Refresh => begin_refresh(hwnd),
+            PanelAction::ToggleStartup => toggle_startup_registration(hwnd),
+            PanelAction::More => show_more_menu(hwnd),
+        }
+    }
+
+    fn show_control_panel(hwnd: HWND) -> bool {
+        if let Some(state) = app_state(hwnd) {
+            set_tooltip_visible(hwnd, state, false);
+        }
+        let Some(layout) = build_control_panel_layout(hwnd) else {
+            return false;
+        };
+
+        unsafe {
+            let hinst = match GetModuleHandleW(None) {
+                Ok(module) => HINSTANCE(module.0),
+                Err(_) => return false,
+            };
+            static REGISTER_CLASS: Once = Once::new();
+            REGISTER_CLASS.call_once(|| {
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(control_panel_wnd_proc),
+                    hInstance: hinst,
+                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    lpszClassName: CONTROL_PANEL_CLASS,
+                    style: CS_HREDRAW | CS_VREDRAW,
+                    ..Default::default()
+                };
+                let _ = RegisterClassW(&class);
+            });
+
+            let mut widget_rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut widget_rect);
+            let (_, work) = panel_monitor_work_area(hwnd).unwrap_or((
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+            ));
+            let mut x = widget_rect.left;
+            let mut y = widget_rect.top - layout.height - 8;
+            if y < work.top {
+                y = widget_rect.bottom + 8;
+            }
+            x = x.clamp(work.left, (work.right - layout.width).max(work.left));
+            y = y.clamp(work.top, (work.bottom - layout.height).max(work.top));
+
+            let mut state = Box::new(PanelState {
+                layout,
+                result: None,
+            });
+            let state_ptr = (&mut *state) as *mut PanelState;
+            let panel = match CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                CONTROL_PANEL_CLASS,
+                w!("AI Usage"),
+                WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
+                x,
+                y,
+                state.layout.width,
+                state.layout.height,
+                Some(hwnd),
+                None,
+                Some(hinst),
+                None,
+            ) {
+                Ok(panel) => panel,
+                Err(_) => return false,
+            };
+            SetWindowLongPtrW(panel, GWLP_USERDATA, state_ptr as isize);
+            let _ = SetWindowPos(
+                panel,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                state.layout.width,
+                state.layout.height,
+                SWP_SHOWWINDOW,
+            );
+            let _ = SetForegroundWindow(panel);
+            let _ = SetFocus(Some(panel));
+
+            let mut message = MSG::default();
+            while IsWindow(Some(panel)).as_bool() {
+                let result = GetMessageW(&mut message, None, 0, 0);
+                if result.0 <= 0 {
+                    if result.0 == 0 {
+                        PostQuitMessage(message.wParam.0 as i32);
+                    }
+                    break;
+                }
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            let action = state.result.take();
+            drop(state);
+            if let Some(action) = action {
+                dispatch_panel_action(hwnd, action);
+            }
+            true
+        }
+    }
+
+    fn panel_monitor_work_area(hwnd: HWND) -> Option<(RECT, RECT)> {
+        unsafe {
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if monitor.0.is_null() {
+                return None;
+            }
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return None;
+            }
+            Some((info.rcMonitor, info.rcWork))
+        }
+    }
+
     fn show_context_menu(hwnd: HWND) {
         // Dismiss hover tip first so the menu is not stacked under/over it.
         if let Some(state) = app_state(hwnd) {
@@ -2384,7 +3159,9 @@ mod windows_shell {
             }
             WM_RBUTTONUP => {
                 // Swallow further mouse-move tip until the menu is done.
-                show_context_menu(hwnd);
+                if !show_control_panel(hwnd) {
+                    show_context_menu(hwnd);
+                }
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == REFRESH_TIMER_ID => {
