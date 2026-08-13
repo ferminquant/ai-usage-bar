@@ -218,11 +218,12 @@ pub fn snapshot_window_key(snapshot: &UsageSnapshot) -> Option<&'static str> {
 
 /// Filter snapshots down to those exposed by resolved display preferences.
 ///
-/// Hides providers listed in [`ResolvedView::hidden_providers`], restricts each
-/// provider to its `visible_windows` and `visible_metrics`. An absent per-
-/// provider preference keeps every reported row; an explicit empty list hides
-/// all rows of that kind. This never touches provider `enabled`, so scheduling
-/// stays independent of display visibility.
+/// Hides providers listed in [`ResolvedView::hidden_providers`], restricts
+/// quota rows to each provider's `visible_windows`, and applies optional
+/// metric preferences. An absent per-provider preference uses the provider's
+/// defaults; an explicit empty list hides all optional metrics. This never
+/// touches provider `enabled`, so scheduling stays independent of display
+/// visibility.
 pub fn filter_snapshots_for_view(
     snapshots: &[UsageSnapshot],
     view: &ResolvedView,
@@ -238,6 +239,12 @@ pub fn filter_snapshots_for_view(
             if snapshot.freshness == Freshness::Unavailable {
                 return true;
             }
+            // Window preferences apply to quota rows. Optional balances and
+            // counters have their own metric preference and may not carry a
+            // canonical quota-window label at all.
+            if snapshot.metric_kind != MetricKind::Quota {
+                return true;
+            }
             view.windows_for(&snapshot.provider).is_none_or(|windows| {
                 snapshot_window_key(snapshot)
                     .is_some_and(|key| windows.iter().any(|window| window == key))
@@ -247,8 +254,7 @@ pub fn filter_snapshots_for_view(
             if snapshot.freshness == Freshness::Unavailable {
                 return true;
             }
-            view.metrics_for(&snapshot.provider)
-                .is_none_or(|kinds| kinds.contains(&snapshot.metric_kind))
+            view.is_metric_visible(&snapshot.provider, snapshot.metric_kind)
         })
         .cloned()
         .collect()
@@ -925,6 +931,60 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].metric_kind, MetricKind::Quota);
+    }
+
+    #[test]
+    fn default_view_hides_codex_credits_but_keeps_quota() {
+        let quota = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        let mut credits = quota.clone();
+        credits.metric_kind = MetricKind::Credits;
+        credits.used = Some(12.0);
+        credits.unit = "credits".into();
+
+        let filtered =
+            filter_snapshots_for_view(&[quota.clone(), credits], &ResolvedView::default());
+
+        assert_eq!(filtered, vec![quota]);
+        assert!(!ResolvedView::default().is_metric_visible(&Provider::Codex, MetricKind::Credits));
+        assert!(ResolvedView::default().is_metric_visible(&Provider::Codex, MetricKind::Quota));
+    }
+
+    #[test]
+    fn explicit_codex_credits_preference_restores_the_optional_row() {
+        let quota = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        let mut credits = quota.clone();
+        credits.metric_kind = MetricKind::Credits;
+        credits.used = Some(12.0);
+        credits.unit = "credits".into();
+
+        let mut view = ResolvedView::default();
+        view.visible_metrics
+            .insert(Provider::Codex, vec![MetricKind::Credits]);
+        let filtered = filter_snapshots_for_view(&[quota.clone(), credits.clone()], &view);
+
+        assert_eq!(filtered, vec![quota, credits]);
+        assert!(view.is_metric_visible(&Provider::Codex, MetricKind::Credits));
+    }
+
+    #[test]
+    fn provider_selector_source_survives_row_filters() {
+        let codex = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        let mut grok = codex.clone();
+        grok.provider = Provider::GrokConsumer;
+        grok.account_id = "grok-test".into();
+
+        let mut view = ResolvedView::default();
+        view.visible_windows
+            .insert(Provider::Codex, vec!["missing".into()]);
+        let filtered = filter_snapshots_for_view(&[codex.clone(), grok.clone()], &view);
+
+        assert!(filtered
+            .iter()
+            .all(|snapshot| snapshot.provider == grok.provider));
+        assert_eq!(
+            switchable_providers_for_snapshots(&[codex, grok]),
+            vec![Provider::Codex, Provider::GrokConsumer]
+        );
     }
 
     #[test]

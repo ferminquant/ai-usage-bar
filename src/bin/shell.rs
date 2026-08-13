@@ -73,9 +73,9 @@ mod windows_shell {
     const MENU_VISIBLE_PROVIDER_BASE: usize = 1300;
     const MENU_VISIBLE_PROVIDER_MAX: usize = 8;
     const MENU_VISIBLE_WINDOW_BASE: usize = 1400;
-    const MENU_VISIBLE_WINDOW_MAX: usize = 8;
+    const MENU_VISIBLE_WINDOW_MAX: usize = 64;
     const MENU_VISIBLE_METRIC_BASE: usize = 1500;
-    const MENU_VISIBLE_METRIC_MAX: usize = 8;
+    const MENU_VISIBLE_METRIC_MAX: usize = 64;
     const STATUS_TIMER_ID: usize = 4;
     const STATUS_INTERVAL_MS: u32 = 2_500;
     const CF_UNICODETEXT_FORMAT: u32 = 13;
@@ -1084,7 +1084,15 @@ mod windows_shell {
         let available = switchable_providers_for_snapshots(&state.snapshots);
         let resolved = state.config.resolved_view(&available);
         let filtered = filter_snapshots_for_view(&state.snapshots, &resolved);
-        let visible_candidates = switchable_providers_for_snapshots(&filtered);
+        // Provider/window/metric filters are display-only. Keep every
+        // non-hidden provider in the selector even when a row filter removes
+        // some (or all) of its snapshots, so the user can still restore the
+        // preference from Show/hide.
+        let visible_candidates: Vec<Provider> = available
+            .iter()
+            .filter(|provider| !resolved.is_provider_hidden(provider))
+            .cloned()
+            .collect();
         let ordered_visible = ordered_providers(&visible_candidates, &resolved);
 
         state.focus_provider = state
@@ -1177,6 +1185,12 @@ mod windows_shell {
             .iter()
             .filter(|snapshot| &snapshot.provider == provider)
         {
+            // Quota is the product's primary signal and health is diagnostic;
+            // neither is an optional display toggle. Optional balances and
+            // counters (for example Credits) can be hidden per provider.
+            if matches!(snapshot.metric_kind, MetricKind::Quota | MetricKind::Health) {
+                continue;
+            }
             if !metrics.contains(&snapshot.metric_kind) {
                 metrics.push(snapshot.metric_kind);
             }
@@ -1309,22 +1323,13 @@ mod windows_shell {
         let resolved = state
             .config
             .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
-        let mut visible: Vec<MetricKind> = resolved
-            .metrics_for(&provider)
-            .map(|metrics| {
-                metrics
-                    .iter()
-                    .filter(|candidate| all_metrics.contains(candidate))
-                    .copied()
-                    .collect()
-            })
-            .unwrap_or_else(|| all_metrics.clone());
+        let mut visible: Vec<MetricKind> = all_metrics
+            .iter()
+            .copied()
+            .filter(|candidate| resolved.is_metric_visible(&provider, *candidate))
+            .collect();
 
         if let Some(index) = visible.iter().position(|candidate| candidate == &metric) {
-            if visible.len() <= 1 {
-                set_status(hwnd, state, "Keep at least one metric visible");
-                return;
-            }
             visible.remove(index);
         } else {
             visible.push(metric);
@@ -1335,10 +1340,18 @@ mod windows_shell {
             && all_metrics
                 .iter()
                 .all(|candidate| visible.contains(candidate));
+        let default_all_visible = all_metrics
+            .iter()
+            .all(|candidate| ResolvedView::default_metric_visible(&provider, *candidate));
         let previous_config = state.config.clone();
-        state
-            .config
-            .set_view_visible_metrics(&provider, if all_visible { None } else { Some(&visible) });
+        state.config.set_view_visible_metrics(
+            &provider,
+            if all_visible && default_all_visible {
+                None
+            } else {
+                Some(&visible)
+            },
+        );
         finish_view_change(hwnd, state, previous_config);
     }
 
@@ -1925,6 +1938,8 @@ mod windows_shell {
             let mut provider_labels: Vec<Vec<u16>> = Vec::new();
             let mut window_labels: Vec<Vec<u16>> = Vec::new();
             let mut visibility_labels: Vec<Vec<u16>> = Vec::new();
+            let mut visibility_window_commands: Vec<(Provider, String)> = Vec::new();
+            let mut visibility_metric_commands: Vec<(Provider, MetricKind)> = Vec::new();
             let switchable = app_state_ref(hwnd)
                 .map(|s| s.switchable_providers.clone())
                 .unwrap_or_default();
@@ -1961,33 +1976,126 @@ mod windows_shell {
                 .unwrap_or_default();
 
             // All visibility controls live in one top-level "Show/hide"
-            // submenu. Command IDs and checked state are unchanged, so the
-            // dispatch, persistence, fallback, and restore behavior is
-            // identical to the previous flat layout.
+            // submenu. Provider visibility is global; window and optional
+            // metric visibility are nested under the provider they affect so
+            // labels such as "Show 5-hour" cannot be mistaken for a global
+            // setting.
             let submenu = CreatePopupMenu().ok();
             if let Some(submenu) = submenu.as_ref() {
+                for (index, provider) in all_providers
+                    .iter()
+                    .take(MENU_VISIBLE_PROVIDER_MAX)
+                    .enumerate()
+                {
+                    let flags = if !resolved_view.is_provider_hidden(provider) {
+                        MF_STRING | MF_CHECKED
+                    } else {
+                        MF_STRING
+                    };
+                    let label = format!("Show {}", provider_display_name(provider));
+                    visibility_labels.push(to_wide(&label));
+                    let _ = AppendMenuW(
+                        *submenu,
+                        flags,
+                        MENU_VISIBLE_PROVIDER_BASE + index,
+                        PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                    );
+                }
+
                 if !all_providers.is_empty() {
-                    if GetMenuItemCount(Some(*submenu)) > 0 {
-                        let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
-                    }
-                    for (index, provider) in all_providers
-                        .iter()
-                        .take(MENU_VISIBLE_PROVIDER_MAX)
-                        .enumerate()
-                    {
-                        let flags = if !resolved_view.is_provider_hidden(provider) {
+                    let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                }
+
+                for provider in all_providers.iter().take(MENU_VISIBLE_PROVIDER_MAX) {
+                    let Ok(provider_menu) = CreatePopupMenu() else {
+                        continue;
+                    };
+                    let mut has_items = false;
+                    let all_windows = available_windows(
+                        app_state_ref(hwnd)
+                            .map(|state| state.snapshots.as_slice())
+                            .unwrap_or_default(),
+                        provider,
+                    );
+                    let visible_windows = resolved_view.windows_for(provider);
+                    for window in all_windows.iter().take(MENU_SHOW_WINDOW_MAX) {
+                        if visibility_window_commands.len() >= MENU_VISIBLE_WINDOW_MAX {
+                            break;
+                        }
+                        let checked = visible_windows
+                            .map(|windows| windows.iter().any(|candidate| candidate == window))
+                            .unwrap_or(true);
+                        let flags = if checked {
                             MF_STRING | MF_CHECKED
                         } else {
                             MF_STRING
                         };
-                        let label = format!("Show {}", provider_display_name(provider));
+                        let label = format!("Show {}", window_display_name(provider, window));
                         visibility_labels.push(to_wide(&label));
-                        let _ = AppendMenuW(
-                            *submenu,
+                        let index = visibility_window_commands.len();
+                        let appended = AppendMenuW(
+                            provider_menu,
                             flags,
-                            MENU_VISIBLE_PROVIDER_BASE + index,
+                            MENU_VISIBLE_WINDOW_BASE + index,
                             PCWSTR(visibility_labels.last().unwrap().as_ptr()),
-                        );
+                        )
+                        .is_ok();
+                        if appended {
+                            visibility_window_commands.push((provider.clone(), window.clone()));
+                            has_items = true;
+                        }
+                    }
+
+                    let all_metrics = app_state_ref(hwnd)
+                        .map(|state| available_metrics(&state.snapshots, provider))
+                        .unwrap_or_default();
+                    if !all_metrics.is_empty() && has_items {
+                        let _ = AppendMenuW(provider_menu, MF_SEPARATOR, 0, w!(""));
+                    }
+                    for metric in all_metrics {
+                        if visibility_metric_commands.len() >= MENU_VISIBLE_METRIC_MAX {
+                            break;
+                        }
+                        let flags = if resolved_view.is_metric_visible(provider, metric) {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        let label = format!("Show {}", metric_display_name(metric));
+                        visibility_labels.push(to_wide(&label));
+                        let index = visibility_metric_commands.len();
+                        let appended = AppendMenuW(
+                            provider_menu,
+                            flags,
+                            MENU_VISIBLE_METRIC_BASE + index,
+                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                        )
+                        .is_ok();
+                        if appended {
+                            visibility_metric_commands.push((provider.clone(), metric));
+                            has_items = true;
+                        }
+                    }
+
+                    if has_items {
+                        if GetMenuItemCount(Some(*submenu)) > 0 {
+                            let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                        }
+                        let label = to_wide(provider_display_name(provider));
+                        let attached = AppendMenuW(
+                            *submenu,
+                            MF_POPUP,
+                            provider_menu.0 as usize,
+                            PCWSTR(label.as_ptr()),
+                        )
+                        .is_ok();
+                        if attached {
+                            visibility_labels.push(label);
+                        } else {
+                            let _ = DestroyMenu(provider_menu);
+                        }
+                    } else {
+                        let _ = DestroyMenu(provider_menu);
                     }
                 }
             }
@@ -2061,69 +2169,6 @@ mod windows_shell {
                         MENU_SHOW_WINDOW_BASE + index,
                         PCWSTR(window_labels[index].as_ptr()),
                     );
-                }
-            }
-
-            if let (Some(submenu), Some(provider)) = (submenu.as_ref(), focused.as_ref()) {
-                let visible_windows = resolved_view.windows_for(provider);
-                if !available_windows.is_empty() {
-                    if GetMenuItemCount(Some(*submenu)) > 0 {
-                        let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
-                    }
-                    for (index, window) in available_windows
-                        .iter()
-                        .take(MENU_VISIBLE_WINDOW_MAX)
-                        .enumerate()
-                    {
-                        let checked = visible_windows
-                            .map(|windows| windows.iter().any(|candidate| candidate == window))
-                            .unwrap_or(true);
-                        let flags = if checked {
-                            MF_STRING | MF_CHECKED
-                        } else {
-                            MF_STRING
-                        };
-                        let label = format!("Show {}", window_display_name(provider, window));
-                        visibility_labels.push(to_wide(&label));
-                        let _ = AppendMenuW(
-                            *submenu,
-                            flags,
-                            MENU_VISIBLE_WINDOW_BASE + index,
-                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
-                        );
-                    }
-                }
-
-                let available_metrics = app_state_ref(hwnd)
-                    .map(|state| available_metrics(&state.snapshots, provider))
-                    .unwrap_or_default();
-                let visible_metrics = resolved_view.metrics_for(provider);
-                if !available_metrics.is_empty() {
-                    if GetMenuItemCount(Some(*submenu)) > 0 {
-                        let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
-                    }
-                    for (index, metric) in available_metrics
-                        .iter()
-                        .take(MENU_VISIBLE_METRIC_MAX)
-                        .enumerate()
-                    {
-                        let checked = visible_metrics
-                            .map(|metrics| metrics.contains(metric))
-                            .unwrap_or(true);
-                        let flags = if checked {
-                            MF_STRING | MF_CHECKED
-                        } else {
-                            MF_STRING
-                        };
-                        let label = format!("Show {}", metric_display_name(*metric));
-                        visibility_labels.push(to_wide(&label));
-                        let _ = AppendMenuW(
-                            *submenu,
-                            flags,
-                            MENU_VISIBLE_METRIC_BASE + index,
-                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
-                        );
-                    }
                 }
             }
 
@@ -2260,26 +2305,20 @@ mod windows_shell {
                     ..MENU_VISIBLE_WINDOW_BASE + MENU_VISIBLE_WINDOW_MAX)
                     .contains(&id) =>
                 {
-                    if let (Some(provider), Some(window)) = (
-                        focused.clone(),
-                        available_windows
-                            .get(id - MENU_VISIBLE_WINDOW_BASE)
-                            .cloned(),
-                    ) {
-                        toggle_window_visibility(hwnd, provider, window);
+                    if let Some((provider, window)) =
+                        visibility_window_commands.get(id - MENU_VISIBLE_WINDOW_BASE)
+                    {
+                        toggle_window_visibility(hwnd, provider.clone(), window.clone());
                     }
                 }
                 id if (MENU_VISIBLE_METRIC_BASE
                     ..MENU_VISIBLE_METRIC_BASE + MENU_VISIBLE_METRIC_MAX)
                     .contains(&id) =>
                 {
-                    if let Some(provider) = focused.clone() {
-                        if let Some(metric) = app_state_ref(hwnd)
-                            .map(|state| available_metrics(&state.snapshots, &provider))
-                            .and_then(|metrics| metrics.get(id - MENU_VISIBLE_METRIC_BASE).copied())
-                        {
-                            toggle_metric_visibility(hwnd, provider, metric);
-                        }
+                    if let Some((provider, metric)) =
+                        visibility_metric_commands.get(id - MENU_VISIBLE_METRIC_BASE)
+                    {
+                        toggle_metric_visibility(hwnd, provider.clone(), *metric);
                     }
                 }
                 _ => {}

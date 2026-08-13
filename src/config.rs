@@ -61,8 +61,9 @@ impl Default for ProviderSettings {
 
 /// Per-provider display-only preferences within [`ViewSettings`].
 ///
-/// `None` means "keep the current behavior" (show all reported rows); an
-/// explicit empty list is a deliberate choice to hide every row of that kind.
+/// `None` means "use the provider's display defaults"; an explicit empty list
+/// is a deliberate choice to hide every optional row of that kind. Core quota
+/// and health rows remain visible regardless of this preference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProviderViewSettings {
     /// Quota windows to show for this provider, as canonical window keys
@@ -142,8 +143,9 @@ pub struct ResolvedView {
     /// Per-provider visible quota-window filters. `None` means all windows;
     /// an empty list is an explicit hide-all choice.
     pub visible_windows: BTreeMap<Provider, Vec<String>>,
-    /// Per-provider visible metric-kind filters. `None` means all kinds;
-    /// an empty list is an explicit hide-all choice.
+    /// Per-provider visible metric-kind filters. `None` means the provider's
+    /// defaults; an empty list is an explicit hide-all choice for optional
+    /// metrics.
     pub visible_metrics: BTreeMap<Provider, Vec<MetricKind>>,
     /// The configured default provider when it is known and not hidden.
     pub default_provider: Option<Provider>,
@@ -276,6 +278,29 @@ impl ResolvedView {
 
     pub fn metrics_for(&self, provider: &Provider) -> Option<&[MetricKind]> {
         self.visible_metrics.get(provider).map(Vec::as_slice)
+    }
+
+    /// Whether a metric row should be displayed for a provider.
+    ///
+    /// Quota and health rows are core diagnostics and are never hidden by a
+    /// display preference. Optional metrics remain visible by default, except
+    /// for Codex credits, which are opt-in because most accounts do not use
+    /// that balance. An explicit provider preference overrides that default.
+    pub fn is_metric_visible(&self, provider: &Provider, metric: MetricKind) -> bool {
+        if matches!(metric, MetricKind::Quota | MetricKind::Health) {
+            return true;
+        }
+        self.metrics_for(provider)
+            .map(|metrics| metrics.contains(&metric))
+            .unwrap_or_else(|| {
+                !(matches!(provider, Provider::Codex) && metric == MetricKind::Credits)
+            })
+    }
+
+    /// Whether an optional metric is visible when no explicit preference has
+    /// been saved for the provider.
+    pub fn default_metric_visible(provider: &Provider, metric: MetricKind) -> bool {
+        !(matches!(provider, Provider::Codex) && metric == MetricKind::Credits)
     }
 }
 
@@ -446,9 +471,9 @@ impl AppConfig {
 
     /// Set the metric kinds shown for one provider.
     ///
-    /// `None` clears the preference (all reported kinds shown); `Some([])`
-    /// explicitly hides every metric row; `Some(kinds)` restricts to the
-    /// given metric kinds.
+    /// `None` clears the preference (provider defaults); `Some([])` explicitly
+    /// hides every optional metric row; `Some(kinds)` restricts optional rows
+    /// to the given metric kinds. Core quota and health rows remain visible.
     pub fn set_view_visible_metrics(
         &mut self,
         provider: &Provider,
