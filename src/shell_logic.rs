@@ -183,6 +183,25 @@ pub(crate) fn apply_drop<Id: PartialEq + Clone>(
     true
 }
 
+/// Swap a dragged provider with the card directly under the pointer.
+///
+/// Card-on-card drops are intentionally swaps rather than insertions: the
+/// target card stays in its slot while the grabbed card is carried over it,
+/// so dropping Grok on Ollama cannot rotate the cards between those slots.
+pub(crate) fn swap_drop<Id: PartialEq>(order: &mut [Id], dragged: &Id, target: &Id) -> bool {
+    let Some(dragged_index) = order.iter().position(|candidate| candidate == dragged) else {
+        return false;
+    };
+    let Some(target_index) = order.iter().position(|candidate| candidate == target) else {
+        return false;
+    };
+    if dragged_index == target_index {
+        return false;
+    }
+    order.swap(dragged_index, target_index);
+    true
+}
+
 pub(crate) fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
     let cards = ProviderCard::from_snapshots(snapshots);
     if cards.is_empty() {
@@ -470,6 +489,17 @@ mod tests {
         let mut order = vec!["A"];
         assert!(apply_drop(&mut order, &"A", 0));
         assert_eq!(order, vec!["A"]);
+    }
+
+    #[test]
+    fn card_drop_swaps_only_the_target_slot() {
+        let mut order = vec!["Codex", "OpenCode", "Kimi", "Grok", "Ollama"];
+        assert!(swap_drop(&mut order, &"Grok", &"Ollama"));
+        assert_eq!(order, vec!["Codex", "OpenCode", "Kimi", "Ollama", "Grok"]);
+
+        let mut order = vec!["Codex", "OpenCode", "Kimi", "Grok", "Ollama"];
+        assert!(swap_drop(&mut order, &"Grok", &"Codex"));
+        assert_eq!(order, vec!["Grok", "OpenCode", "Kimi", "Codex", "Ollama"]);
     }
 
     #[test]

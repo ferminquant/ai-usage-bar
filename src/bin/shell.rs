@@ -27,8 +27,8 @@ mod windows_shell {
     use std::thread;
 
     use super::shell_logic::{
-        apply_drop, normalize_used_percent, render_detail_text, usage_band, DropCard, DropGrid,
-        SlotRect, UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS,
+        apply_drop, normalize_used_percent, render_detail_text, swap_drop, usage_band, DropCard,
+        DropGrid, SlotRect, UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS,
     };
 
     use windows::core::*;
@@ -2050,13 +2050,15 @@ mod windows_shell {
         /// Origin cards (rects, rows, visibility) captured at press.
         origin_cards: Vec<PanelCard>,
         /// Flow cards (origin minus the grabbed provider) reflowed into the
-        /// two-column grid. The current placeholder is inserted into this
-        /// flow for both hit-testing and painting.
+        /// two-column grid. This stable flow is only used for empty-slot
+        /// insertion; card-on-card drops use the origin card rectangles so a
+        /// target never shifts out from under the pointer.
         flow: Vec<PanelCard>,
-        /// Drop index in flow space, re-resolved by the same resolver on
-        /// every move and mouse-up so the committed order matches the visual
-        /// destination.
+        /// Drop index in flow space for an empty-slot insertion.
         drop_index: Option<usize>,
+        /// Provider currently under the pointer, if any. Card-on-card drops
+        /// swap this provider with the grabbed one.
+        drop_target: Option<Provider>,
         /// The grabbed card's origin rect (floating preview anchor).
         grabbed_rect: RECT,
     }
@@ -2631,9 +2633,31 @@ mod windows_shell {
                 bottom: state.layout.height,
             };
             let _ = GetClientRect(hwnd, &mut client);
-            fill_rect(hdc, client, COLOR_OUTER);
+            let buffer = if client.right > 0 && client.bottom > 0 {
+                let buffer_dc = CreateCompatibleDC(Some(hdc));
+                if buffer_dc.is_invalid() {
+                    None
+                } else {
+                    let bitmap = CreateCompatibleBitmap(hdc, client.right, client.bottom);
+                    if bitmap.is_invalid() {
+                        let _ = DeleteDC(buffer_dc);
+                        None
+                    } else {
+                        let old_bitmap = SelectObject(buffer_dc, bitmap.into());
+                        Some((buffer_dc, bitmap, old_bitmap))
+                    }
+                }
+            } else {
+                None
+            };
+            let paint_hdc = buffer
+                .as_ref()
+                .map(|(buffer_dc, _, _)| *buffer_dc)
+                .unwrap_or(hdc);
+
+            fill_rect(paint_hdc, client, COLOR_OUTER);
             draw_text(
-                hdc,
+                paint_hdc,
                 RECT {
                     left: PANEL_MARGIN,
                     top: 10,
@@ -2647,33 +2671,42 @@ mod windows_shell {
                 DT_SINGLELINE | DT_VCENTER | DT_LEFT,
             );
             draw_text(
-                hdc,
+                paint_hdc,
                 RECT {
                     left: PANEL_MARGIN,
                     top: 34,
                     right: state.layout.width - PANEL_MARGIN,
                     bottom: 52,
                 },
-                "Click to focus · drag a card header to reorder",
+                "Click a usage row to focus · checkboxes show/hide · drag headers to swap",
                 12,
                 FW_NORMAL,
                 COLOR_MUTED,
                 DT_SINGLELINE | DT_VCENTER | DT_LEFT,
             );
 
+            let drop_target = state
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.drop_target.as_ref());
             for card in &state.layout.cards {
                 if card.placeholder {
-                    paint_placeholder(hdc, card.rect);
+                    paint_placeholder(paint_hdc, card.rect);
                 } else {
-                    paint_card(hdc, card, card.rect, false);
+                    paint_card(
+                        paint_hdc,
+                        card,
+                        card.rect,
+                        drop_target == Some(&card.provider),
+                    );
                 }
             }
 
             for button in &state.layout.buttons {
-                fill_round_rect(hdc, button.rect, 6, COLOR_BACKGROUND);
-                stroke_round_rect(hdc, button.rect, 6, COLOR_CARD_BORDER);
+                fill_round_rect(paint_hdc, button.rect, 6, COLOR_BACKGROUND);
+                stroke_round_rect(paint_hdc, button.rect, 6, COLOR_CARD_BORDER);
                 draw_text(
-                    hdc,
+                    paint_hdc,
                     button.rect,
                     &button.label,
                     13,
@@ -2701,9 +2734,26 @@ mod windows_shell {
                         .iter()
                         .find(|card| card.provider == drag.provider)
                     {
-                        paint_card(hdc, grabbed, rect, true);
+                        paint_card(paint_hdc, grabbed, rect, true);
                     }
                 }
+            }
+
+            if let Some((buffer_dc, bitmap, old_bitmap)) = buffer {
+                let _ = BitBlt(
+                    hdc,
+                    0,
+                    0,
+                    client.right,
+                    client.bottom,
+                    Some(buffer_dc),
+                    0,
+                    0,
+                    SRCCOPY,
+                );
+                SelectObject(buffer_dc, old_bitmap);
+                let _ = DeleteObject(bitmap.into());
+                let _ = DeleteDC(buffer_dc);
             }
             let _ = EndPaint(hwnd, &paint);
         }
@@ -2827,69 +2877,91 @@ mod windows_shell {
             .collect()
     }
 
-    fn preview_cards_for_drag(drag: &PanelDragState) -> (Vec<PanelCard>, usize) {
-        let flow_len = drag.flow.len();
-        let index = drag
-            .drop_index
-            .unwrap_or_else(|| {
-                drag.origin_order
-                    .iter()
-                    .position(|candidate| candidate == &drag.provider)
-                    .unwrap_or(0)
-            })
-            .min(flow_len);
-        let mut cards = Vec::with_capacity(flow_len + 1);
-        for (slot, card) in drag.flow.iter().enumerate() {
-            if slot == index {
-                cards.push(placeholder_card(drag));
-            }
-            cards.push(card.clone());
+    fn preview_cards_for_drag(drag: &PanelDragState) -> Vec<PanelCard> {
+        // Keep the grid in its origin arrangement while dragging. The grabbed
+        // card leaves a stable outline at its original slot, and the real card
+        // follows the pointer. This prevents the card under the pointer from
+        // moving every time the candidate drop index changes.
+        let mut cards = drag.origin_cards.clone();
+        if let Some(card) = cards.iter_mut().find(|card| card.provider == drag.provider) {
+            let rect = card.rect;
+            let mut placeholder = placeholder_card(drag);
+            placeholder.rect = rect;
+            *card = placeholder;
         }
-        if index >= flow_len {
-            cards.push(placeholder_card(drag));
+        cards
+    }
+
+    fn card_drop_target_at(drag: &PanelDragState, point: POINT) -> Option<Provider> {
+        drag.origin_cards.iter().find_map(|card| {
+            (card.provider != drag.provider && card.visible && rect_contains(card.rect, point))
+                .then(|| card.provider.clone())
+        })
+    }
+
+    /// Resolve an empty-slot insertion against the stable flow captured when
+    /// the drag began. Card-on-card targets are handled separately as swaps.
+    fn resolve_insert_index_at(drag: &PanelDragState, point: POINT) -> Option<usize> {
+        // Releasing over the grabbed card's origin is a cancellation, not an
+        // append: the dragged card is intentionally absent from the flow used
+        // for empty-slot hit-testing.
+        if drag
+            .origin_cards
+            .iter()
+            .find(|card| card.provider == drag.provider)
+            .is_some_and(|card| rect_contains(card.rect, point))
+        {
+            return None;
         }
-        reflow_grid(&mut cards, GRID_COLUMNS);
-        (cards, index)
+        if card_drop_target_at(drag, point).is_some() {
+            return None;
+        }
+        let grid = panel_grid_bounds(&drag.flow);
+        let drop_cards = panel_drop_cards(&drag.flow);
+        DropGrid::drop_index(&drop_cards, grid, (point.x, point.y))
     }
 
-    /// Re-resolve the drop index against the same placeholder geometry that
-    /// is painted for the current preview. This keeps a card that shifted
-    /// columns from being interpreted as the old empty slot.
-    fn resolve_drop_index_at(drag: &PanelDragState, point: POINT) -> Option<usize> {
-        let (cards, placeholder_index) = preview_cards_for_drag(drag);
-        let grid = panel_grid_bounds(&cards);
-        let drop_cards = panel_drop_cards(&cards);
-        DropGrid::preview_drop_index(&drop_cards, placeholder_index, grid, (point.x, point.y))
+    fn resolve_insert_index(drag: &PanelDragState) -> Option<usize> {
+        resolve_insert_index_at(drag, drag.pointer)
     }
 
-    fn resolve_drop_index(drag: &PanelDragState) -> Option<usize> {
-        resolve_drop_index_at(drag, drag.pointer)
-    }
-
-    /// Replace the live layout with the preview grid: the flow cards plus a
-    /// placeholder at the current drop index. The popup is never resized or
+    /// Replace the live layout with the stable origin grid plus a placeholder
+    /// at the grabbed card's original slot. The popup is never resized or
     /// repositioned here; that happens once on commit via the panel rebuild.
     fn rebuild_preview_cards(state: &mut PanelState) {
         let Some(drag) = state.drag.as_ref() else {
             return;
         };
-        let (cards, _) = preview_cards_for_drag(drag);
+        let cards = preview_cards_for_drag(drag);
         state.layout.cards = cards;
         reflow_panel_layout(&mut state.layout);
     }
 
-    /// Update the drop index from the current pointer and rebuild the preview
-    /// grid. Both preview and commit resolve through the same `DropGrid`
-    /// resolver against the same stable flow geometry.
-    fn update_drag_preview(state: &mut PanelState) {
+    /// Update the stable card target or empty-slot index from the current
+    /// pointer. The origin grid is only rebuilt when that target changes;
+    /// pointer movement itself only repaints the floating card.
+    fn update_drag_preview(state: &mut PanelState) -> bool {
         let Some(drag) = state.drag.as_ref() else {
-            return;
+            return false;
         };
-        let index = resolve_drop_index(drag);
+        let target = card_drop_target_at(drag, drag.pointer);
+        let index = target
+            .is_none()
+            .then(|| resolve_insert_index(drag))
+            .flatten();
+        if state
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.drop_target == target && drag.drop_index == index)
+        {
+            return false;
+        }
         if let Some(drag) = state.drag.as_mut() {
+            drag.drop_target = target;
             drag.drop_index = index;
         }
         rebuild_preview_cards(state);
+        true
     }
 
     /// Restore the layout captured at press (used for cancelled drags and
@@ -2986,6 +3058,7 @@ mod windows_shell {
                                 origin_cards,
                                 flow,
                                 drop_index: None,
+                                drop_target: None,
                                 grabbed_rect,
                                 provider,
                             });
@@ -3001,15 +3074,21 @@ mod windows_shell {
                 if let Some(state) = panel_state(hwnd) {
                     if let Some(drag) = state.drag.take() {
                         let action = if drag.active {
-                            // Commit with the same resolver the preview used,
-                            // re-resolved against the same stable flow, so the
-                            // persisted order matches the visual destination.
-                            let index = resolve_drop_index_at(&drag, point);
-                            index.and_then(|index| {
+                            // A card-on-card drop is a direct swap. The target
+                            // remains at its origin rectangle throughout the
+                            // gesture, so the committed order cannot rotate
+                            // unrelated cards through the two-column grid.
+                            if let Some(target) = card_drop_target_at(&drag, point) {
                                 let mut order = drag.origin_order.clone();
-                                apply_drop(&mut order, &drag.provider, index)
+                                swap_drop(&mut order, &drag.provider, &target)
                                     .then_some(PanelAction::Reorder(order))
-                            })
+                            } else {
+                                resolve_insert_index_at(&drag, point).and_then(|index| {
+                                    let mut order = drag.origin_order.clone();
+                                    apply_drop(&mut order, &drag.provider, index)
+                                        .then_some(PanelAction::Reorder(order))
+                                })
+                            }
                         } else {
                             // Never crossed the threshold: ordinary click.
                             panel_action_at(state, point)
