@@ -1,0 +1,18 @@
+{
+  "_description": "Synthetic auth failure for a missing, expired, or revoked Zen API key. The 401 error shape is the one observed live at the separate OpenCode Go route /zen/go/v1/usage on 2026-08-14; the proposed Zen balance route /zen/v1/balance is not deployed and returned HTTP 404, so this is not a capture of it. No credential value is included.",
+  "_source": "synthetic; error shape observed at GET https://opencode.ai/zen/go/v1/usage on 2026-08-14 (separate OpenCode Go route); proposed GET https://opencode.ai/zen/v1/balance (upstream issue #10448) is not released and returned HTTP 404",
+  "_status": "unreleased",
+  "_decision": "defer",
+  "_capturedAt": "2026-08-14T00:00:00Z",
+  "_httpStatus": 401,
+  "type": "error",
+  "error": {
+    "type": "AuthError",
+    "message": "Missing API key."
+  },
+  "_expected": {
+    "no_local_key": "not_configured",
+    "key_rejected": "auth_expired",
+    "note": "never log or persist the key; missing key is not zero balance"
+  }
+}

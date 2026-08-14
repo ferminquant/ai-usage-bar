@@ -1,0 +1,15 @@
+{
+  "_description": "Redacted live probe result from 2026-08-14. The proposed Zen balance route is not deployed on the production host; the HTML 404 body is intentionally omitted.",
+  "_source": "GET https://opencode.ai/zen/v1/balance (upstream issue #10448 proposal)",
+  "_status": "unreleased",
+  "_decision": "defer",
+  "_capturedAt": "2026-08-14T19:47:44Z",
+  "_httpStatus": 404,
+  "_contentType": "text/html",
+  "_expected": {
+    "freshness": "unavailable",
+    "error_code": "endpoint_unavailable",
+    "fallback": "open the authenticated OpenCode Zen billing page manually",
+    "note": "do not register a provider from an HTML page; do not scrape the dashboard"
+  }
+}

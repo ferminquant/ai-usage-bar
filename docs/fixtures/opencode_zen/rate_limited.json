@@ -1,0 +1,18 @@
+{
+  "_description": "Synthetic HTTP 429 rate limit from the gateway. No credential value is included.",
+  "_source": "proposed GET https://opencode.ai/zen/v1/balance (upstream issue #10448, not released)",
+  "_status": "unreleased",
+  "_decision": "defer",
+  "_capturedAt": "2026-08-14T00:00:00Z",
+  "_httpStatus": 429,
+  "type": "error",
+  "error": {
+    "type": "RateLimitError",
+    "message": "Too many requests"
+  },
+  "_expected": {
+    "freshness": "unavailable",
+    "error_code": "rate_limited",
+    "cache": "preserve last good result as stale when available"
+  }
+}

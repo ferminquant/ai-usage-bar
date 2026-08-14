@@ -426,3 +426,216 @@ fn contract_rejects_impossible_values_with_actionable_errors() {
         "contract: unlimited may exceed a reported limit field"
     );
 }
+
+#[test]
+fn contract_opencode_zen_fixtures_are_unreleased_deferred_and_redacted() {
+    // Issue #86 spike evidence gate: every Zen balance fixture is a synthetic
+    // artifact for a source that is not released, records the defer decision,
+    // and contains no credential-shaped content. The fixture set and each
+    // file's failure meaning are locked so the evidence cannot drift silently.
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/fixtures/opencode_zen");
+    let mut entries: Vec<_> = std::fs::read_dir(&directory)
+        .expect("opencode_zen fixture directory should exist")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    entries.sort();
+
+    let expected_fixtures = [
+        "auth_failure.json",
+        "malformed.json",
+        "missing_fields.json",
+        "positive_balance.json",
+        "rate_limited.json",
+        "timeout.json",
+        "unavailable.json",
+        "zero_balance.json",
+    ];
+    let actual: Vec<String> = entries
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        actual, expected_fixtures,
+        "contract: the opencode_zen fixture set must stay exactly these eight files"
+    );
+
+    let secret_patterns = [
+        "Bearer ", "sk-", "oc_sk_", "eyJ", // JWT header fragment
+        "@",   // email-shaped identifiers
+    ];
+
+    for path in entries {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("Zen fixture should be readable"),
+        )
+        .unwrap_or_else(|error| panic!("{name} should be valid JSON: {error}"));
+        assert_eq!(
+            raw.get("_status").and_then(|value| value.as_str()),
+            Some("unreleased"),
+            "{name} must be labeled unreleased"
+        );
+        assert_eq!(
+            raw.get("_decision").and_then(|value| value.as_str()),
+            Some("defer"),
+            "{name} must record the spike defer decision"
+        );
+        let expected = raw
+            .get("_expected")
+            .unwrap_or_else(|| panic!("{name} must document its failure meaning under _expected"));
+        let error_code = expected.get("error_code").and_then(|value| value.as_str());
+        match name.as_str() {
+            "unavailable.json" => {
+                assert_eq!(
+                    raw.get("_httpStatus").and_then(|value| value.as_u64()),
+                    Some(404),
+                    "{name}: the live 404 capture must stay an HTTP 404"
+                );
+                assert_eq!(
+                    error_code,
+                    Some("endpoint_unavailable"),
+                    "{name}: a 404 route is endpoint_unavailable, not a balance"
+                );
+            }
+            "malformed.json" => assert_eq!(
+                error_code,
+                Some("schema_drift"),
+                "{name}: a wrong-typed success-shaped body is schema drift"
+            ),
+            "auth_failure.json" => {
+                assert_eq!(
+                    expected
+                        .get("no_local_key")
+                        .and_then(|value| value.as_str()),
+                    Some("not_configured"),
+                    "{name}: no local Zen key is not_configured, never zero"
+                );
+                assert_eq!(
+                    expected
+                        .get("key_rejected")
+                        .and_then(|value| value.as_str()),
+                    Some("auth_expired"),
+                    "{name}: a rejected key is auth_expired"
+                );
+            }
+            "timeout.json" => assert_eq!(
+                error_code,
+                Some("timeout"),
+                "{name}: a network deadline is timeout"
+            ),
+            "rate_limited.json" => {
+                assert_eq!(
+                    raw.get("_httpStatus").and_then(|value| value.as_u64()),
+                    Some(429),
+                    "{name}: rate limiting must stay an HTTP 429"
+                );
+                assert_eq!(
+                    error_code,
+                    Some("rate_limited"),
+                    "{name}: an HTTP 429 is rate_limited"
+                );
+            }
+            "missing_fields.json" => {
+                assert!(
+                    raw.get("balance").is_none()
+                        && raw.get("currency").is_none()
+                        && raw.get("auto_reload").is_none(),
+                    "{name}: absent fields must be missing keys, not JSON nulls"
+                );
+            }
+            "positive_balance.json" | "zero_balance.json" => {
+                // Balance/zero mapping distinctions are locked by
+                // contract_opencode_zen_balance_mapping_preserves_zero_missing_positive.
+            }
+            other => panic!("unexpected fixture in the locked set: {other}"),
+        }
+        let serialized = raw.to_string();
+        for pattern in secret_patterns {
+            assert!(
+                !serialized.contains(pattern),
+                "{name} must not contain {pattern:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn contract_opencode_zen_balance_mapping_preserves_zero_missing_positive() {
+    // Issue #86 admission mapping: the hypothetical Zen balance source would
+    // map to metric_kind=credits with window_kind=none, remaining=balance,
+    // and no used/limit/resets_at, percentage, or quota semantics. Missing
+    // balance is absent; zero balance is a real 0.0.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read_fixture = |name: &str| {
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest.join("docs/fixtures/opencode_zen").join(name))
+                .expect("Zen fixture should be readable"),
+        )
+        .expect("Zen fixture should be JSON");
+        raw
+    };
+
+    let positive = read_fixture("positive_balance.json");
+    let zero = read_fixture("zero_balance.json");
+    let missing = read_fixture("missing_fields.json");
+
+    for (name, fixture) in [
+        ("positive_balance.json", &positive),
+        ("zero_balance.json", &zero),
+        ("missing_fields.json", &missing),
+    ] {
+        let expected = fixture.get("_expected").expect("fixture has _expected");
+        assert_eq!(
+            expected.get("metric_kind").and_then(|value| value.as_str()),
+            Some("credits"),
+            "{name}: Zen balance is credits, never quota"
+        );
+        assert_eq!(
+            expected.get("window_kind").and_then(|value| value.as_str()),
+            Some("none"),
+            "{name}: a balance is not a quota window"
+        );
+        assert!(
+            expected.get("used").is_none_or(serde_json::Value::is_null),
+            "{name}: spent is not invented when the provider does not report it"
+        );
+        assert!(
+            expected.get("limit").is_none_or(serde_json::Value::is_null),
+            "{name}: a balance is not a credit limit"
+        );
+        assert!(
+            expected
+                .get("resets_at")
+                .is_none_or(serde_json::Value::is_null),
+            "{name}: a balance does not reset"
+        );
+    }
+
+    // Provider-reported balance is preserved as remaining.
+    assert_eq!(positive["_expected"]["remaining"], serde_json::json!(42.5));
+    assert_eq!(positive["balance"], serde_json::json!(42.5));
+    assert_eq!(
+        positive["_expected"]["unit"],
+        serde_json::json!("usd"),
+        "positive: reported currency becomes the unit"
+    );
+
+    // Zero balance is a real zero, distinct from a missing balance.
+    assert_eq!(zero["_expected"]["remaining"], serde_json::json!(0.0));
+    assert_eq!(zero["balance"], serde_json::json!(0));
+
+    // Missing balance stays absent (missing keys, never JSON nulls) and is
+    // never converted to zero.
+    assert!(missing.get("balance").is_none());
+    assert!(missing.get("currency").is_none());
+    assert!(missing.get("auto_reload").is_none());
+    assert!(missing["_expected"]["remaining"].is_null());
+    assert!(missing["_expected"]["unit"].is_null());
+    assert_ne!(
+        zero["_expected"]["remaining"],
+        missing["_expected"]["remaining"]
+    );
+}
