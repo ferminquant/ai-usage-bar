@@ -1,10 +1,10 @@
-//! OpenCode Go local usage estimator.
+//! OpenCode Go usage adapter.
 //!
-//! OpenCode's Go gateway keeps the authoritative rolling/weekly/monthly
-//! counters on the service, but the CLI also keeps a local SQLite session
-//! ledger.  This adapter intentionally reports an inferred, local-device
-//! estimate from that ledger.  It never reads the OpenCode API key and never
-//! attempts to authenticate to the web dashboard.
+//! OpenCode's Go gateway exposes the authoritative rolling/weekly/monthly
+//! counters through the same authenticated usage endpoint used by the Go
+//! console.  The adapter reads the existing local OpenCode Go API key without
+//! persisting or displaying it.  When no key is available, it retains the
+//! local SQLite ledger estimator as an explicitly inferred fallback.
 
 use crate::model::*;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Timelike, Utc};
@@ -19,6 +19,10 @@ const OPENCODE_PROVIDER: Provider = Provider::OpenCodeGo;
 const OPENCODE_ACCOUNT_ID: &str = "opencode-local";
 const OPENCODE_DATA_DIR_ENV: &str = "OPENCODE_DATA_DIR";
 const OPENCODE_DB_ENV: &str = "OPENCODE_DB";
+const OPENCODE_AUTH_ENV: &str = "OPENCODE_AUTH_JSON";
+const OPENCODE_USAGE_URL_ENV: &str = "OPENCODE_USAGE_URL";
+const DEFAULT_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 const FIVE_HOURS: i64 = 5 * 60 * 60;
 const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60;
 const WEEKLY_LIMIT_USD: f64 = 30.0;
@@ -53,6 +57,14 @@ pub enum OpenCodeAdapterError {
     NotConfigured,
     #[error("unable to read OpenCode local database")]
     Database,
+    #[error("OpenCode Go API key is missing or expired")]
+    AuthExpired,
+    #[error("timeout waiting for OpenCode Go usage response")]
+    Timeout,
+    #[error("OpenCode Go usage request failed")]
+    Network,
+    #[error("OpenCode Go usage request was rate limited")]
+    RateLimited,
     #[error("OpenCode local database schema drift: {0}")]
     SchemaDrift(String),
 }
@@ -62,6 +74,10 @@ impl From<OpenCodeAdapterError> for AdapterError {
         let code = match error {
             OpenCodeAdapterError::NotConfigured => ErrorCode::Network,
             OpenCodeAdapterError::Database => ErrorCode::Network,
+            OpenCodeAdapterError::AuthExpired => ErrorCode::AuthExpired,
+            OpenCodeAdapterError::Timeout => ErrorCode::Timeout,
+            OpenCodeAdapterError::Network => ErrorCode::Network,
+            OpenCodeAdapterError::RateLimited => ErrorCode::RateLimited,
             OpenCodeAdapterError::SchemaDrift(_) => ErrorCode::SchemaDrift,
         };
         AdapterError {
@@ -102,10 +118,11 @@ struct MessageInfo {
 }
 
 /// Whether the OpenCode local session database can be found without opening
-/// it.  Used by registry bootstrap to distinguish "not configured" from a
-/// live adapter that later encounters a read/schema failure.
+/// it, or a local OpenCode Go API key is available. Used by registry bootstrap
+/// to distinguish "not configured" from a live adapter that later encounters
+/// a read/schema/network failure.
 pub fn opencode_data_available() -> bool {
-    opencode_database_path().is_some()
+    opencode_api_key().is_some() || opencode_database_path().is_some()
 }
 
 /// Resolve OpenCode's SQLite database using the same XDG/Windows conventions
@@ -115,6 +132,18 @@ pub fn opencode_database_path() -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
 
+    opencode_data_directories()
+        .into_iter()
+        .flat_map(|directory| database_candidates(&directory))
+        .filter(|path| path.is_file())
+        .max_by_key(|path| {
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
+}
+
+fn opencode_data_directories() -> Vec<PathBuf> {
     let mut directories = Vec::new();
     if let Some(data_dir) = env::var_os(OPENCODE_DATA_DIR_ENV) {
         directories.push(PathBuf::from(data_dir));
@@ -141,11 +170,57 @@ pub fn opencode_database_path() -> Option<PathBuf> {
                 .join("opencode"),
         );
     }
-
     directories
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodeAuthEntry {
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodeAuthFile {
+    #[serde(rename = "opencode-go", default)]
+    opencode_go: Option<OpenCodeAuthEntry>,
+}
+
+fn opencode_auth_paths() -> Vec<PathBuf> {
+    if let Some(path) = env::var_os(OPENCODE_AUTH_ENV).map(PathBuf::from) {
+        return vec![path];
+    }
+    opencode_data_directories()
         .into_iter()
-        .flat_map(|directory| database_candidates(&directory))
-        .find(|path| path.is_file())
+        .map(|directory| directory.join("auth.json"))
+        .collect()
+}
+
+fn opencode_api_key() -> Option<String> {
+    for name in ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"] {
+        if let Some(value) = env::var_os(name)
+            .map(|value| value.to_string_lossy().into_owned())
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(value);
+        }
+    }
+
+    for path in opencode_auth_paths() {
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(auth) = serde_json::from_str::<OpenCodeAuthFile>(&raw) else {
+            continue;
+        };
+        if let Some(key) = auth
+            .opencode_go
+            .and_then(|entry| entry.key)
+            .filter(|key| !key.trim().is_empty())
+        {
+            return Some(key);
+        }
+    }
+    None
 }
 
 fn database_candidates(directory: &Path) -> Vec<PathBuf> {
@@ -174,9 +249,169 @@ fn database_candidates(directory: &Path) -> Vec<PathBuf> {
 pub fn fetch_opencode_snapshots(
     settings: OpenCodeResetSettings,
 ) -> Result<Vec<UsageSnapshot>, OpenCodeAdapterError> {
+    if let Some(api_key) = opencode_api_key() {
+        let body = http_get_usage(&api_key)?;
+        return parse_usage_response(&body, Utc::now());
+    }
+
     let observed_at = Utc::now();
     let path = opencode_database_path().ok_or(OpenCodeAdapterError::NotConfigured)?;
     fetch_from_database(&path, settings, observed_at)
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageResponse {
+    #[serde(default)]
+    usage: Option<UsageWindows>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageWindows {
+    #[serde(default)]
+    rolling: Option<UsageWindow>,
+    #[serde(default)]
+    weekly: Option<UsageWindow>,
+    #[serde(default)]
+    monthly: Option<UsageWindow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageWindow {
+    #[serde(default)]
+    percent: Option<serde_json::Value>,
+    #[serde(rename = "resetsAt", default)]
+    resets_at: Option<String>,
+}
+
+fn http_get_usage(api_key: &str) -> Result<serde_json::Value, OpenCodeAdapterError> {
+    let url = env::var(OPENCODE_USAGE_URL_ENV).unwrap_or_else(|_| DEFAULT_USAGE_URL.to_string());
+    let response = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Accept", "application/json")
+        .set("User-Agent", "ai-usage-bar")
+        .timeout(HTTP_TIMEOUT)
+        .call()
+        .map_err(map_ureq_error)?;
+    let status = response.status();
+    if status == 401 || status == 403 {
+        return Err(OpenCodeAdapterError::AuthExpired);
+    }
+    if status == 429 {
+        return Err(OpenCodeAdapterError::RateLimited);
+    }
+    if !(200..300).contains(&status) {
+        return Err(OpenCodeAdapterError::Network);
+    }
+    response
+        .into_json()
+        .map_err(|_| OpenCodeAdapterError::SchemaDrift("usage body is not JSON".into()))
+}
+
+fn map_ureq_error(error: ureq::Error) -> OpenCodeAdapterError {
+    match error {
+        ureq::Error::Status(401 | 403, _) => OpenCodeAdapterError::AuthExpired,
+        ureq::Error::Status(429, _) => OpenCodeAdapterError::RateLimited,
+        ureq::Error::Status(_, _) => OpenCodeAdapterError::Network,
+        ureq::Error::Transport(transport) => {
+            let message = transport.to_string().to_lowercase();
+            if message.contains("timed out") || message.contains("timeout") {
+                OpenCodeAdapterError::Timeout
+            } else {
+                OpenCodeAdapterError::Network
+            }
+        }
+    }
+}
+
+fn parse_usage_response(
+    raw: &serde_json::Value,
+    observed_at: DateTime<Utc>,
+) -> Result<Vec<UsageSnapshot>, OpenCodeAdapterError> {
+    let response: UsageResponse = serde_json::from_value(raw.clone())
+        .map_err(|error| OpenCodeAdapterError::SchemaDrift(error.to_string()))?;
+    let usage = response
+        .usage
+        .ok_or_else(|| OpenCodeAdapterError::SchemaDrift("missing usage object".into()))?;
+
+    let windows = [
+        ("5-hour", WindowKind::Rolling, usage.rolling),
+        ("weekly", WindowKind::Weekly, usage.weekly),
+        ("monthly", WindowKind::Monthly, usage.monthly),
+    ];
+    let mut snapshots = Vec::with_capacity(windows.len());
+    for (label, window_kind, window) in windows {
+        let window = window.ok_or_else(|| {
+            OpenCodeAdapterError::SchemaDrift(format!("missing {label} usage window"))
+        })?;
+        snapshots.push(parse_usage_window(
+            label,
+            window_kind,
+            &window,
+            observed_at,
+        )?);
+    }
+    Ok(snapshots)
+}
+
+fn parse_usage_window(
+    label: &str,
+    window_kind: WindowKind,
+    window: &UsageWindow,
+    observed_at: DateTime<Utc>,
+) -> Result<UsageSnapshot, OpenCodeAdapterError> {
+    let percent = parse_finite_number(window.percent.as_ref()).ok_or_else(|| {
+        OpenCodeAdapterError::SchemaDrift(format!("{label} usage is missing percent"))
+    })?;
+    if !(0.0..=100.0).contains(&percent) {
+        return Err(OpenCodeAdapterError::SchemaDrift(format!(
+            "{label} usage percent is outside [0, 100]"
+        )));
+    }
+    let resets_at = window
+        .resets_at
+        .as_deref()
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|date| date.with_timezone(&Utc))
+                .map_err(|_| {
+                    OpenCodeAdapterError::SchemaDrift(format!(
+                        "{label} reset timestamp is not RFC3339"
+                    ))
+                })
+        })
+        .transpose()?;
+
+    let snapshot = UsageSnapshot {
+        provider: OPENCODE_PROVIDER,
+        account_id: "opencode-go-api".to_string(),
+        metric_kind: MetricKind::Quota,
+        window_kind,
+        unit: "percent".to_string(),
+        observed_at,
+        source: Source::Api,
+        freshness: Freshness::Live,
+        confidence: Confidence::Exact,
+        used: Some(percent),
+        remaining: Some(100.0 - percent),
+        limit: Some(100.0),
+        unlimited: false,
+        resets_at,
+        window_label: Some(label.to_string()),
+        error: None,
+    };
+    snapshot
+        .validate()
+        .map_err(|error| OpenCodeAdapterError::SchemaDrift(error.to_string()))?;
+    Ok(snapshot)
+}
+
+fn parse_finite_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    let parsed = match value? {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(value) => value.parse::<f64>().ok(),
+        _ => None,
+    }?;
+    parsed.is_finite().then_some(parsed)
 }
 
 fn fetch_from_database(
@@ -485,7 +720,7 @@ fn model_weight_known(model: &str) -> Option<f64> {
     Some(match model {
         // Models whose published Usage tier is $15 are charged against the
         // $60 Go monthly allowance at 4x their raw model cost.
-        "grok-4.5" | "gpt-5.6-luna" | "kimi-k3" | "mimo-v2.5-pro" | "qwen3.8-max"
+        "grok-4.5" | "gpt-5.6-luna" | "glm-5.3" | "kimi-k3" | "mimo-v2.5-pro" | "qwen3.8-max"
         | "deepseek-v4-pro" => 4.0,
         // Models whose published Usage tier is $60 use the raw model cost.
         "glm-5.2" | "glm-5.1" | "kimi-k2.7-code" | "kimi-k2.6" | "mimo-v2.5" | "minimax-m3"
@@ -509,9 +744,49 @@ mod tests {
     #[test]
     fn published_usage_tiers_map_to_expected_weights() {
         assert_eq!(model_weight("qwen3.8-max"), 4.0);
+        assert_eq!(model_weight("glm-5.3"), 4.0);
         assert_eq!(model_weight("glm-5.2"), 1.0);
         assert_eq!(model_weight("future-model"), 1.0);
         assert!(is_unknown_model("future-model"));
+    }
+
+    #[test]
+    fn parses_authoritative_go_usage_windows() {
+        let observed_at = instant("2026-08-14T13:00:00Z");
+        let raw = serde_json::json!({
+            "usage": {
+                "rolling": {"status": "ok", "percent": 22, "resetsAt": "2026-08-14T17:43:38.318Z"},
+                "weekly": {"status": "ok", "percent": 83, "resetsAt": "2026-08-17T00:00:00.318Z"},
+                "monthly": {"status": "ok", "percent": 60, "resetsAt": "2026-09-05T14:03:20.318Z"}
+            }
+        });
+
+        let snapshots = parse_usage_response(&raw, observed_at).unwrap();
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].source, Source::Api);
+        assert_eq!(snapshots[0].confidence, Confidence::Exact);
+        assert_eq!(snapshots[0].used, Some(22.0));
+        assert_eq!(snapshots[1].used, Some(83.0));
+        assert_eq!(snapshots[2].used, Some(60.0));
+        assert_eq!(
+            snapshots[0].resets_at,
+            Some(instant("2026-08-14T17:43:38.318Z"))
+        );
+    }
+
+    #[test]
+    fn rejects_authoritative_usage_when_a_window_is_missing() {
+        let raw = serde_json::json!({
+            "usage": {
+                "rolling": {"percent": 22, "resetsAt": "2026-08-14T17:43:38.318Z"},
+                "weekly": {"percent": 83, "resetsAt": "2026-08-17T00:00:00.318Z"}
+            }
+        });
+        assert!(matches!(
+            parse_usage_response(&raw, instant("2026-08-14T13:00:00Z")),
+            Err(OpenCodeAdapterError::SchemaDrift(message))
+                if message.contains("monthly")
+        ));
     }
 
     #[test]
