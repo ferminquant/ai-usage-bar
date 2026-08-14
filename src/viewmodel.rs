@@ -1060,6 +1060,65 @@ mod tests {
     }
 
     #[test]
+    fn kimi_window_focus_is_independent_from_row_visibility() {
+        // Both Kimi quota windows exist and stay visible together: focusing
+        // one window never hides the other, and either window can drive the
+        // compact pill without changing the other row's visibility.
+        let mut five_hour = make_snapshot(Some(58.0), Freshness::Live, Some("5-hour"));
+        five_hour.provider = Provider::Kimi;
+        five_hour.account_id = "kimi-test".into();
+        five_hour.window_kind = WindowKind::Rolling;
+        let mut weekly = make_snapshot(Some(40.0), Freshness::Live, Some("primary"));
+        weekly.provider = Provider::Kimi;
+        weekly.account_id = "kimi-test".into();
+        weekly.window_kind = WindowKind::Weekly;
+
+        let snapshots = vec![five_hour.clone(), weekly.clone()];
+
+        // Default view keeps both rows visible.
+        let filtered = filter_snapshots_for_view(&snapshots, &ResolvedView::default());
+        assert_eq!(filtered.len(), 2);
+        let labels: Vec<Option<&str>> = filtered
+            .iter()
+            .map(|snapshot| snapshot.window_label.as_deref())
+            .collect();
+        assert!(labels.contains(&Some("5-hour")));
+        assert!(labels.contains(&Some("primary")));
+
+        // Focusing 5-hour drives the pill with 5-hour, and weekly stays in
+        // the tooltip (visibility is untouched by focus).
+        let five_hour_view = build_tray_view_focused_window(
+            &filtered,
+            Some(&Provider::Kimi),
+            Some("5-hour"),
+            Utc::now(),
+        );
+        assert_eq!(five_hour_view.used_percent, Some(58.0));
+        assert_eq!(five_hour_view.focus_provider, Some(Provider::Kimi));
+        assert!(five_hour_view.tooltip.contains("5-hour: 42% left"));
+        assert!(five_hour_view.tooltip.contains("Weekly: 60% left"));
+
+        // Focusing weekly drives the pill with weekly, and 5-hour stays.
+        let weekly_view = build_tray_view_focused_window(
+            &filtered,
+            Some(&Provider::Kimi),
+            Some("weekly"),
+            Utc::now(),
+        );
+        assert_eq!(weekly_view.used_percent, Some(40.0));
+        assert_eq!(weekly_view.focus_provider, Some(Provider::Kimi));
+        assert!(weekly_view.tooltip.contains("5-hour: 42% left"));
+        assert!(weekly_view.tooltip.contains("Weekly: 60% left"));
+
+        // Reselecting the same provider without a window argument falls back
+        // to the provider's default window (5-hour) instead of dropping the
+        // provider entirely, and both rows remain present.
+        let reselect = build_tray_view_focused(&filtered, Some(&Provider::Kimi), Utc::now());
+        assert_eq!(reselect.used_percent, Some(58.0));
+        assert!(reselect.tooltip.contains("Weekly: 60% left"));
+    }
+
+    #[test]
     fn reset_label_includes_days_remaining() {
         let now = Utc.with_ymd_and_hms(2026, 8, 4, 12, 0, 0).unwrap();
         let reset = (now + Duration::days(3) + Duration::hours(5)).to_rfc3339();

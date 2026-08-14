@@ -26,7 +26,10 @@ mod windows_shell {
     use std::sync::{Arc, Once};
     use std::thread;
 
-    use super::shell_logic::{normalize_used_percent, render_detail_text, usage_band, UsageBand};
+    use super::shell_logic::{
+        apply_drop, normalize_used_percent, render_detail_text, usage_band, DropCard, DropGrid,
+        SlotRect, UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS,
+    };
 
     use windows::core::*;
     use windows::Win32::Foundation::*;
@@ -1034,11 +1037,21 @@ mod windows_shell {
         };
         // Clear any transient status so the pill only shows the provider name.
         clear_status_for_window(hwnd, state);
+        let same_provider = state.focus_provider.as_ref() == Some(&provider);
         state.focus_provider = Some(provider);
-        state.focus_window = None;
+        if !same_provider {
+            // A provider switch starts at the provider's default window.
+            // Reselecting the same provider keeps its focused window (Kimi
+            // 5-hour/weekly, Ollama session/weekly, OpenCode 5-hour/weekly/
+            // monthly) instead of snapping back to the default.
+            state.focus_window = None;
+        }
         let previous_config = state.config.clone();
         let focused = state.focus_provider.clone();
-        state.config.set_view_defaults(focused.as_ref(), None);
+        let window = state.focus_window.clone();
+        state
+            .config
+            .set_view_defaults(focused.as_ref(), window.as_deref());
         if let Err(error) = state.config.save(&state.config_path) {
             eprintln!("could not persist display default: {error}");
             state.config = previous_config;
@@ -1377,20 +1390,23 @@ mod windows_shell {
         finish_view_change(hwnd, state, previous_config);
     }
 
-    fn reorder_provider(hwnd: HWND, provider: Provider, before: Provider) {
+    /// True when `order` is a permutation of exactly `available` (same length,
+    /// no duplicates, same members). The panel only produces permutations, but
+    /// the guard keeps a stale/foreign order from being persisted.
+    fn is_full_permutation(order: &[Provider], available: &[Provider]) -> bool {
+        order.len() == available.len()
+            && order.iter().all(|provider| available.contains(provider))
+            && available.iter().all(|provider| order.contains(provider))
+    }
+
+    fn reorder_provider(hwnd: HWND, order: Vec<Provider>) {
         let Some(state) = app_state(hwnd) else {
             return;
         };
         let available = panel_providers(&state.snapshots);
-        if provider == before || !available.contains(&provider) || !available.contains(&before) {
+        if !is_full_permutation(&order, &available) {
             return;
         }
-        let resolved = state.config.resolved_view(&available);
-        let mut order = ordered_providers(&available, &resolved);
-        if !move_provider_before(&mut order, &provider, &before) {
-            return;
-        }
-
         let previous_config = state.config.clone();
         state.config.set_view_provider_order(&order);
         finish_view_change(hwnd, state, previous_config);
@@ -1967,6 +1983,7 @@ mod windows_shell {
     enum PanelAction {
         None,
         FocusProvider(Provider),
+        FocusWindow(Provider, String),
         ToggleProvider(Provider),
         ToggleWindow(Provider, String),
         ToggleMetric(Provider, MetricKind),
@@ -1977,18 +1994,29 @@ mod windows_shell {
         OpenOllamaUsage,
         OpenKimiConsole,
         ConfigureOpenCodeResets,
-        Reorder(Provider, Provider),
+        /// Persist a complete provider order produced by a drag. Carrying the
+        /// full order (rather than a "move before" pair) lets the commit reuse
+        /// the exact drop index the preview showed.
+        Reorder(Vec<Provider>),
     }
 
+    #[derive(Clone)]
     struct PanelRow {
         rect: RECT,
         label: String,
         value: String,
         checked: bool,
         toggleable: bool,
+        /// Action fired by the row's checkbox (visibility toggle).
         action: PanelAction,
+        /// Action fired by the row label area. Quota windows focus the window;
+        /// optional metric rows keep the visibility toggle for the whole row.
+        focus_action: Option<PanelAction>,
+        /// Whether this quota window is the focused window for its provider.
+        focused: bool,
     }
 
+    #[derive(Clone)]
     struct PanelCard {
         rect: RECT,
         provider: Provider,
@@ -1997,6 +2025,9 @@ mod windows_shell {
         focused: bool,
         eye_rect: RECT,
         rows: Vec<PanelRow>,
+        /// Placeholder slot shown at the current drop index while dragging. It
+        /// has no provider/rows and is painted as an outline only.
+        placeholder: bool,
     }
 
     struct PanelButton {
@@ -2005,11 +2036,29 @@ mod windows_shell {
         action: PanelAction,
     }
 
-    #[derive(Clone)]
-    struct PanelDragOrigin {
+    /// State of an in-flight header gesture. The lifecycle is explicit:
+    /// `pressed` (captured, below the movement threshold) becomes `active`
+    /// once the pointer crosses [`DRAG_THRESHOLD_PX`], and ends exactly once
+    /// on mouse-up, capture loss, Escape, or panel rebuild.
+    struct PanelDragState {
         provider: Provider,
-        rect: RECT,
-        visible: bool,
+        press_point: POINT,
+        pointer: POINT,
+        active: bool,
+        /// Full provider order captured at press (a permutation of the grid).
+        origin_order: Vec<Provider>,
+        /// Origin cards (rects, rows, visibility) captured at press.
+        origin_cards: Vec<PanelCard>,
+        /// Flow cards (origin minus the grabbed provider) reflowed into the
+        /// two-column grid. The current placeholder is inserted into this
+        /// flow for both hit-testing and painting.
+        flow: Vec<PanelCard>,
+        /// Drop index in flow space, re-resolved by the same resolver on
+        /// every move and mouse-up so the committed order matches the visual
+        /// destination.
+        drop_index: Option<usize>,
+        /// The grabbed card's origin rect (floating preview anchor).
+        grabbed_rect: RECT,
     }
 
     struct PanelLayout {
@@ -2023,10 +2072,10 @@ mod windows_shell {
         parent: HWND,
         layout: PanelLayout,
         result: Option<PanelAction>,
-        drag_provider: Option<Provider>,
-        drag_target: Option<Provider>,
-        drag_origin_order: Vec<Provider>,
-        drag_origin_cards: Vec<PanelDragOrigin>,
+        drag: Option<PanelDragState>,
+        /// A rebuild was requested while a drag owned the mouse; run it once
+        /// the gesture ends instead of rebuilding mid-drag.
+        rebuild_pending: bool,
     }
 
     fn rect_contains(rect: RECT, point: POINT) -> bool {
@@ -2089,6 +2138,8 @@ mod windows_shell {
             checked: false,
             toggleable: false,
             action: PanelAction::None,
+            focus_action: None,
+            focused: false,
         }
     }
 
@@ -2096,6 +2147,8 @@ mod windows_shell {
         snapshots: &[UsageSnapshot],
         provider: &Provider,
         view: &ResolvedView,
+        focused_provider: Option<&Provider>,
+        focus_window: Option<&str>,
         now: DateTime<Utc>,
     ) -> Vec<PanelRow> {
         let mut rows = Vec::new();
@@ -2122,7 +2175,14 @@ mod windows_shell {
                 value,
                 checked,
                 toggleable: true,
-                action: PanelAction::ToggleWindow(provider.clone(), window),
+                // Clicking the label focuses the window; the checkbox toggles
+                // visibility. Focus and visibility stay independent, so Kimi's
+                // 5-hour and weekly rows (and other multi-window providers)
+                // remain visible and independently focusable.
+                action: PanelAction::ToggleWindow(provider.clone(), window.clone()),
+                focus_action: Some(PanelAction::FocusWindow(provider.clone(), window.clone())),
+                focused: focused_provider == Some(provider)
+                    && focus_window == Some(window.as_str()),
             });
         }
 
@@ -2140,6 +2200,8 @@ mod windows_shell {
                 checked: view.is_metric_visible(provider, metric),
                 toggleable: true,
                 action: PanelAction::ToggleMetric(provider.clone(), metric),
+                focus_action: None,
+                focused: false,
             });
         }
         if available_windows(snapshots, provider).is_empty() {
@@ -2155,52 +2217,17 @@ mod windows_shell {
         rows
     }
 
-    fn move_provider_before(
-        order: &mut Vec<Provider>,
-        provider: &Provider,
-        target: &Provider,
-    ) -> bool {
-        if provider == target {
-            return false;
+    /// Lay `cards` into a row-major grid with `columns` columns, updating each
+    /// card's rect, eye rect, and row rects. Card heights are preserved.
+    fn reflow_grid(cards: &mut [PanelCard], columns: usize) {
+        if cards.is_empty() {
+            return;
         }
-        let Some(source_index) = order.iter().position(|candidate| candidate == provider) else {
-            return false;
-        };
-        let Some(target_index) = order.iter().position(|candidate| candidate == target) else {
-            return false;
-        };
-        let moved = order.remove(source_index);
-        let adjusted_target = if source_index < target_index {
-            target_index.saturating_sub(1)
-        } else {
-            target_index
-        };
-        order.insert(adjusted_target, moved);
-        true
-    }
-
-    fn reorder_panel_cards(cards: &mut Vec<PanelCard>, order: &[Provider]) {
-        let mut reordered = Vec::with_capacity(cards.len());
-        for provider in order {
-            if let Some(index) = cards.iter().position(|card| &card.provider == provider) {
-                reordered.push(cards.remove(index));
-            }
-        }
-        reordered.append(cards);
-        *cards = reordered;
-    }
-
-    /// Recompute card and footer rectangles after a provider order or card
-    /// height changes. Rows are laid out in a deterministic row-major grid;
-    /// this makes the visual order match the order shown by drag-and-drop.
-    fn reflow_panel_layout(layout: &mut PanelLayout) {
-        let columns = layout.cards.len().clamp(1, 2) as i32;
-        layout.width = PANEL_MARGIN * 2 + columns * PANEL_CARD_WIDTH + (columns - 1) * PANEL_GAP;
-
-        let row_count = (layout.cards.len() as i32 + columns - 1) / columns;
-        let mut row_heights = vec![0_i32; row_count.max(1) as usize];
-        for (index, card) in layout.cards.iter().enumerate() {
-            let row = index / columns as usize;
+        let columns = columns.max(1);
+        let row_count = cards.len().div_ceil(columns);
+        let mut row_heights = vec![0_i32; row_count];
+        for (index, card) in cards.iter().enumerate() {
+            let row = index / columns;
             row_heights[row] = row_heights[row].max(card.rect.bottom - card.rect.top);
         }
         let mut row_tops = Vec::with_capacity(row_heights.len());
@@ -2210,9 +2237,9 @@ mod windows_shell {
             top += row_height + PANEL_GAP;
         }
 
-        for (index, card) in layout.cards.iter_mut().enumerate() {
-            let column = index % columns as usize;
-            let row = index / columns as usize;
+        for (index, card) in cards.iter_mut().enumerate() {
+            let column = index % columns;
+            let row = index / columns;
             let left = PANEL_MARGIN + column as i32 * (PANEL_CARD_WIDTH + PANEL_GAP);
             let card_height = card.rect.bottom - card.rect.top;
             card.rect = RECT {
@@ -2238,9 +2265,24 @@ mod windows_shell {
                 row_y += PANEL_ROW_HEIGHT;
             }
         }
+    }
 
-        let footer_top = top - PANEL_GAP + 4;
-        let footer_y = footer_top + 8;
+    /// Recompute card and footer rectangles after a provider order or card
+    /// height changes. Rows are laid out in a deterministic row-major grid;
+    /// this makes the visual order match the order shown by drag-and-drop.
+    fn reflow_panel_layout(layout: &mut PanelLayout) {
+        let columns = layout.cards.len().clamp(1, 2);
+        reflow_grid(&mut layout.cards, columns);
+        layout.width =
+            PANEL_MARGIN * 2 + columns as i32 * PANEL_CARD_WIDTH + (columns as i32 - 1) * PANEL_GAP;
+
+        let card_bottom = layout
+            .cards
+            .iter()
+            .map(|card| card.rect.bottom)
+            .max()
+            .unwrap_or(PANEL_MARGIN + PANEL_HEADER_HEIGHT);
+        let footer_y = card_bottom + 4 + 8;
         let button_width = 108;
         let buttons_per_row = ((layout.width - PANEL_MARGIN * 2 + PANEL_GAP)
             / (button_width + PANEL_GAP))
@@ -2275,7 +2317,14 @@ mod windows_shell {
         let now = Utc::now();
         let mut cards = Vec::new();
         for provider in providers {
-            let rows = panel_card_rows(&state.snapshots, &provider, &view, now);
+            let rows = panel_card_rows(
+                &state.snapshots,
+                &provider,
+                &view,
+                state.focus_provider.as_ref(),
+                state.focus_window.as_deref(),
+                now,
+            );
             let card_height = PANEL_HEADER_HEIGHT
                 + (rows.len() as i32 * PANEL_ROW_HEIGHT)
                 + PANEL_CARD_PADDING * 2;
@@ -2292,6 +2341,7 @@ mod windows_shell {
                 eye_rect: RECT::default(),
                 provider,
                 rows,
+                placeholder: false,
             });
         }
 
@@ -2394,6 +2444,15 @@ mod windows_shell {
         let Some(parent) = panel_state(panel).map(|state| state.parent) else {
             return;
         };
+        // Never rebuild mid-drag: the gesture owns the layout. Defer the
+        // rebuild until the drag ends so a refresh result cannot wipe the
+        // drag state (which previously caused repeated-drag lockups).
+        if let Some(state) = panel_state(panel) {
+            if state.drag.is_some() {
+                state.rebuild_pending = true;
+                return;
+            }
+        }
         let Some(layout) = build_control_panel_layout(parent) else {
             unsafe {
                 let _ = DestroyWindow(panel);
@@ -2403,10 +2462,8 @@ mod windows_shell {
         let (width, height) = (layout.width, layout.height);
         if let Some(state) = panel_state(panel) {
             state.layout = layout;
-            state.drag_provider = None;
-            state.drag_target = None;
-            state.drag_origin_order.clear();
-            state.drag_origin_cards.clear();
+            state.drag = None;
+            state.rebuild_pending = false;
         }
         position_control_panel_window(panel, parent, width, height);
         unsafe {
@@ -2435,6 +2492,129 @@ mod windows_shell {
         }
     }
 
+    /// Checkbox hit/draw box for a quota or metric row.
+    fn row_checkbox_rect(row_rect: RECT) -> RECT {
+        RECT {
+            left: row_rect.right - 20,
+            top: row_rect.top + 7,
+            right: row_rect.right - 4,
+            bottom: row_rect.top + 23,
+        }
+    }
+
+    /// Paint one provider card (grid card or the floating grab preview) at
+    /// `rect`. Row/eye geometry is derived from `rect` so the same routine
+    /// works for the grid and for the pointer-following grab card.
+    fn paint_card(hdc: HDC, card: &PanelCard, rect: RECT, lifted: bool) {
+        let background = if card.visible {
+            COLOR_BACKGROUND
+        } else {
+            COLOR_OUTER
+        };
+        let border = if lifted {
+            COLOR_YELLOW
+        } else if card.focused {
+            COLOR_GREEN
+        } else if card.visible {
+            COLOR_CARD_BORDER
+        } else {
+            COLOR_BORDER
+        };
+        fill_round_rect(hdc, rect, 10, background);
+        stroke_round_rect(hdc, rect, 10, border);
+        let eye_rect = RECT {
+            left: rect.right - 42,
+            top: rect.top + 14,
+            right: rect.right - 12,
+            bottom: rect.top + 42,
+        };
+        draw_text(
+            hdc,
+            RECT {
+                left: rect.left + PANEL_CARD_PADDING,
+                top: rect.top + 14,
+                right: eye_rect.left - 4,
+                bottom: rect.top + 48,
+            },
+            &card.title,
+            17,
+            FW_BOLD,
+            if card.visible {
+                COLOR_TEXT
+            } else {
+                COLOR_NEUTRAL
+            },
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+        );
+        draw_checkbox(hdc, eye_rect, card.visible, true);
+
+        for (index, row) in card.rows.iter().enumerate() {
+            let row_rect = RECT {
+                left: rect.left + PANEL_CARD_PADDING,
+                top: rect.top + PANEL_HEADER_HEIGHT + index as i32 * PANEL_ROW_HEIGHT,
+                right: rect.right - PANEL_CARD_PADDING,
+                bottom: rect.top
+                    + PANEL_HEADER_HEIGHT
+                    + index as i32 * PANEL_ROW_HEIGHT
+                    + PANEL_ROW_HEIGHT,
+            };
+            let text_color = if card.visible && row.checked {
+                COLOR_TEXT
+            } else {
+                COLOR_NEUTRAL
+            };
+            let focused = row.focused && card.visible;
+            draw_text(
+                hdc,
+                RECT {
+                    left: row_rect.left,
+                    top: row_rect.top,
+                    right: row_rect.left + 82,
+                    bottom: row_rect.bottom,
+                },
+                &row.label,
+                13,
+                if focused { FW_BOLD } else { FW_NORMAL },
+                if focused { COLOR_GREEN } else { text_color },
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+            draw_text(
+                hdc,
+                RECT {
+                    left: row_rect.left + 80,
+                    top: row_rect.top,
+                    right: row_rect.right - 30,
+                    bottom: row_rect.bottom,
+                },
+                &row.value,
+                12,
+                FW_NORMAL,
+                if card.visible && row.checked {
+                    COLOR_MUTED
+                } else {
+                    COLOR_BORDER
+                },
+                DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS,
+            );
+            if row.toggleable {
+                draw_checkbox(hdc, row_checkbox_rect(row_rect), row.checked, card.visible);
+            }
+        }
+    }
+
+    /// Dashed outline for the empty drop slot during a drag.
+    fn paint_placeholder(hdc: HDC, rect: RECT) {
+        unsafe {
+            let pen = CreatePen(PS_DASH, 1, COLOR_YELLOW);
+            let old_pen = SelectObject(hdc, pen.into());
+            let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen.into());
+        }
+    }
+
     fn paint_control_panel(hwnd: HWND) {
         let Some(state) = panel_state(hwnd) else {
             return;
@@ -2442,12 +2622,15 @@ mod windows_shell {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
-            let client = RECT {
+            // Fill the real client rect so a mid-drag preview (which never
+            // resizes the popup) cannot leave stale bands below the cards.
+            let mut client = RECT {
                 left: 0,
                 top: 0,
                 right: state.layout.width,
                 bottom: state.layout.height,
             };
+            let _ = GetClientRect(hwnd, &mut client);
             fill_rect(hdc, client, COLOR_OUTER);
             draw_text(
                 hdc,
@@ -2479,93 +2662,10 @@ mod windows_shell {
             );
 
             for card in &state.layout.cards {
-                let background = if card.visible {
-                    COLOR_BACKGROUND
+                if card.placeholder {
+                    paint_placeholder(hdc, card.rect);
                 } else {
-                    COLOR_OUTER
-                };
-                let border = if state.drag_target.as_ref() == Some(&card.provider) {
-                    COLOR_YELLOW
-                } else if card.focused {
-                    COLOR_GREEN
-                } else if card.visible {
-                    COLOR_CARD_BORDER
-                } else {
-                    COLOR_BORDER
-                };
-                fill_round_rect(hdc, card.rect, 10, background);
-                stroke_round_rect(hdc, card.rect, 10, border);
-                draw_text(
-                    hdc,
-                    RECT {
-                        left: card.rect.left + PANEL_CARD_PADDING,
-                        top: card.rect.top + 14,
-                        right: card.eye_rect.left - 4,
-                        bottom: card.rect.top + 48,
-                    },
-                    &card.title,
-                    17,
-                    FW_BOLD,
-                    if card.visible {
-                        COLOR_TEXT
-                    } else {
-                        COLOR_NEUTRAL
-                    },
-                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-                );
-                draw_checkbox(hdc, card.eye_rect, card.visible, true);
-
-                for row in &card.rows {
-                    let text_color = if card.visible && row.checked {
-                        COLOR_TEXT
-                    } else {
-                        COLOR_NEUTRAL
-                    };
-                    draw_text(
-                        hdc,
-                        RECT {
-                            left: row.rect.left,
-                            top: row.rect.top,
-                            right: row.rect.left + 82,
-                            bottom: row.rect.bottom,
-                        },
-                        &row.label,
-                        13,
-                        FW_NORMAL,
-                        text_color,
-                        DT_SINGLELINE | DT_VCENTER | DT_LEFT,
-                    );
-                    draw_text(
-                        hdc,
-                        RECT {
-                            left: row.rect.left + 80,
-                            top: row.rect.top,
-                            right: row.rect.right - 30,
-                            bottom: row.rect.bottom,
-                        },
-                        &row.value,
-                        12,
-                        FW_NORMAL,
-                        if card.visible && row.checked {
-                            COLOR_MUTED
-                        } else {
-                            COLOR_BORDER
-                        },
-                        DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS,
-                    );
-                    if row.toggleable {
-                        draw_checkbox(
-                            hdc,
-                            RECT {
-                                left: row.rect.right - 20,
-                                top: row.rect.top + 7,
-                                right: row.rect.right - 4,
-                                bottom: row.rect.top + 23,
-                            },
-                            row.checked,
-                            card.visible,
-                        );
-                    }
+                    paint_card(hdc, card, card.rect, false);
                 }
             }
 
@@ -2582,12 +2682,38 @@ mod windows_shell {
                     DT_SINGLELINE | DT_CENTER | DT_VCENTER,
                 );
             }
+
+            // The grabbed card floats above the grid, following the pointer
+            // with the grab offset. It was removed from the flow, so it is
+            // painted exactly once, on top.
+            if let Some(drag) = &state.drag {
+                if drag.active {
+                    let dx = drag.pointer.x - drag.press_point.x;
+                    let dy = drag.pointer.y - drag.press_point.y;
+                    let rect = RECT {
+                        left: drag.grabbed_rect.left + dx,
+                        top: drag.grabbed_rect.top + dy,
+                        right: drag.grabbed_rect.right + dx,
+                        bottom: drag.grabbed_rect.bottom + dy,
+                    };
+                    if let Some(grabbed) = drag
+                        .origin_cards
+                        .iter()
+                        .find(|card| card.provider == drag.provider)
+                    {
+                        paint_card(hdc, grabbed, rect, true);
+                    }
+                }
+            }
             let _ = EndPaint(hwnd, &paint);
         }
     }
 
     fn panel_action_at(state: &PanelState, point: POINT) -> Option<PanelAction> {
         for card in &state.layout.cards {
+            if card.placeholder {
+                continue;
+            }
             if rect_contains(card.eye_rect, point) {
                 return Some(PanelAction::ToggleProvider(card.provider.clone()));
             }
@@ -2595,9 +2721,22 @@ mod windows_shell {
                 continue;
             }
             for row in &card.rows {
-                if rect_contains(row.rect, point) && card.visible && row.toggleable {
+                if !rect_contains(row.rect, point) {
+                    continue;
+                }
+                if !card.visible || !row.toggleable {
+                    continue;
+                }
+                // Checkbox toggles visibility; the quota label focuses the
+                // window. Optional metric rows keep the toggle for the whole
+                // row (they have no window focus concept).
+                if rect_contains(row_checkbox_rect(row.rect), point) {
                     return Some(row.action.clone());
                 }
+                if let Some(focus) = &row.focus_action {
+                    return Some(focus.clone());
+                }
+                return Some(row.action.clone());
             }
             return Some(if card.visible {
                 PanelAction::FocusProvider(card.provider.clone())
@@ -2615,33 +2754,149 @@ mod windows_shell {
 
     fn panel_drag_card_at(state: &PanelState, point: POINT) -> Option<Provider> {
         state.layout.cards.iter().find_map(|card| {
+            if card.placeholder || !card.visible {
+                return None;
+            }
             let header = RECT {
                 left: card.rect.left,
                 top: card.rect.top,
                 right: card.rect.right,
                 bottom: card.rect.top + PANEL_HEADER_HEIGHT,
             };
-            (card.visible && rect_contains(header, point) && !rect_contains(card.eye_rect, point))
+            (rect_contains(header, point) && !rect_contains(card.eye_rect, point))
                 .then(|| card.provider.clone())
         })
     }
 
-    /// Resolve a drag target against the card geometry captured at mouse-down.
-    ///
-    /// The preview reorders `state.layout.cards` while the pointer is moving.
-    /// Hit-testing that mutable layout makes the card under a stationary
-    /// pointer change after every preview reorder, which causes the visible
-    /// flicker/oscillation reported by users. Frozen origins make the target
-    /// decision stable for the duration of one drag gesture.
-    fn panel_drop_target_at_origin(
-        origins: &[PanelDragOrigin],
-        point: POINT,
-        dragged: &Provider,
-    ) -> Option<Provider> {
-        origins.iter().find_map(|card| {
-            (card.provider != *dragged && card.visible && rect_contains(card.rect, point))
-                .then(|| card.provider.clone())
-        })
+    /// A placeholder card for the current drop slot. It carries the grabbed
+    /// card's height so the grid rows keep their shape while the rest of the
+    /// flow reflows around the slot.
+    fn placeholder_card(drag: &PanelDragState) -> PanelCard {
+        PanelCard {
+            rect: RECT {
+                left: 0,
+                top: 0,
+                right: PANEL_CARD_WIDTH,
+                bottom: drag.grabbed_rect.bottom - drag.grabbed_rect.top,
+            },
+            provider: drag.provider.clone(),
+            title: String::new(),
+            visible: false,
+            focused: false,
+            eye_rect: RECT::default(),
+            rows: Vec::new(),
+            placeholder: true,
+        }
+    }
+
+    fn to_slot_rect(rect: RECT) -> SlotRect {
+        SlotRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+
+    /// The two-column grid bounds that the drop model resolves against.
+    fn panel_grid_bounds(cards: &[PanelCard]) -> SlotRect {
+        SlotRect {
+            left: PANEL_MARGIN,
+            top: cards
+                .iter()
+                .map(|card| card.rect.top)
+                .min()
+                .unwrap_or(PANEL_MARGIN + PANEL_HEADER_HEIGHT),
+            right: PANEL_MARGIN + 2 * PANEL_CARD_WIDTH + PANEL_GAP,
+            bottom: cards
+                .iter()
+                .map(|card| card.rect.bottom)
+                .max()
+                .unwrap_or(PANEL_MARGIN + PANEL_HEADER_HEIGHT),
+        }
+    }
+
+    fn panel_drop_cards(cards: &[PanelCard]) -> Vec<DropCard<Provider>> {
+        cards
+            .iter()
+            .map(|card| DropCard {
+                id: card.provider.clone(),
+                rect: to_slot_rect(card.rect),
+                visible: card.visible,
+            })
+            .collect()
+    }
+
+    fn preview_cards_for_drag(drag: &PanelDragState) -> (Vec<PanelCard>, usize) {
+        let flow_len = drag.flow.len();
+        let index = drag
+            .drop_index
+            .unwrap_or_else(|| {
+                drag.origin_order
+                    .iter()
+                    .position(|candidate| candidate == &drag.provider)
+                    .unwrap_or(0)
+            })
+            .min(flow_len);
+        let mut cards = Vec::with_capacity(flow_len + 1);
+        for (slot, card) in drag.flow.iter().enumerate() {
+            if slot == index {
+                cards.push(placeholder_card(drag));
+            }
+            cards.push(card.clone());
+        }
+        if index >= flow_len {
+            cards.push(placeholder_card(drag));
+        }
+        reflow_grid(&mut cards, GRID_COLUMNS);
+        (cards, index)
+    }
+
+    /// Re-resolve the drop index against the same placeholder geometry that
+    /// is painted for the current preview. This keeps a card that shifted
+    /// columns from being interpreted as the old empty slot.
+    fn resolve_drop_index_at(drag: &PanelDragState, point: POINT) -> Option<usize> {
+        let (cards, placeholder_index) = preview_cards_for_drag(drag);
+        let grid = panel_grid_bounds(&cards);
+        let drop_cards = panel_drop_cards(&cards);
+        DropGrid::preview_drop_index(&drop_cards, placeholder_index, grid, (point.x, point.y))
+    }
+
+    fn resolve_drop_index(drag: &PanelDragState) -> Option<usize> {
+        resolve_drop_index_at(drag, drag.pointer)
+    }
+
+    /// Replace the live layout with the preview grid: the flow cards plus a
+    /// placeholder at the current drop index. The popup is never resized or
+    /// repositioned here; that happens once on commit via the panel rebuild.
+    fn rebuild_preview_cards(state: &mut PanelState) {
+        let Some(drag) = state.drag.as_ref() else {
+            return;
+        };
+        let (cards, _) = preview_cards_for_drag(drag);
+        state.layout.cards = cards;
+        reflow_panel_layout(&mut state.layout);
+    }
+
+    /// Update the drop index from the current pointer and rebuild the preview
+    /// grid. Both preview and commit resolve through the same `DropGrid`
+    /// resolver against the same stable flow geometry.
+    fn update_drag_preview(state: &mut PanelState) {
+        let Some(drag) = state.drag.as_ref() else {
+            return;
+        };
+        let index = resolve_drop_index(drag);
+        if let Some(drag) = state.drag.as_mut() {
+            drag.drop_index = index;
+        }
+        rebuild_preview_cards(state);
+    }
+
+    /// Restore the layout captured at press (used for cancelled drags and
+    /// capture loss).
+    fn restore_origin_layout(state: &mut PanelState, origin_cards: &[PanelCard]) {
+        state.layout.cards = origin_cards.to_vec();
+        reflow_panel_layout(&mut state.layout);
     }
 
     fn point_from_lparam(lparam: LPARAM) -> POINT {
@@ -2664,29 +2919,25 @@ mod windows_shell {
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_MOUSEMOVE => {
-                let mut resize = None;
                 if let Some(state) = panel_state(hwnd) {
-                    if let Some(provider) = state.drag_provider.clone() {
-                        let target = panel_drop_target_at_origin(
-                            &state.drag_origin_cards,
-                            point_from_lparam(lparam),
-                            &provider,
-                        );
-                        if target != state.drag_target {
-                            state.drag_target = target.clone();
-                            let mut order = state.drag_origin_order.clone();
-                            if let Some(target) = target {
-                                let _ = move_provider_before(&mut order, &provider, &target);
+                    if let Some(drag) = &mut state.drag {
+                        drag.pointer = point_from_lparam(lparam);
+                        if !drag.active {
+                            let dx = drag.pointer.x - drag.press_point.x;
+                            let dy = drag.pointer.y - drag.press_point.y;
+                            // Small movement threshold: ordinary header
+                            // clicks stay clicks (provider focus); only real
+                            // drags enter the floating preview.
+                            if dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
+                                drag.active = true;
+                                update_drag_preview(state);
+                                let _ = InvalidateRect(Some(hwnd), None, false);
                             }
-                            reorder_panel_cards(&mut state.layout.cards, &order);
-                            reflow_panel_layout(&mut state.layout);
-                            resize = Some((state.parent, state.layout.width, state.layout.height));
+                        } else {
+                            update_drag_preview(state);
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                     }
-                }
-                if let Some((parent, width, height)) = resize {
-                    position_control_panel_window(hwnd, parent, width, height);
                 }
                 let mut tracking = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -2700,73 +2951,107 @@ mod windows_shell {
             WM_LBUTTONDOWN => {
                 let point = point_from_lparam(lparam);
                 if let Some(state) = panel_state(hwnd) {
-                    if let Some(provider) = panel_drag_card_at(state, point) {
-                        state.drag_provider = Some(provider);
-                        state.drag_target = None;
-                        state.drag_origin_order = state
-                            .layout
-                            .cards
-                            .iter()
-                            .map(|card| card.provider.clone())
-                            .collect();
-                        state.drag_origin_cards = state
-                            .layout
-                            .cards
-                            .iter()
-                            .map(|card| PanelDragOrigin {
-                                provider: card.provider.clone(),
-                                rect: card.rect,
-                                visible: card.visible,
-                            })
-                            .collect();
-                        SetCapture(hwnd);
+                    if state.drag.is_none() {
+                        if let Some(provider) = panel_drag_card_at(state, point) {
+                            let Some(card) = state
+                                .layout
+                                .cards
+                                .iter()
+                                .find(|card| card.provider == provider)
+                            else {
+                                return LRESULT(0);
+                            };
+                            let grabbed_rect = card.rect;
+                            let origin_order: Vec<Provider> = state
+                                .layout
+                                .cards
+                                .iter()
+                                .map(|card| card.provider.clone())
+                                .collect();
+                            let origin_cards = state.layout.cards.clone();
+                            // Flow = origin minus the grabbed provider,
+                            // reflowed in two columns so the drop model sees
+                            // the same geometry the preview paints.
+                            let mut flow: Vec<PanelCard> = origin_cards
+                                .iter()
+                                .filter(|card| card.provider != provider)
+                                .cloned()
+                                .collect();
+                            reflow_grid(&mut flow, GRID_COLUMNS);
+                            state.drag = Some(PanelDragState {
+                                press_point: point,
+                                pointer: point,
+                                active: false,
+                                origin_order,
+                                origin_cards,
+                                flow,
+                                drop_index: None,
+                                grabbed_rect,
+                                provider,
+                            });
+                            let _ = SetCapture(hwnd);
+                        }
                     }
                 }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
                 let point = point_from_lparam(lparam);
-                let (drag_provider, drag_target) = panel_state(hwnd)
-                    .map(|state| {
-                        let provider = state.drag_provider.clone();
-                        let target = provider.as_ref().and_then(|provider| {
-                            panel_drop_target_at_origin(&state.drag_origin_cards, point, provider)
-                        });
-                        (provider, target)
-                    })
-                    .unwrap_or((None, None));
-                let was_dragging = drag_provider.is_some();
-                if was_dragging {
-                    let _ = ReleaseCapture();
-                }
-                let action = if let (Some(provider), Some(target)) = (drag_provider, drag_target) {
-                    Some(PanelAction::Reorder(provider, target))
-                } else {
-                    panel_state(hwnd).and_then(|state| {
-                        if was_dragging && !state.drag_origin_order.is_empty() {
-                            reorder_panel_cards(
-                                &mut state.layout.cards,
-                                &state.drag_origin_order.clone(),
-                            );
-                            reflow_panel_layout(&mut state.layout);
-                        }
-                        panel_action_at(state, point)
-                    })
-                };
+                let mut rebuild = false;
                 if let Some(state) = panel_state(hwnd) {
-                    state.drag_provider = None;
-                    state.drag_target = None;
-                    state.drag_origin_order.clear();
-                    state.drag_origin_cards.clear();
-                    state.result = action;
+                    if let Some(drag) = state.drag.take() {
+                        let action = if drag.active {
+                            // Commit with the same resolver the preview used,
+                            // re-resolved against the same stable flow, so the
+                            // persisted order matches the visual destination.
+                            let index = resolve_drop_index_at(&drag, point);
+                            index.and_then(|index| {
+                                let mut order = drag.origin_order.clone();
+                                apply_drop(&mut order, &drag.provider, index)
+                                    .then_some(PanelAction::Reorder(order))
+                            })
+                        } else {
+                            // Never crossed the threshold: ordinary click.
+                            panel_action_at(state, point)
+                        };
+                        if action.is_none() {
+                            // Cancelled (invalid target / no-op) or a click on
+                            // empty chrome: restore the pre-press layout.
+                            restore_origin_layout(state, &drag.origin_cards);
+                            rebuild = state.rebuild_pending;
+                        }
+                        if let Some(action) = action {
+                            state.result = Some(action);
+                        }
+                    }
                 }
+                let _ = ReleaseCapture();
+                // A rebuild deferred during the drag runs now only when there
+                // is no action; action paths rebuild after dispatch.
+                if rebuild {
+                    rebuild_control_panel(hwnd);
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
             WM_APP_PANEL_REBUILD => {
+                if let Some(state) = panel_state(hwnd) {
+                    if state.drag.is_some() {
+                        // Deferred rebuild: the drag owns the layout.
+                        state.rebuild_pending = true;
+                        return LRESULT(0);
+                    }
+                }
                 rebuild_control_panel(hwnd);
                 LRESULT(0)
             }
             WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => {
+                if let Some(state) = panel_state(hwnd) {
+                    if let Some(drag) = state.drag.take() {
+                        restore_origin_layout(state, &drag.origin_cards);
+                    }
+                }
+                let _ = ReleaseCapture();
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
@@ -2776,16 +3061,19 @@ mod windows_shell {
                 LRESULT(0)
             }
             WM_CAPTURECHANGED => {
+                // Fires when the gesture ends by ReleaseCapture or when the
+                // system takes capture away (alt-tab, other window). Mouse-up
+                // already takes the drag, so this runs at most once per
+                // gesture and only for genuinely lost capture.
+                let mut rebuild = false;
                 if let Some(state) = panel_state(hwnd) {
-                    state.drag_provider = None;
-                    state.drag_target = None;
-                    if !state.drag_origin_order.is_empty() {
-                        let origin = state.drag_origin_order.clone();
-                        reorder_panel_cards(&mut state.layout.cards, &origin);
-                        reflow_panel_layout(&mut state.layout);
-                        state.drag_origin_order.clear();
+                    if let Some(drag) = state.drag.take() {
+                        restore_origin_layout(state, &drag.origin_cards);
+                        rebuild = state.rebuild_pending;
                     }
-                    state.drag_origin_cards.clear();
+                }
+                if rebuild {
+                    rebuild_control_panel(hwnd);
                 }
                 LRESULT(0)
             }
@@ -2800,6 +3088,12 @@ mod windows_shell {
     fn dispatch_panel_action(hwnd: HWND, action: PanelAction) {
         match action {
             PanelAction::FocusProvider(provider) => set_focus_provider(hwnd, provider),
+            // Focusing a window also focuses its provider, then selects the
+            // window; reselecting the same provider keeps its focused window.
+            PanelAction::FocusWindow(provider, window) => {
+                set_focus_provider(hwnd, provider);
+                set_focus_window(hwnd, &window);
+            }
             PanelAction::None => {}
             PanelAction::ToggleProvider(provider) => toggle_provider_visibility(hwnd, provider),
             PanelAction::ToggleWindow(provider, window) => {
@@ -2817,7 +3111,7 @@ mod windows_shell {
             PanelAction::Quit => unsafe {
                 let _ = DestroyWindow(hwnd);
             },
-            PanelAction::Reorder(provider, before) => reorder_provider(hwnd, provider, before),
+            PanelAction::Reorder(order) => reorder_provider(hwnd, order),
         }
     }
 
@@ -2851,10 +3145,8 @@ mod windows_shell {
                 parent: hwnd,
                 layout,
                 result: None,
-                drag_provider: None,
-                drag_target: None,
-                drag_origin_order: Vec::new(),
-                drag_origin_cards: Vec::new(),
+                drag: None,
+                rebuild_pending: false,
             });
             let state_ptr = (&mut *state) as *mut PanelState;
             let (x, y) = panel_window_position(hwnd, state.layout.width, state.layout.height);
@@ -3645,72 +3937,94 @@ mod windows_shell {
         }
 
         #[test]
-        fn provider_reorder_moves_before_drop_target_without_losing_cards() {
+        fn provider_reorder_uses_insert_at_index_without_losing_cards() {
             let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
-            assert!(move_provider_before(
-                &mut order,
-                &Provider::Codex,
-                &Provider::Kimi
-            ));
+            // Drag Codex to flow index 1 (flow is [GrokApi, Kimi]): Codex lands
+            // between GrokApi and Kimi.
+            assert!(apply_drop(&mut order, &Provider::Codex, 1));
             assert_eq!(
                 order,
                 vec![Provider::GrokApi, Provider::Codex, Provider::Kimi]
             );
-            assert!(!move_provider_before(
-                &mut order,
-                &Provider::Kimi,
-                &Provider::Kimi
-            ));
+            // Appending at the flow length moves the dragged card last.
+            let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
+            assert!(apply_drop(&mut order, &Provider::Codex, 2));
+            assert_eq!(
+                order,
+                vec![Provider::GrokApi, Provider::Kimi, Provider::Codex]
+            );
+            // A no-op drop (drag to its own flow index) still returns true.
+            let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
+            assert!(apply_drop(&mut order, &Provider::GrokApi, 1));
+            assert_eq!(
+                order,
+                vec![Provider::Codex, Provider::GrokApi, Provider::Kimi]
+            );
         }
 
         #[test]
-        fn drag_target_uses_frozen_card_geometry() {
-            let origins = vec![
-                PanelDragOrigin {
-                    provider: Provider::Codex,
-                    rect: RECT {
-                        left: 10,
-                        top: 10,
-                        right: 200,
-                        bottom: 160,
+        fn drag_resolution_maps_pointer_halves_and_hidden_slots() {
+            let grid = SlotRect {
+                left: 18,
+                top: 82,
+                right: 832,
+                bottom: 396,
+            };
+            let cards = vec![
+                DropCard {
+                    id: Provider::Codex,
+                    rect: SlotRect {
+                        left: 18,
+                        top: 82,
+                        right: 418,
+                        bottom: 232,
                     },
                     visible: true,
                 },
-                PanelDragOrigin {
-                    provider: Provider::GrokConsumer,
-                    rect: RECT {
-                        left: 214,
-                        top: 10,
-                        right: 404,
-                        bottom: 160,
-                    },
-                    visible: true,
-                },
-                PanelDragOrigin {
-                    provider: Provider::Kimi,
-                    rect: RECT {
-                        left: 10,
-                        top: 174,
-                        right: 200,
-                        bottom: 324,
+                DropCard {
+                    id: Provider::Kimi,
+                    rect: SlotRect {
+                        left: 432,
+                        top: 82,
+                        right: 832,
+                        bottom: 232,
                     },
                     visible: false,
                 },
             ];
 
-            let point = POINT { x: 250, y: 80 };
-            assert_eq!(
-                panel_drop_target_at_origin(&origins, point, &Provider::Codex),
-                Some(Provider::GrokConsumer)
-            );
-            assert_eq!(
-                panel_drop_target_at_origin(&origins, point, &Provider::GrokConsumer),
-                None
-            );
-            assert_eq!(
-                panel_drop_target_at_origin(&origins, POINT { x: 50, y: 220 }, &Provider::Codex),
-                None
-            );
+            // Left half of Codex -> insert before it.
+            assert_eq!(DropGrid::drop_index(&cards, grid, (100, 100)), Some(0));
+            // Right half of Codex -> insert after it (before hidden Kimi).
+            assert_eq!(DropGrid::drop_index(&cards, grid, (300, 100)), Some(1));
+            // Hidden Kimi keeps its slot but is not a drop target.
+            assert_eq!(DropGrid::drop_index(&cards, grid, (600, 100)), None);
+            // The footer region below the row appends.
+            assert_eq!(DropGrid::drop_index(&cards, grid, (100, 400)), Some(2));
+        }
+
+        #[test]
+        fn reorder_action_accepts_only_full_permutations() {
+            let available = vec![
+                Provider::Codex,
+                Provider::GrokApi,
+                Provider::Kimi,
+                Provider::OllamaCloud,
+            ];
+            let ok = vec![
+                Provider::OllamaCloud,
+                Provider::Codex,
+                Provider::GrokApi,
+                Provider::Kimi,
+            ];
+            assert!(is_full_permutation(&ok, &available));
+            assert!(!is_full_permutation(&ok[..3], &available));
+            let mut duplicated = ok.clone();
+            duplicated[0] = Provider::Codex;
+            assert!(!is_full_permutation(&duplicated, &available));
+            let mut foreign = ok.clone();
+            foreign[0] = Provider::GrokConsumer;
+            assert!(!is_full_permutation(&foreign, &available));
         }
 
         #[test]
