@@ -132,9 +132,26 @@ fn remaining_percent(metric: &MetricCard) -> Option<f64> {
         .map(|value| value.clamp(0.0, 100.0))
 }
 
-fn tooltip_metric_value(metric: &MetricCard) -> String {
+fn tooltip_metric_value(provider: &str, metric: &MetricCard) -> String {
     if metric.unit == "percent" {
-        return remaining_percent(metric)
+        let remaining = remaining_percent(metric);
+        if provider.eq_ignore_ascii_case("OpenCode") {
+            let used = metric
+                .used
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+                .or_else(|| remaining.map(|value| 100.0 - value));
+            return match (used, remaining) {
+                (Some(used), Some(remaining)) => {
+                    format!("{used:.0}% used · {remaining:.0}% left")
+                }
+                (Some(used), None) => format!("{used:.0}% used"),
+                (None, Some(remaining)) => format!("{remaining:.0}% left"),
+                (None, None) => "?%".to_string(),
+            };
+        }
+        return remaining
             .map(|remaining| format!("{remaining:.0}% left"))
             .unwrap_or_else(|| "?% left".to_string());
     }
@@ -523,7 +540,7 @@ pub fn build_tray_view_focused_window(
             } else {
                 lines.push(format!(
                     "  {metric_name}: {}, resets {reset_str}",
-                    tooltip_metric_value(m)
+                    tooltip_metric_value(&card.provider, m)
                 ));
             }
         }
@@ -815,7 +832,11 @@ mod tests {
         let default_view = build_tray_view(&snapshots);
         assert_eq!(default_view.used_percent, Some(8.0));
         assert_eq!(default_view.status_label, "OpenCode");
-        assert!(default_view.tooltip.contains("Monthly: 83% left"));
+        assert!(default_view.tooltip.contains("5-hour: 8% used · 92% left"));
+        assert!(default_view.tooltip.contains("Weekly: 34% used · 66% left"));
+        assert!(default_view
+            .tooltip
+            .contains("Monthly: 17% used · 83% left"));
 
         let monthly_view = build_tray_view_focused_window(
             &snapshots,
