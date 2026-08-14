@@ -2005,6 +2005,13 @@ mod windows_shell {
         action: PanelAction,
     }
 
+    #[derive(Clone)]
+    struct PanelDragOrigin {
+        provider: Provider,
+        rect: RECT,
+        visible: bool,
+    }
+
     struct PanelLayout {
         width: i32,
         height: i32,
@@ -2019,6 +2026,7 @@ mod windows_shell {
         drag_provider: Option<Provider>,
         drag_target: Option<Provider>,
         drag_origin_order: Vec<Provider>,
+        drag_origin_cards: Vec<PanelDragOrigin>,
     }
 
     fn rect_contains(rect: RECT, point: POINT) -> bool {
@@ -2398,6 +2406,7 @@ mod windows_shell {
             state.drag_provider = None;
             state.drag_target = None;
             state.drag_origin_order.clear();
+            state.drag_origin_cards.clear();
         }
         position_control_panel_window(panel, parent, width, height);
         unsafe {
@@ -2617,12 +2626,19 @@ mod windows_shell {
         })
     }
 
-    fn panel_drop_target_at(
-        state: &PanelState,
+    /// Resolve a drag target against the card geometry captured at mouse-down.
+    ///
+    /// The preview reorders `state.layout.cards` while the pointer is moving.
+    /// Hit-testing that mutable layout makes the card under a stationary
+    /// pointer change after every preview reorder, which causes the visible
+    /// flicker/oscillation reported by users. Frozen origins make the target
+    /// decision stable for the duration of one drag gesture.
+    fn panel_drop_target_at_origin(
+        origins: &[PanelDragOrigin],
         point: POINT,
         dragged: &Provider,
     ) -> Option<Provider> {
-        state.layout.cards.iter().find_map(|card| {
+        origins.iter().find_map(|card| {
             (card.provider != *dragged && card.visible && rect_contains(card.rect, point))
                 .then(|| card.provider.clone())
         })
@@ -2651,8 +2667,11 @@ mod windows_shell {
                 let mut resize = None;
                 if let Some(state) = panel_state(hwnd) {
                     if let Some(provider) = state.drag_provider.clone() {
-                        let target =
-                            panel_drop_target_at(state, point_from_lparam(lparam), &provider);
+                        let target = panel_drop_target_at_origin(
+                            &state.drag_origin_cards,
+                            point_from_lparam(lparam),
+                            &provider,
+                        );
                         if target != state.drag_target {
                             state.drag_target = target.clone();
                             let mut order = state.drag_origin_order.clone();
@@ -2690,6 +2709,16 @@ mod windows_shell {
                             .iter()
                             .map(|card| card.provider.clone())
                             .collect();
+                        state.drag_origin_cards = state
+                            .layout
+                            .cards
+                            .iter()
+                            .map(|card| PanelDragOrigin {
+                                provider: card.provider.clone(),
+                                rect: card.rect,
+                                visible: card.visible,
+                            })
+                            .collect();
                         SetCapture(hwnd);
                     }
                 }
@@ -2698,7 +2727,13 @@ mod windows_shell {
             WM_LBUTTONUP => {
                 let point = point_from_lparam(lparam);
                 let (drag_provider, drag_target) = panel_state(hwnd)
-                    .map(|state| (state.drag_provider.clone(), state.drag_target.clone()))
+                    .map(|state| {
+                        let provider = state.drag_provider.clone();
+                        let target = provider.as_ref().and_then(|provider| {
+                            panel_drop_target_at_origin(&state.drag_origin_cards, point, provider)
+                        });
+                        (provider, target)
+                    })
                     .unwrap_or((None, None));
                 let was_dragging = drag_provider.is_some();
                 if was_dragging {
@@ -2722,6 +2757,7 @@ mod windows_shell {
                     state.drag_provider = None;
                     state.drag_target = None;
                     state.drag_origin_order.clear();
+                    state.drag_origin_cards.clear();
                     state.result = action;
                 }
                 LRESULT(0)
@@ -2749,6 +2785,7 @@ mod windows_shell {
                         reflow_panel_layout(&mut state.layout);
                         state.drag_origin_order.clear();
                     }
+                    state.drag_origin_cards.clear();
                 }
                 LRESULT(0)
             }
@@ -2817,6 +2854,7 @@ mod windows_shell {
                 drag_provider: None,
                 drag_target: None,
                 drag_origin_order: Vec::new(),
+                drag_origin_cards: Vec::new(),
             });
             let state_ptr = (&mut *state) as *mut PanelState;
             let (x, y) = panel_window_position(hwnd, state.layout.width, state.layout.height);
@@ -3623,6 +3661,56 @@ mod windows_shell {
                 &Provider::Kimi,
                 &Provider::Kimi
             ));
+        }
+
+        #[test]
+        fn drag_target_uses_frozen_card_geometry() {
+            let origins = vec![
+                PanelDragOrigin {
+                    provider: Provider::Codex,
+                    rect: RECT {
+                        left: 10,
+                        top: 10,
+                        right: 200,
+                        bottom: 160,
+                    },
+                    visible: true,
+                },
+                PanelDragOrigin {
+                    provider: Provider::GrokConsumer,
+                    rect: RECT {
+                        left: 214,
+                        top: 10,
+                        right: 404,
+                        bottom: 160,
+                    },
+                    visible: true,
+                },
+                PanelDragOrigin {
+                    provider: Provider::Kimi,
+                    rect: RECT {
+                        left: 10,
+                        top: 174,
+                        right: 200,
+                        bottom: 324,
+                    },
+                    visible: false,
+                },
+            ];
+
+            let point = POINT { x: 250, y: 80 };
+            assert_eq!(
+                panel_drop_target_at_origin(&origins, point, &Provider::Codex),
+                Some(Provider::GrokConsumer)
+            );
+            assert_eq!(
+                panel_drop_target_at_origin(&origins, point, &Provider::GrokConsumer),
+                None
+            );
+            assert_eq!(
+                panel_drop_target_at_origin(&origins, POINT { x: 50, y: 220 }, &Provider::Codex),
+                None
+            );
         }
 
         #[test]
