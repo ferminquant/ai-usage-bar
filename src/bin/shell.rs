@@ -81,6 +81,7 @@ mod windows_shell {
     const CF_UNICODETEXT_FORMAT: u32 = 13;
 
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
+    const WM_APP_PANEL_REBUILD: u32 = 0x8000 + 2;
     const OPENCODE_RESET_DIALOG_CLASS: PCWSTR = w!("AIUsageBarOpenCodeResetDialog");
     const RESET_DIALOG_SAVE: usize = 1;
     const RESET_DIALOG_CANCEL: usize = 2;
@@ -119,6 +120,7 @@ mod windows_shell {
         tooltip_visible: bool,
         refresh_in_flight: bool,
         status: Option<String>,
+        panel_hwnd: Option<HWND>,
     }
 
     struct RefreshPayload {
@@ -147,6 +149,7 @@ mod windows_shell {
                 tooltip_visible: false,
                 refresh_in_flight: false,
                 status: None,
+                panel_hwnd: None,
             }
         }
 
@@ -182,6 +185,19 @@ mod windows_shell {
         } else {
             // The pointer is owned by the window and lives until WM_NCDESTROY.
             Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Ask an already-open provider panel to rebuild itself after the parent
+    /// window's view state changes. The panel owns its message loop, so this
+    /// keeps refresh results and native-menu changes visible without closing
+    /// and reopening the panel.
+    fn request_panel_rebuild(hwnd: HWND) {
+        let Some(panel) = app_state_ref(hwnd).and_then(|state| state.panel_hwnd) else {
+            return;
+        };
+        unsafe {
+            let _ = PostMessageW(Some(panel), WM_APP_PANEL_REBUILD, WPARAM(0), LPARAM(0));
         }
     }
 
@@ -925,6 +941,7 @@ mod windows_shell {
                         },
                     );
                 }
+                request_panel_rebuild(hwnd);
             }
             Err(error) => {
                 eprintln!("could not update startup registration: {error}");
@@ -958,6 +975,7 @@ mod windows_shell {
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
 
         let hwnd_raw = hwnd.0 as usize;
         thread::spawn(move || {
@@ -1007,6 +1025,7 @@ mod windows_shell {
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn set_focus_provider(hwnd: HWND, provider: Provider) {
@@ -1030,6 +1049,7 @@ mod windows_shell {
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn set_focus_window(hwnd: HWND, window: &str) {
@@ -1053,6 +1073,7 @@ mod windows_shell {
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn cycle_focus_provider(hwnd: HWND) {
@@ -1230,6 +1251,7 @@ mod windows_shell {
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn toggle_provider_visibility(hwnd: HWND, provider: Provider) {
@@ -1365,14 +1387,9 @@ mod windows_shell {
         }
         let resolved = state.config.resolved_view(&available);
         let mut order = ordered_providers(&available, &resolved);
-        let Some(source_index) = order.iter().position(|candidate| candidate == &provider) else {
+        if !move_provider_before(&mut order, &provider, &before) {
             return;
-        };
-        let moved = order.remove(source_index);
-        let Some(target_index) = order.iter().position(|candidate| candidate == &before) else {
-            return;
-        };
-        order.insert(target_index, moved);
+        }
 
         let previous_config = state.config.clone();
         state.config.set_view_provider_order(&order);
@@ -1955,7 +1972,11 @@ mod windows_shell {
         ToggleMetric(Provider, MetricKind),
         Refresh,
         ToggleStartup,
-        More,
+        CopyDetails,
+        Quit,
+        OpenOllamaUsage,
+        OpenKimiConsole,
+        ConfigureOpenCodeResets,
         Reorder(Provider, Provider),
     }
 
@@ -1992,10 +2013,12 @@ mod windows_shell {
     }
 
     struct PanelState {
+        parent: HWND,
         layout: PanelLayout,
         result: Option<PanelAction>,
         drag_provider: Option<Provider>,
         drag_target: Option<Provider>,
+        drag_origin_order: Vec<Provider>,
     }
 
     fn rect_contains(rect: RECT, point: POINT) -> bool {
@@ -2124,6 +2147,115 @@ mod windows_shell {
         rows
     }
 
+    fn move_provider_before(
+        order: &mut Vec<Provider>,
+        provider: &Provider,
+        target: &Provider,
+    ) -> bool {
+        if provider == target {
+            return false;
+        }
+        let Some(source_index) = order.iter().position(|candidate| candidate == provider) else {
+            return false;
+        };
+        let Some(target_index) = order.iter().position(|candidate| candidate == target) else {
+            return false;
+        };
+        let moved = order.remove(source_index);
+        let adjusted_target = if source_index < target_index {
+            target_index.saturating_sub(1)
+        } else {
+            target_index
+        };
+        order.insert(adjusted_target, moved);
+        true
+    }
+
+    fn reorder_panel_cards(cards: &mut Vec<PanelCard>, order: &[Provider]) {
+        let mut reordered = Vec::with_capacity(cards.len());
+        for provider in order {
+            if let Some(index) = cards.iter().position(|card| &card.provider == provider) {
+                reordered.push(cards.remove(index));
+            }
+        }
+        reordered.append(cards);
+        *cards = reordered;
+    }
+
+    /// Recompute card and footer rectangles after a provider order or card
+    /// height changes. Rows are laid out in a deterministic row-major grid;
+    /// this makes the visual order match the order shown by drag-and-drop.
+    fn reflow_panel_layout(layout: &mut PanelLayout) {
+        let columns = layout.cards.len().clamp(1, 2) as i32;
+        layout.width = PANEL_MARGIN * 2 + columns * PANEL_CARD_WIDTH + (columns - 1) * PANEL_GAP;
+
+        let row_count = (layout.cards.len() as i32 + columns - 1) / columns;
+        let mut row_heights = vec![0_i32; row_count.max(1) as usize];
+        for (index, card) in layout.cards.iter().enumerate() {
+            let row = index / columns as usize;
+            row_heights[row] = row_heights[row].max(card.rect.bottom - card.rect.top);
+        }
+        let mut row_tops = Vec::with_capacity(row_heights.len());
+        let mut top = PANEL_MARGIN + PANEL_HEADER_HEIGHT;
+        for row_height in row_heights {
+            row_tops.push(top);
+            top += row_height + PANEL_GAP;
+        }
+
+        for (index, card) in layout.cards.iter_mut().enumerate() {
+            let column = index % columns as usize;
+            let row = index / columns as usize;
+            let left = PANEL_MARGIN + column as i32 * (PANEL_CARD_WIDTH + PANEL_GAP);
+            let card_height = card.rect.bottom - card.rect.top;
+            card.rect = RECT {
+                left,
+                top: row_tops[row],
+                right: left + PANEL_CARD_WIDTH,
+                bottom: row_tops[row] + card_height,
+            };
+            card.eye_rect = RECT {
+                left: card.rect.right - 42,
+                top: card.rect.top + 14,
+                right: card.rect.right - 12,
+                bottom: card.rect.top + 42,
+            };
+            let mut row_y = card.rect.top + PANEL_HEADER_HEIGHT;
+            for item in &mut card.rows {
+                item.rect = RECT {
+                    left: card.rect.left + PANEL_CARD_PADDING,
+                    top: row_y,
+                    right: card.rect.right - PANEL_CARD_PADDING,
+                    bottom: row_y + PANEL_ROW_HEIGHT,
+                };
+                row_y += PANEL_ROW_HEIGHT;
+            }
+        }
+
+        let footer_top = top - PANEL_GAP + 4;
+        let footer_y = footer_top + 8;
+        let button_width = 108;
+        let buttons_per_row = ((layout.width - PANEL_MARGIN * 2 + PANEL_GAP)
+            / (button_width + PANEL_GAP))
+            .max(1) as usize;
+        for (index, button) in layout.buttons.iter_mut().enumerate() {
+            let column = index % buttons_per_row;
+            let row = index / buttons_per_row;
+            let left = PANEL_MARGIN + column as i32 * (button_width + PANEL_GAP);
+            let top = footer_y + row as i32 * (32 + PANEL_GAP);
+            button.rect = RECT {
+                left,
+                top,
+                right: left + button_width,
+                bottom: top + 32,
+            };
+        }
+        let footer_rows = layout.buttons.len().div_ceil(buttons_per_row);
+        layout.height = footer_y
+            + footer_rows.max(1) as i32 * 32
+            + footer_rows.saturating_sub(1) as i32 * PANEL_GAP
+            + PANEL_MARGIN;
+    }
+
     fn build_control_panel_layout(hwnd: HWND) -> Option<PanelLayout> {
         let state = app_state_ref(hwnd)?;
         let available = panel_providers(&state.snapshots);
@@ -2155,48 +2287,7 @@ mod windows_shell {
             });
         }
 
-        let columns = cards.len().clamp(1, 2) as i32;
-        let width = PANEL_MARGIN * 2 + columns * PANEL_CARD_WIDTH + (columns - 1) * PANEL_GAP;
-        // Use a small masonry layout rather than forcing short cards to
-        // reserve the height of their tallest row-mate. This keeps the panel
-        // compact when providers expose different numbers of windows.
-        let mut column_bottoms = [PANEL_MARGIN + PANEL_HEADER_HEIGHT; 2];
-        for card in &mut cards {
-            let column = if columns == 1 || column_bottoms[0] <= column_bottoms[1] {
-                0
-            } else {
-                1
-            };
-            let left = PANEL_MARGIN + column as i32 * (PANEL_CARD_WIDTH + PANEL_GAP);
-            let card_height = card.rect.bottom - card.rect.top;
-            card.rect.left = left;
-            card.rect.top = column_bottoms[column];
-            card.rect.right = left + PANEL_CARD_WIDTH;
-            card.rect.bottom = card.rect.top + card_height;
-            card.eye_rect = RECT {
-                left: card.rect.right - 42,
-                top: card.rect.top + 14,
-                right: card.rect.right - 12,
-                bottom: card.rect.top + 42,
-            };
-            let mut row_y = card.rect.top + PANEL_HEADER_HEIGHT;
-            for item in &mut card.rows {
-                item.rect = RECT {
-                    left: card.rect.left + PANEL_CARD_PADDING,
-                    top: row_y,
-                    right: card.rect.right - PANEL_CARD_PADDING,
-                    bottom: row_y + PANEL_ROW_HEIGHT,
-                };
-                row_y += PANEL_ROW_HEIGHT;
-            }
-            column_bottoms[column] = card.rect.bottom + PANEL_GAP;
-        }
-
-        let footer_top = column_bottoms.into_iter().max().unwrap_or(0) - PANEL_GAP + 4;
-        let footer_y = footer_top + 8;
-        let button_width = 108;
-        let mut buttons = Vec::new();
-        for (index, (label, action)) in [
+        let mut footer_actions = vec![
             ("Refresh", PanelAction::Refresh),
             (
                 if ai_usage_bar::startup::auto_start_enabled().unwrap_or(false) {
@@ -2206,30 +2297,36 @@ mod windows_shell {
                 },
                 PanelAction::ToggleStartup,
             ),
-            ("More…", PanelAction::More),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let left = PANEL_MARGIN + index as i32 * (button_width + PANEL_GAP);
-            buttons.push(PanelButton {
-                rect: RECT {
-                    left,
-                    top: footer_y,
-                    right: left + button_width,
-                    bottom: footer_y + 32,
-                },
-                label: label.to_string(),
-                action,
-            });
+            ("Copy", PanelAction::CopyDetails),
+            ("Quit", PanelAction::Quit),
+        ];
+        match state.focus_provider.as_ref() {
+            Some(Provider::OllamaCloud) => {
+                footer_actions.push(("Open usage", PanelAction::OpenOllamaUsage));
+            }
+            Some(Provider::Kimi) => {
+                footer_actions.push(("Open console", PanelAction::OpenKimiConsole));
+            }
+            Some(Provider::OpenCodeGo) => {
+                footer_actions.push(("Reset times…", PanelAction::ConfigureOpenCodeResets));
+            }
+            _ => {}
         }
-
-        Some(PanelLayout {
-            width,
-            height: footer_y + 32 + PANEL_MARGIN,
+        let mut layout = PanelLayout {
+            width: 0,
+            height: 0,
             cards,
-            buttons,
-        })
+            buttons: footer_actions
+                .into_iter()
+                .map(|(label, action)| PanelButton {
+                    rect: RECT::default(),
+                    label: label.to_string(),
+                    action,
+                })
+                .collect(),
+        };
+        reflow_panel_layout(&mut layout);
+        Some(layout)
     }
 
     fn panel_state(hwnd: HWND) -> Option<&'static mut PanelState> {
@@ -2238,6 +2335,73 @@ mod windows_shell {
             None
         } else {
             Some(unsafe { &mut *ptr })
+        }
+    }
+
+    fn panel_window_position(parent: HWND, width: i32, height: i32) -> (i32, i32) {
+        unsafe {
+            let mut widget_rect = RECT::default();
+            let _ = GetWindowRect(parent, &mut widget_rect);
+            let (_, work) = panel_monitor_work_area(parent).unwrap_or((
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+            ));
+            let mut x = widget_rect.left;
+            let mut y = widget_rect.top - height - 8;
+            if y < work.top {
+                y = widget_rect.bottom + 8;
+            }
+            x = x.clamp(work.left, (work.right - width).max(work.left));
+            y = y.clamp(work.top, (work.bottom - height).max(work.top));
+            (x, y)
+        }
+    }
+
+    fn position_control_panel_window(panel: HWND, parent: HWND, width: i32, height: i32) {
+        let (x, y) = panel_window_position(parent, width, height);
+        unsafe {
+            let _ = SetWindowPos(
+                panel,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    fn rebuild_control_panel(panel: HWND) {
+        let Some(parent) = panel_state(panel).map(|state| state.parent) else {
+            return;
+        };
+        let Some(layout) = build_control_panel_layout(parent) else {
+            unsafe {
+                let _ = DestroyWindow(panel);
+            }
+            return;
+        };
+        let (width, height) = (layout.width, layout.height);
+        if let Some(state) = panel_state(panel) {
+            state.layout = layout;
+            state.drag_provider = None;
+            state.drag_target = None;
+            state.drag_origin_order.clear();
+        }
+        position_control_panel_window(panel, parent, width, height);
+        unsafe {
+            let _ = InvalidateRect(Some(panel), None, false);
         }
     }
 
@@ -2453,6 +2617,17 @@ mod windows_shell {
         })
     }
 
+    fn panel_drop_target_at(
+        state: &PanelState,
+        point: POINT,
+        dragged: &Provider,
+    ) -> Option<Provider> {
+        state.layout.cards.iter().find_map(|card| {
+            (card.provider != *dragged && card.visible && rect_contains(card.rect, point))
+                .then(|| card.provider.clone())
+        })
+    }
+
     fn point_from_lparam(lparam: LPARAM) -> POINT {
         POINT {
             x: (lparam.0 as i16) as i32,
@@ -2473,14 +2648,26 @@ mod windows_shell {
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_MOUSEMOVE => {
+                let mut resize = None;
                 if let Some(state) = panel_state(hwnd) {
-                    if state.drag_provider.is_some() {
-                        let target = panel_drag_card_at(state, point_from_lparam(lparam));
-                        if target != state.drag_provider {
-                            state.drag_target = target;
+                    if let Some(provider) = state.drag_provider.clone() {
+                        let target =
+                            panel_drop_target_at(state, point_from_lparam(lparam), &provider);
+                        if target != state.drag_target {
+                            state.drag_target = target.clone();
+                            let mut order = state.drag_origin_order.clone();
+                            if let Some(target) = target {
+                                let _ = move_provider_before(&mut order, &provider, &target);
+                            }
+                            reorder_panel_cards(&mut state.layout.cards, &order);
+                            reflow_panel_layout(&mut state.layout);
+                            resize = Some((state.parent, state.layout.width, state.layout.height));
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                     }
+                }
+                if let Some((parent, width, height)) = resize {
+                    position_control_panel_window(hwnd, parent, width, height);
                 }
                 let mut tracking = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -2497,6 +2684,12 @@ mod windows_shell {
                     if let Some(provider) = panel_drag_card_at(state, point) {
                         state.drag_provider = Some(provider);
                         state.drag_target = None;
+                        state.drag_origin_order = state
+                            .layout
+                            .cards
+                            .iter()
+                            .map(|card| card.provider.clone())
+                            .collect();
                         SetCapture(hwnd);
                     }
                 }
@@ -2508,27 +2701,33 @@ mod windows_shell {
                     .map(|state| (state.drag_provider.clone(), state.drag_target.clone()))
                     .unwrap_or((None, None));
                 let was_dragging = drag_provider.is_some();
-                if drag_provider.is_some() {
+                if was_dragging {
                     let _ = ReleaseCapture();
                 }
-                let action = match (drag_provider, drag_target) {
-                    (Some(provider), Some(target)) => Some(PanelAction::Reorder(provider, target)),
-                    _ => panel_state(hwnd).and_then(|state| panel_action_at(state, point)),
-                };
-                let action = if was_dragging {
-                    action.or(Some(PanelAction::None))
+                let action = if let (Some(provider), Some(target)) = (drag_provider, drag_target) {
+                    Some(PanelAction::Reorder(provider, target))
                 } else {
-                    action
+                    panel_state(hwnd).and_then(|state| {
+                        if was_dragging && !state.drag_origin_order.is_empty() {
+                            reorder_panel_cards(
+                                &mut state.layout.cards,
+                                &state.drag_origin_order.clone(),
+                            );
+                            reflow_panel_layout(&mut state.layout);
+                        }
+                        panel_action_at(state, point)
+                    })
                 };
-                let has_action = action.is_some();
                 if let Some(state) = panel_state(hwnd) {
                     state.drag_provider = None;
                     state.drag_target = None;
+                    state.drag_origin_order.clear();
                     state.result = action;
                 }
-                if has_action {
-                    let _ = DestroyWindow(hwnd);
-                }
+                LRESULT(0)
+            }
+            WM_APP_PANEL_REBUILD => {
+                rebuild_control_panel(hwnd);
                 LRESULT(0)
             }
             WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => {
@@ -2544,6 +2743,12 @@ mod windows_shell {
                 if let Some(state) = panel_state(hwnd) {
                     state.drag_provider = None;
                     state.drag_target = None;
+                    if !state.drag_origin_order.is_empty() {
+                        let origin = state.drag_origin_order.clone();
+                        reorder_panel_cards(&mut state.layout.cards, &origin);
+                        reflow_panel_layout(&mut state.layout);
+                        state.drag_origin_order.clear();
+                    }
                 }
                 LRESULT(0)
             }
@@ -2552,87 +2757,6 @@ mod windows_shell {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
-
-    fn show_more_menu(hwnd: HWND) {
-        unsafe {
-            let Ok(menu) = CreatePopupMenu() else {
-                return;
-            };
-            let focused = app_state_ref(hwnd).and_then(|state| state.focus_provider.clone());
-            let has_provider_action = matches!(
-                focused.as_ref(),
-                Some(&Provider::OllamaCloud) | Some(&Provider::Kimi) | Some(&Provider::OpenCodeGo)
-            );
-            if has_provider_action {
-                match focused {
-                    Some(Provider::OllamaCloud) => {
-                        let _ = AppendMenuW(
-                            menu,
-                            MF_STRING,
-                            MENU_OPEN_OLLAMA_USAGE,
-                            w!("Open usage page"),
-                        );
-                    }
-                    Some(Provider::Kimi) => {
-                        let _ = AppendMenuW(
-                            menu,
-                            MF_STRING,
-                            MENU_OPEN_KIMI_CONSOLE,
-                            w!("Open console"),
-                        );
-                    }
-                    Some(Provider::OpenCodeGo) => {
-                        let _ = AppendMenuW(
-                            menu,
-                            MF_STRING,
-                            MENU_CONFIG_OPENCODE_RESETS,
-                            w!("Configure reset times…"),
-                        );
-                    }
-                    _ => {}
-                }
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
-            }
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                MENU_COPY_DETAILS,
-                w!("Copy details to clipboard"),
-            );
-            let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
-            let mut widget_rect = RECT::default();
-            let (x, y) = if GetWindowRect(hwnd, &mut widget_rect).is_ok() {
-                (widget_rect.left, widget_rect.top - 2)
-            } else {
-                let mut point = POINT::default();
-                let _ = GetCursorPos(&mut point);
-                (point.x, point.y)
-            };
-            let _ = SetForegroundWindow(hwnd);
-            let command = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
-                x,
-                y,
-                Some(0),
-                hwnd,
-                None,
-            )
-            .0 as usize;
-            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-            let _ = DestroyMenu(menu);
-            match command {
-                MENU_OPEN_OLLAMA_USAGE => open_ollama_usage_page(hwnd),
-                MENU_OPEN_KIMI_CONSOLE => open_kimi_console(hwnd),
-                MENU_CONFIG_OPENCODE_RESETS => open_opencode_reset_dialog(hwnd),
-                MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
-                MENU_QUIT => {
-                    let _ = DestroyWindow(hwnd);
-                }
-                _ => {}
-            }
         }
     }
 
@@ -2649,7 +2773,13 @@ mod windows_shell {
             }
             PanelAction::Refresh => begin_refresh(hwnd),
             PanelAction::ToggleStartup => toggle_startup_registration(hwnd),
-            PanelAction::More => show_more_menu(hwnd),
+            PanelAction::CopyDetails => copy_details_to_clipboard(hwnd),
+            PanelAction::OpenOllamaUsage => open_ollama_usage_page(hwnd),
+            PanelAction::OpenKimiConsole => open_kimi_console(hwnd),
+            PanelAction::ConfigureOpenCodeResets => open_opencode_reset_dialog(hwnd),
+            PanelAction::Quit => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
             PanelAction::Reorder(provider, before) => reorder_provider(hwnd, provider, before),
         }
     }
@@ -2680,37 +2810,16 @@ mod windows_shell {
                 let _ = RegisterClassW(&class);
             });
 
-            let mut widget_rect = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut widget_rect);
-            let (_, work) = panel_monitor_work_area(hwnd).unwrap_or((
-                RECT {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
-                RECT {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
-            ));
-            let mut x = widget_rect.left;
-            let mut y = widget_rect.top - layout.height - 8;
-            if y < work.top {
-                y = widget_rect.bottom + 8;
-            }
-            x = x.clamp(work.left, (work.right - layout.width).max(work.left));
-            y = y.clamp(work.top, (work.bottom - layout.height).max(work.top));
-
             let mut state = Box::new(PanelState {
+                parent: hwnd,
                 layout,
                 result: None,
                 drag_provider: None,
                 drag_target: None,
+                drag_origin_order: Vec::new(),
             });
             let state_ptr = (&mut *state) as *mut PanelState;
+            let (x, y) = panel_window_position(hwnd, state.layout.width, state.layout.height);
             let panel = match CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                 CONTROL_PANEL_CLASS,
@@ -2729,19 +2838,15 @@ mod windows_shell {
                 Err(_) => return false,
             };
             SetWindowLongPtrW(panel, GWLP_USERDATA, state_ptr as isize);
-            let _ = SetWindowPos(
-                panel,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                state.layout.width,
-                state.layout.height,
-                SWP_SHOWWINDOW,
-            );
+            if let Some(app) = app_state(hwnd) {
+                app.panel_hwnd = Some(panel);
+            }
+            position_control_panel_window(panel, hwnd, state.layout.width, state.layout.height);
             let _ = SetForegroundWindow(panel);
             let _ = SetFocus(Some(panel));
 
             let mut message = MSG::default();
+            let mut parent_alive = true;
             while IsWindow(Some(panel)).as_bool() {
                 let result = GetMessageW(&mut message, None, 0, 0);
                 if result.0 <= 0 {
@@ -2752,20 +2857,40 @@ mod windows_shell {
                 }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
+
+                let action = panel_state(panel).and_then(|state| state.result.take());
+                if let Some(action) = action {
+                    if matches!(action, PanelAction::Quit) {
+                        let _ = DestroyWindow(panel);
+                        dispatch_panel_action(hwnd, action);
+                        parent_alive = false;
+                        break;
+                    }
+                    dispatch_panel_action(hwnd, action);
+                    if IsWindow(Some(panel)).as_bool() {
+                        rebuild_control_panel(panel);
+                    }
+                }
             }
-            let action = state.result.take();
+            if parent_alive && IsWindow(Some(hwnd)).as_bool() {
+                if let Some(app) = app_state(hwnd) {
+                    if app.panel_hwnd == Some(panel) {
+                        app.panel_hwnd = None;
+                    }
+                }
+            }
             drop(state);
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            if let Some(action) = action {
-                dispatch_panel_action(hwnd, action);
+            if parent_alive && IsWindow(Some(hwnd)).as_bool() {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+                ensure_widget_topmost(hwnd);
             }
             true
         }
@@ -3479,6 +3604,25 @@ mod windows_shell {
                 canonical_window_key(&Provider::GrokApi, "weekly"),
                 Some("primary")
             );
+        }
+
+        #[test]
+        fn provider_reorder_moves_before_drop_target_without_losing_cards() {
+            let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
+            assert!(move_provider_before(
+                &mut order,
+                &Provider::Codex,
+                &Provider::Kimi
+            ));
+            assert_eq!(
+                order,
+                vec![Provider::GrokApi, Provider::Codex, Provider::Kimi]
+            );
+            assert!(!move_provider_before(
+                &mut order,
+                &Provider::Kimi,
+                &Provider::Kimi
+            ));
         }
 
         #[test]
