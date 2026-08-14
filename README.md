@@ -39,7 +39,7 @@ Typical interactions:
 | Grok | SuperGrok weekly usage and reset time | Uses the Grok Build CLI session. |
 | Kimi | Five-hour and weekly windows, plus an optional total/credits view | Requires `kimi login`; some plan fields may be absent upstream. |
 | Ollama Pro | Hosted five-hour and weekly totals | Reset timestamps are not exposed by Ollama yet; the menu opens the usage page. |
-| OpenCode Go | Inferred five-hour, weekly, and monthly estimates from the local ledger | Local estimate only; it is not account-authoritative. |
+| OpenCode Go | Account-authoritative five-hour, weekly, and monthly percentages plus reset times when the local Go key is available | Reads the existing OpenCode Go key and calls the provider usage endpoint; falls back to an explicitly inferred local estimate when no key is available. |
 
 The widget does not scrape dashboards, import browser cookies, or combine
 unrelated provider limits into a misleading “total” percentage. See the
