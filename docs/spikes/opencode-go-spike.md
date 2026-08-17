@@ -3,10 +3,8 @@
 Status: complete. Evidence was re-checked on 2026-08-06 against the current
 OpenCode Go, provider, and CLI documentation, the OpenCode Console usage guide,
 the upstream usage API request, and live Windows checks using the local
-OpenCode installation, then updated on 2026-08-14 after upstream PR #16513
-merged (see the **Evidence update** at the end). No credential, cookie,
-account identifier, or raw authenticated response is stored in this
-repository.
+OpenCode installation. No credential, cookie, account identifier, or raw
+authenticated response is stored in this repository.
 
 The issue's “OpenCode Co” wording refers to the official product name,
 **OpenCode Go**.
@@ -18,7 +16,7 @@ The issue's “OpenCode Co” wording refers to the official product name,
 | OpenCode Go plan limits | Record as product semantics only. The official docs describe dollar-weighted five-hour, weekly, and monthly limits, but these values may change. |
 | `opencode` CLI and local database | A local estimate is possible: filter `opencode-go` messages, apply the model-specific Go quota weighting, and calculate each window. This is not account-authoritative and must be labeled inferred. |
 | OpenCode Console usage export | Reject as the Go quota source. It is a service-account-only historical CSV export with bounded UTC ranges, not remaining allowance or reset metadata. |
-| Proposed `GET /zen/go/v1/usage` | Monitor, but do not implement against it yet. Upstream PR #16513 is now merged and the route responds HTTP 401 behind key auth on the production host (2026-08-14 probe), but it is still not documented as a released contract; the HTTP 404 observed on 2026-08-06 predates that deployment. |
+| Proposed `GET /zen/go/v1/usage` | Monitor, but do not implement against it yet. The upstream request is still open and the live endpoint returned HTTP 404 on 2026-08-06. |
 | Browser automation | Not required for a local estimate. The authenticated dashboard remains the exact manual fallback; do not scrape HTML or copy browser credentials. |
 | Issue #34 adapter | The explicitly labeled local estimate is now implemented; an exact account adapter still waits for a released, documented individual-key usage endpoint. Weekly/monthly anchors are user-adjustable in the shell because local history cannot know the subscription anniversary. The editor accepts the dashboard's `2 days 10 hours`/`29 days 0 hours` countdown strings (or a copied `Resets in ...` line) directly. |
 
@@ -51,10 +49,10 @@ Zen-balance fallback as a separate setting rather than another Go window.
 | [CLI docs](https://dev.opencode.ai/docs/cli/) | Local provider credential file and OpenCode session database | `opencode providers list` lists configured credentials; `opencode stats` reports per-session/per-model token and raw cost statistics | No `usage`/`quota` command; model-weighted windows are an inferred local estimate and do not include other devices/workspaces | Candidate estimate source, not exact account source |
 | `GET https://opencode.ai/zen/go/v1/models` | Bearer Go key | Live model discovery; confirms the Go gateway key and host work | No plan usage or reset fields | Inference/config probe only |
 | [Console usage export](https://console.opencode.ai/guides/usage) | Requires a Console service-account key (`oc_sk_...`); user session tokens are rejected | Historical CSV records with token fields, billing source, `cost_micro_cents`, and `created_at`; scopes are organization/member/service-account/model | `range` is only `24h`, `7d`, or `30d`, starting at midnight UTC; no remaining allowance or reset timestamps | Reject as Go quota source; keep separate from Zen/API billing |
-| [Upstream feature request #16017](https://github.com/anomalyco/opencode/issues/16017) | Requests an individual Go API-key surface | Confirms that dashboard rolling/weekly/monthly usage and reset timers lacked a public API | Closed as of 2026-08-14 (the underlying PR #16513 was merged) | Track upstream; still not documented as a released contract |
-| [Upstream PR #16513](https://github.com/anomalyco/opencode/pull/16513) | Proposed bearer API key | Proposes `GET /zen/go/v1/usage` returning rolling, weekly, and monthly usage objects | Was open and unmerged (404 on 2026-08-06); **merged and deployed behind key auth as of 2026-08-14** (public probe returned HTTP 401 JSON) but still not documented as a released contract | Do not depend on it yet; it reports Go plan windows, never Zen balance |
+| [Upstream feature request #16017](https://github.com/anomalyco/opencode/issues/16017) | Requests an individual Go API-key surface | Confirms that dashboard rolling/weekly/monthly usage and reset timers currently lack a public API | Still open | Track upstream |
+| [Upstream PR #16513](https://github.com/anomalyco/opencode/pull/16513) | Proposed bearer API key | Proposes `GET /zen/go/v1/usage` returning rolling, weekly, and monthly usage objects | PR is open and unmerged; live authenticated probe returned HTTP 404 on 2026-08-06 | Do not depend on it yet |
 
-### Live checks (2026-08-06)
+### Live checks
 
 The local OpenCode credential was read only to perform a redacted, in-memory
 probe. The command output contained no key or payload:
@@ -67,11 +65,10 @@ GET https://opencode.ai/zen/go/v1/models   -> HTTP 200 (model list)
 GET https://opencode.ai/zen/go/v1/usage    -> HTTP 404 (not deployed)
 ```
 
-That 404 is the dated 2026-08-06 observation: the endpoint name was present
-in an upstream PR, but the route was not deployed on the production host at
-that date. The 2026-08-14 re-check in the **Evidence update** below is the
-current state (the route now responds HTTP 401 behind key auth). Do not treat
-a transient 404 page, an HTML dashboard, or a model response as quota data.
+The 404 is important: the endpoint name is present in an upstream PR, but it
+is not a supported production contract today. A later probe must be repeated
+after the upstream issue/PR changes state; do not treat a transient 404 page,
+an HTML dashboard, or a model response as quota data.
 
 ### Workspace dashboard route
 
@@ -144,16 +141,15 @@ cannot be converted into a remaining percentage or reset timestamp.
 
 ## Proposed upstream usage contract (not admitted)
 
-The now-merged [PR #16513](https://github.com/anomalyco/opencode/pull/16513) adds a
+The open [PR #16513](https://github.com/anomalyco/opencode/pull/16513) adds a
 route at `/zen/go/v1/usage` and calls the server's rolling, weekly, and monthly
 usage analyzers. Its proposed response names are `useBalance`, `rollingUsage`,
 `weeklyUsage`, and `monthlyUsage`; each usage object contains a status,
 `usagePercent`, and `resetInSec`.
 
 That shape is useful evidence, but it is not an official released contract:
-the PR was open and the live endpoint returned 404 on 2026-08-06. See the
-**Evidence update (2026-08-14)** below for the current state. The deterministic
-fixtures under
+the PR remains open, the feature issue remains open, and the live endpoint
+returned 404. The deterministic fixtures under
 [`docs/fixtures/opencode/`](../fixtures/opencode/) therefore label this shape
 as **unreleased**. The proposed route reports `usagePercent` and a countdown,
 not account-specific dollars used/remaining. If it is eventually released, an
@@ -173,7 +169,7 @@ must handle:
 | `missing_rolling.json`, `missing_weekly.json`, `missing_monthly.json` | Each sibling window omitted in turn | Keep valid siblings; do not infer the missing window or turn it into zero |
 | `auth_failure.json` | 401/missing or expired Go key | `not_configured` for no key; otherwise `auth_expired`/unavailable; never log the key |
 | `malformed.json` | Success-shaped response with wrong types | `schema_drift`/unavailable; retain last good cache only as stale |
-| `unavailable.json` | Dated 2026-08-06 live probe: the route returned HTTP 404 (not yet deployed) | Dashboard/manual fallback; do not register a provider from an unrecognized response |
+| `unavailable.json` | Current production endpoint returns 404 | Dashboard/manual fallback; do not register a provider from an unrecognized response |
 | `reset_unknown.json` | Usage exists but reset metadata is absent | Preserve usage if a supported source supplies it; leave `resets_at` empty and label the result honestly |
 | `timeout.json` | Network deadline exceeded | Preserve stale cache when available; otherwise unavailable with `timeout` |
 
@@ -195,35 +191,14 @@ There are now two deliberately separate implementation paths:
    weekly and monthly anchors; clearing them returns to the built-in
    Monday/first-of-month defaults. The rolling reset is estimated from the
    latest local Go event.
-2. **Exact account adapter (preferred).** OpenCode documents an
-   individual-key endpoint equivalent to the proposed `/zen/go/v1/usage` (the
-   PR is merged and the route responds behind key auth, but it is still not a
-   documented contract), and a live Windows smoke test confirms all three
-   windows plus reset metadata; or OpenCode documents another supported
-   individual-subscriber endpoint with the same semantics.
+2. **Exact account adapter (preferred).** OpenCode merges and documents an
+   individual-key endpoint equivalent to the proposed `/zen/go/v1/usage`, and
+   a live Windows smoke test confirms all three windows plus reset metadata; or
+   OpenCode documents another supported individual-subscriber endpoint with
+   the same semantics.
 
 In either path, preserve separate `rolling`, `weekly`, and `monthly` identity,
 keep Go allowance separate from Zen balance and Console service-account
 exports, and never scrape the dashboard or import browser cookies. The
 provider API key is the correct credential for the Go gateway; the browser
 OAuth session is a separate dashboard auth boundary.
-
-## Evidence update (2026-08-14)
-
-Re-checked for the Zen balance spike (#86). The Go domain is unchanged, but
-two observations are newer than the 2026-08-06 notes above:
-
-- Upstream [PR #16513](https://github.com/anomalyco/opencode/pull/16513) is now
-  **merged** and issue #16017 is closed.
-- A public, unauthenticated probe of `GET https://opencode.ai/zen/go/v1/usage`
-  on 2026-08-14 returned **HTTP 401** `application/json` with body
-  `{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`
-  (stable across repeated probes), while unknown paths under `/zen/go/v1/`
-  return the site's HTML 404. The route therefore exists behind key auth on
-  the production host. It is still **not documented** in the Go docs as a
-  supported contract, and it reports Go rolling/weekly/monthly usage — never
-  the Zen pay-as-you-go balance.
-
-Nothing here changes the #34 decision: the local estimator remains the
-implemented path, the exact account endpoint remains deferred, and Zen balance
-remains a separate surface tracked by [opencode-zen-spike.md](opencode-zen-spike.md).

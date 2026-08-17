@@ -44,17 +44,16 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
 - [OpenCode CLI documentation](https://dev.opencode.ai/docs/cli/) — provider
   auth commands and local session `stats` (not subscription quota).
 - [OpenCode Console usage guide](https://console.opencode.ai/guides/usage) —
-  service-account-only historical CSV export; not Go remaining allowance and not
-  Zen balance.
+  service-account-only historical CSV export; not Go remaining allowance.
 - [OpenCode Go usage spike](spikes/opencode-go-spike.md) — issue #33 evidence,
   upstream API tracking, admission gate, and redacted deterministic fixtures.
 - [OpenCode Zen documentation](https://opencode.ai/docs/zen/) — pay-as-you-go
   gateway, auto-reload ($5 / $20), workspace monthly limits; documents
   inference endpoints only, no balance API.
 - [Upstream Zen balance request #10448](https://github.com/anomalyco/opencode/issues/10448)
-  — open; proposes `GET /zen/v1/balance`; live probe returned HTTP 404 on
-  2026-08-14 (see [Zen usage spike](spikes/opencode-zen-spike.md) for the
-  source matrix, live HTTP evidence, and the defer/dashboard-only decision).
+  — open; proposes `GET /zen/v1/balance`; the live probe returned HTTP 404 on
+  2026-08-14 (see [Zen decision record](spikes/opencode-zen-spike.md) for the
+  source matrix and the defer/dashboard-only decision).
 - [Grok FAQ](https://docs.x.ai/grok/faq) (weekly SuperGrok pool semantics)
 - [Grok overview](https://docs.x.ai/grok/overview)
 - [Grok Build CLI](https://x.ai/news/grok-build-cli) / [xai-org/grok-build](https://github.com/xai-org/grok-build) (open-source client; billing path)
