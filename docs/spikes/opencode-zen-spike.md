@@ -1,9 +1,10 @@
-# OpenCode Zen credits/balance decision record (#86)
+# OpenCode Zen credits/balance tracking record (#86)
 
-Status: **decision recorded; deferred.** Evidence date: **2026-08-14**.
+Status: **tracking; blocked on upstream.** Evidence date: **2026-08-14**.
 
-This record is the admission gate for any future OpenCode Zen balance work. It
-is the concise decision record for #86; speculative endpoint contracts,
+This is the current tracking record for #86. #86 stays open for periodic
+rechecks and must remain open until a supported, documented individual-account
+balance source exists; it is not a closeout. Speculative endpoint contracts,
 detailed unauthenticated probe transcripts, and synthetic fixture planning
 are not maintained while no supported source exists.
 
@@ -25,8 +26,9 @@ balance API or CLI command** for OpenCode Zen:
 4. `GET /zen/go/v1/usage` is a **separate surface**: OpenCode Go plan quota
    (upstream PR #16513), not Zen credits. Even a successful response reports
    Go rolling/weekly/monthly windows, never the Zen pay-as-you-go balance.
-5. The dashboard (workspace billing/usage pages) is the only place a balance
-   is visible today. It is a human-visual **manual fallback, not an API**: do
+5. The dashboard (workspace billing/usage pages) is the documented manual
+   place to view a balance today. It is a human-visual **manual fallback, not
+   an API**: do
    not scrape its HTML, copy its cookies, or treat it as a programmatic
    source.
 
@@ -40,7 +42,7 @@ never exist; if one appears, it must still pass the admission gate below.
 | --- | --- | --- |
 | [Zen docs](https://opencode.ai/docs/zen/) | Product semantics: pay-as-you-go, auto-reload ($5 / $20), workspace monthly limits | Product evidence only; no balance response documented |
 | [Provider docs](https://opencode.ai/docs/providers) | `/connect` flow and local key storage | Auth/config evidence only |
-| Upstream [#10448](https://github.com/anomalyco/opencode/issues/10448) | Proposed `GET /zen/v1/balance` | Open; probe returned HTTP 404 on 2026-08-14; track, do not implement |
+| Upstream [#10448](https://github.com/anomalyco/opencode/issues/10448) | Proposed `GET /zen/v1/balance` | Open; probe returned HTTP 404 on 2026-08-14; keep #86 open and recheck periodically; do not implement |
 | `GET /zen/go/v1/usage` | **Go plan** quota surface, not Zen credits | Not Zen balance; keep in the Go domain |
 | `opencode stats` / local ledger | Local-device spend/tokens | Reject as a balance source |
 | [Console usage export](https://console.opencode.ai/guides/usage) | Service-account-only historical CSV | Reject as Zen balance |
@@ -59,24 +61,32 @@ never exist; if one appears, it must still pass the admission gate below.
 - `/zen/go/v1/usage` is Go quota evidence and stays out of the Zen balance
   domain.
 
-## Decision
+## Tracking decision (#86)
 
-**Defer / dashboard-only.** The follow-up story (#87) stays explicitly
-deferred until a **supported, documented individual-account Zen balance
-source** exists — a released API or CLI command. Until then the dashboard is
-the documented manual fallback, and no Zen provider is registered from
-guessed or scraped data.
+**Keep #86 open; dashboard-only for now.** #86 tracks the absence of a
+supported, documented individual-account Zen balance source; no implementation
+is admitted until such a source appears. Until then the dashboard is the
+documented manual fallback, and no Zen provider is registered from guessed or
+scraped data.
 
-## Wait condition
+## Follow-up / recheck plan (#86 stays open)
 
-Re-open #87 only when one of the following is true, and re-verify each on the
-probe date before any implementation:
+#86 remains open and is re-checked periodically against the official Zen docs
+and upstream #10448 (or whenever either status changes). Start/continue the #87
+implementation work only when one of the following is true, re-verifying each
+on the probe date before any implementation:
 
 1. The official Zen docs document a balance/credits endpoint or CLI command.
 2. Upstream #10448 is closed/implemented, or a successor PR is merged, the
    route responds to a live probe, and the response shape is documented.
 3. OpenCode ships a supported, documented individual-account balance surface
    elsewhere.
+
+When a supported source appears, verify the auth boundary, the live route, and
+response semantics (currency/units and provider-reported
+balance/zero/missing behavior), update #86 with that evidence, then continue
+#87 with fixtures/contracts and implementation. #86 stays open until that
+evidence exists; the dashboard remains the manual fallback while it does not.
 
 Any future adapter must preserve provider-reported balance/zero/missing
 distinctions, keep Zen `credits` identity separate from OpenCode Go quota and

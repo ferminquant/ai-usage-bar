@@ -52,8 +52,9 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
   inference endpoints only, no balance API.
 - [Upstream Zen balance request #10448](https://github.com/anomalyco/opencode/issues/10448)
   — open; proposes `GET /zen/v1/balance`; the live probe returned HTTP 404 on
-  2026-08-14 (see [Zen decision record](spikes/opencode-zen-spike.md) for the
-  source matrix and the defer/dashboard-only decision).
+  2026-08-14 (see [Zen tracking record](spikes/opencode-zen-spike.md) — #86
+  stays open with a periodic recheck plan while upstream is pending; the
+  dashboard is the manual fallback).
 - [Grok FAQ](https://docs.x.ai/grok/faq) (weekly SuperGrok pool semantics)
 - [Grok overview](https://docs.x.ai/grok/overview)
 - [Grok Build CLI](https://x.ai/news/grok-build-cli) / [xai-org/grok-build](https://github.com/xai-org/grok-build) (open-source client; billing path)
