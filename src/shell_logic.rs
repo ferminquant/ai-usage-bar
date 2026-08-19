@@ -32,6 +32,35 @@ pub(crate) const GRID_COLUMNS: usize = 2;
 /// simple header click still focuses the provider.
 pub(crate) const DRAG_THRESHOLD_PX: i32 = 5;
 
+/// How a mouse release in the provider-card panel is routed.
+///
+/// The release handler must dispatch a click even when the press never
+/// started a header gesture: the eye toggle, quota-row checkboxes, row
+/// labels, and footer buttons all sit outside the draggable header, so they
+/// are handled purely on release. This classification is the guard for that
+/// path — a release with no gesture is always a plain click, never a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReleaseRoute {
+    /// No gesture was started at press: plain click on the eye, a checkbox,
+    /// a row, or a footer button. Must hit-test and dispatch on release.
+    Click,
+    /// Header press stayed within the drag threshold: provider focus/click.
+    HeaderClick,
+    /// Header gesture crossed the threshold: commit a reorder.
+    Reorder,
+}
+
+/// Classify a release from the gesture that (may have) started at press.
+/// `drag_active` is `None` when `WM_LBUTTONDOWN` did not start a header
+/// gesture (a click on a checkbox, the eye, or a footer button).
+pub(crate) fn release_route(drag_active: Option<bool>) -> ReleaseRoute {
+    match drag_active {
+        None => ReleaseRoute::Click,
+        Some(false) => ReleaseRoute::HeaderClick,
+        Some(true) => ReleaseRoute::Reorder,
+    }
+}
+
 /// Pure rectangle geometry used by the drop model. Kept separate from the
 /// Win32 `RECT` so the model is unit-testable on every platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,5 +593,16 @@ mod tests {
         let threshold = DRAG_THRESHOLD_PX;
         assert_eq!(threshold * threshold, 25);
         assert!(threshold <= 6, "clicks must survive small jitter");
+    }
+
+    #[test]
+    fn release_with_no_gesture_is_a_plain_click() {
+        // Regression guard: a press on a checkbox, the eye toggle, a row, or
+        // a footer button never starts a header gesture. The release handler
+        // must still route it as a click; dropping this route is what made
+        // the panel checkmarks stop toggling visibility.
+        assert_eq!(release_route(None), ReleaseRoute::Click);
+        assert_eq!(release_route(Some(false)), ReleaseRoute::HeaderClick);
+        assert_eq!(release_route(Some(true)), ReleaseRoute::Reorder);
     }
 }

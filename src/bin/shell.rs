@@ -27,8 +27,9 @@ mod windows_shell {
     use std::thread;
 
     use super::shell_logic::{
-        apply_drop, normalize_used_percent, render_detail_text, swap_drop, usage_band, DropCard,
-        DropGrid, SlotRect, UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS,
+        apply_drop, normalize_used_percent, release_route, render_detail_text, swap_drop,
+        usage_band, DropCard, DropGrid, ReleaseRoute, SlotRect, UsageBand, DRAG_THRESHOLD_PX,
+        GRID_COLUMNS,
     };
 
     use windows::core::*;
@@ -1979,7 +1980,7 @@ mod windows_shell {
     const PANEL_HEADER_HEIGHT: i32 = 64;
     const PANEL_CARD_PADDING: i32 = 14;
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug, PartialEq)]
     enum PanelAction {
         None,
         FocusProvider(Provider),
@@ -2971,6 +2972,56 @@ mod windows_shell {
         reflow_panel_layout(&mut state.layout);
     }
 
+    /// Route a mouse release to a panel action, returning the action to
+    /// dispatch and whether the pre-press layout must be restored (a
+    /// cancelled gesture). Releases are classified by the gesture that
+    /// started at press, so every click reaches the hit-tester:
+    ///
+    /// - No gesture (`Click`): the press landed on the eye toggle, a
+    ///   quota/metric row checkbox, a row, or a footer button — all of which
+    ///   live outside the draggable header. Hit-test the release point
+    ///   directly; this is the path that toggles provider and quota-window
+    ///   visibility, so it must run even though `state.drag` is `None`.
+    /// - Inactive header gesture (`HeaderClick`): provider focus/visibility
+    ///   hit test at the release point; a miss on empty chrome restores the
+    ///   pre-press layout.
+    /// - Active drag (`Reorder`): swap or empty-slot insertion; releasing
+    ///   with no target restores the origin layout.
+    fn resolve_lbutton_release(
+        state: &PanelState,
+        drag: Option<&PanelDragState>,
+        point: POINT,
+    ) -> (Option<PanelAction>, bool) {
+        match release_route(drag.map(|drag| drag.active)) {
+            ReleaseRoute::Click => (panel_action_at(state, point), false),
+            ReleaseRoute::HeaderClick => {
+                let action = panel_action_at(state, point);
+                let restore = action.is_none();
+                (action, restore)
+            }
+            ReleaseRoute::Reorder => {
+                let drag = drag.expect("Reorder route implies a started gesture");
+                // A card-on-card drop is a direct swap. The target remains at
+                // its origin rectangle throughout the gesture, so the
+                // committed order cannot rotate unrelated cards through the
+                // two-column grid.
+                let action = if let Some(target) = card_drop_target_at(drag, point) {
+                    let mut order = drag.origin_order.clone();
+                    swap_drop(&mut order, &drag.provider, &target)
+                        .then_some(PanelAction::Reorder(order))
+                } else {
+                    resolve_insert_index_at(drag, point).and_then(|index| {
+                        let mut order = drag.origin_order.clone();
+                        apply_drop(&mut order, &drag.provider, index)
+                            .then_some(PanelAction::Reorder(order))
+                    })
+                };
+                let restore = action.is_none();
+                (action, restore)
+            }
+        }
+    }
+
     fn point_from_lparam(lparam: LPARAM) -> POINT {
         POINT {
             x: (lparam.0 as i16) as i32,
@@ -3072,36 +3123,18 @@ mod windows_shell {
                 let point = point_from_lparam(lparam);
                 let mut rebuild = false;
                 if let Some(state) = panel_state(hwnd) {
-                    if let Some(drag) = state.drag.take() {
-                        let action = if drag.active {
-                            // A card-on-card drop is a direct swap. The target
-                            // remains at its origin rectangle throughout the
-                            // gesture, so the committed order cannot rotate
-                            // unrelated cards through the two-column grid.
-                            if let Some(target) = card_drop_target_at(&drag, point) {
-                                let mut order = drag.origin_order.clone();
-                                swap_drop(&mut order, &drag.provider, &target)
-                                    .then_some(PanelAction::Reorder(order))
-                            } else {
-                                resolve_insert_index_at(&drag, point).and_then(|index| {
-                                    let mut order = drag.origin_order.clone();
-                                    apply_drop(&mut order, &drag.provider, index)
-                                        .then_some(PanelAction::Reorder(order))
-                                })
-                            }
-                        } else {
-                            // Never crossed the threshold: ordinary click.
-                            panel_action_at(state, point)
-                        };
-                        if action.is_none() {
-                            // Cancelled (invalid target / no-op) or a click on
-                            // empty chrome: restore the pre-press layout.
-                            restore_origin_layout(state, &drag.origin_cards);
-                            rebuild = state.rebuild_pending;
-                        }
-                        if let Some(action) = action {
-                            state.result = Some(action);
-                        }
+                    let drag = state.drag.take();
+                    let (action, restore) = resolve_lbutton_release(state, drag.as_ref(), point);
+                    if restore {
+                        // Cancelled gesture (invalid drop target or a header
+                        // click that landed on empty chrome): restore the
+                        // pre-press layout.
+                        let drag = drag.expect("restore is only requested for started gestures");
+                        restore_origin_layout(state, &drag.origin_cards);
+                        rebuild = state.rebuild_pending;
+                    }
+                    if let Some(action) = action {
+                        state.result = Some(action);
                     }
                 }
                 let _ = ReleaseCapture();
@@ -4146,6 +4179,215 @@ mod windows_shell {
                 format_reset_countdown(Some(now + ChronoDuration::days(29)), now),
                 "29 days 0 hours"
             );
+        }
+
+        // --- Mouse release routing -------------------------------------------
+
+        fn test_card(provider: Provider, top: i32, left: i32) -> PanelCard {
+            let rect = RECT {
+                left,
+                top,
+                right: left + PANEL_CARD_WIDTH,
+                bottom: top + PANEL_HEADER_HEIGHT + PANEL_ROW_HEIGHT + PANEL_CARD_PADDING * 2,
+            };
+            PanelCard {
+                rect,
+                title: provider_display_name(&provider).to_string(),
+                visible: true,
+                focused: false,
+                eye_rect: RECT {
+                    left: rect.right - 42,
+                    top: rect.top + 14,
+                    right: rect.right - 12,
+                    bottom: rect.top + 42,
+                },
+                provider: provider.clone(),
+                rows: vec![PanelRow {
+                    rect: RECT {
+                        left: rect.left + PANEL_CARD_PADDING,
+                        top: rect.top + PANEL_HEADER_HEIGHT,
+                        right: rect.right - PANEL_CARD_PADDING,
+                        bottom: rect.top + PANEL_HEADER_HEIGHT + PANEL_ROW_HEIGHT,
+                    },
+                    label: "primary".to_string(),
+                    value: "50% left".to_string(),
+                    checked: true,
+                    toggleable: true,
+                    action: PanelAction::ToggleWindow(provider.clone(), "primary".to_string()),
+                    focus_action: Some(PanelAction::FocusWindow(
+                        provider.clone(),
+                        "primary".to_string(),
+                    )),
+                    focused: false,
+                }],
+                placeholder: false,
+            }
+        }
+
+        fn test_layout() -> PanelLayout {
+            let mut cards = vec![
+                test_card(Provider::Codex, 82, 18),
+                test_card(Provider::GrokApi, 82, 432),
+            ];
+            reflow_grid(&mut cards, GRID_COLUMNS);
+            let mut layout = PanelLayout {
+                width: 0,
+                height: 0,
+                cards,
+                buttons: vec![PanelButton {
+                    rect: RECT::default(),
+                    label: "Refresh".to_string(),
+                    action: PanelAction::Refresh,
+                }],
+            };
+            reflow_panel_layout(&mut layout);
+            layout
+        }
+
+        fn test_state() -> PanelState {
+            PanelState {
+                parent: HWND::default(),
+                layout: test_layout(),
+                result: None,
+                drag: None,
+                rebuild_pending: false,
+            }
+        }
+
+        #[test]
+        fn release_without_drag_routes_checkbox_eye_and_row_clicks() {
+            // Regression: the drag refactor routed releases only through an
+            // existing header gesture (`state.drag.take()`). Clicks on the
+            // checkbox, eye toggle, rows, or footer buttons never started a
+            // gesture, so their releases were dropped and the checkmarks no
+            // longer toggled provider/quota-window visibility. Every release
+            // must reach the hit-tester, even with `drag == None`.
+            let state = test_state();
+            let card = state.layout.cards[0].clone();
+            let row = &card.rows[0];
+
+            // Checkbox hit area: toggles quota-window visibility.
+            let checkbox = row_checkbox_rect(row.rect);
+            let checkbox_center = POINT {
+                x: (checkbox.left + checkbox.right) / 2,
+                y: (checkbox.top + checkbox.bottom) / 2,
+            };
+            let (action, restore) = resolve_lbutton_release(&state, None, checkbox_center);
+            assert_eq!(
+                action,
+                Some(PanelAction::ToggleWindow(
+                    Provider::Codex,
+                    "primary".to_string()
+                ))
+            );
+            assert!(!restore, "plain clicks never restore the layout");
+
+            // Row label area: focuses the window.
+            let label_point = POINT {
+                x: row.rect.left + 10,
+                y: (row.rect.top + row.rect.bottom) / 2,
+            };
+            let (action, _) = resolve_lbutton_release(&state, None, label_point);
+            assert_eq!(
+                action,
+                Some(PanelAction::FocusWindow(
+                    Provider::Codex,
+                    "primary".to_string()
+                ))
+            );
+
+            // Eye toggle: provider visibility.
+            let eye = POINT {
+                x: (card.eye_rect.left + card.eye_rect.right) / 2,
+                y: (card.eye_rect.top + card.eye_rect.bottom) / 2,
+            };
+            let (action, _) = resolve_lbutton_release(&state, None, eye);
+            assert_eq!(action, Some(PanelAction::ToggleProvider(Provider::Codex)));
+        }
+
+        #[test]
+        fn release_with_inactive_header_gesture_focuses_provider() {
+            let state = test_state();
+            let card = state.layout.cards[0].clone();
+            let header_point = POINT {
+                x: card.rect.left + 10,
+                y: (card.rect.top + (card.rect.top + PANEL_HEADER_HEIGHT)) / 2,
+            };
+            // A press on the header started a gesture; staying under the drag
+            // threshold means the release is a header click (provider focus).
+            let drag = PanelDragState {
+                provider: Provider::Codex,
+                press_point: header_point,
+                pointer: header_point,
+                active: false,
+                origin_order: state
+                    .layout
+                    .cards
+                    .iter()
+                    .map(|card| card.provider.clone())
+                    .collect(),
+                origin_cards: state.layout.cards.clone(),
+                flow: state
+                    .layout
+                    .cards
+                    .iter()
+                    .filter(|card| card.provider != Provider::Codex)
+                    .cloned()
+                    .collect(),
+                drop_index: None,
+                drop_target: None,
+                grabbed_rect: card.rect,
+            };
+            let (action, restore) = resolve_lbutton_release(&state, Some(&drag), header_point);
+            assert_eq!(action, Some(PanelAction::FocusProvider(Provider::Codex)));
+            assert!(!restore, "a header click on the header is not a cancel");
+        }
+
+        #[test]
+        fn active_drag_release_commits_reorder_not_a_click() {
+            let state = test_state();
+            let cards = state.layout.cards.clone();
+            let origin_order: Vec<Provider> =
+                cards.iter().map(|card| card.provider.clone()).collect();
+            let flow: Vec<PanelCard> = cards
+                .iter()
+                .filter(|card| card.provider != Provider::Codex)
+                .cloned()
+                .collect();
+            let drag = PanelDragState {
+                provider: Provider::Codex,
+                press_point: POINT {
+                    x: cards[0].rect.left + 10,
+                    y: cards[0].rect.top + 10,
+                },
+                pointer: POINT {
+                    x: cards[1].rect.left + 10,
+                    y: cards[1].rect.top + 10,
+                },
+                active: true,
+                origin_order,
+                origin_cards: cards.clone(),
+                flow,
+                drop_index: None,
+                drop_target: None,
+                grabbed_rect: cards[0].rect,
+            };
+            // Releasing over the other card swaps the two providers instead of
+            // firing a click on the dragged card's slot.
+            let release = POINT {
+                x: cards[1].rect.left + 10,
+                y: cards[1].rect.top + 10,
+            };
+            let (action, restore) = resolve_lbutton_release(&state, Some(&drag), release);
+            assert!(
+                matches!(
+                    action,
+                    Some(PanelAction::Reorder(order))
+                        if order == vec![Provider::GrokApi, Provider::Codex]
+                ),
+                "dropping Codex on GrokApi must swap the two providers"
+            );
+            assert!(!restore, "a successful drop is not a cancel");
         }
     }
 }
