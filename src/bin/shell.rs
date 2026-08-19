@@ -2505,6 +2505,19 @@ mod windows_shell {
         }
     }
 
+    /// Radio-style focus control for a quota row. The row itself remains a
+    /// focus target for an easy click, but the explicit dot makes it clear
+    /// which window currently drives the compact bar; the square checkbox to
+    /// its right continues to control visibility independently.
+    fn row_focus_rect(row_rect: RECT) -> RECT {
+        RECT {
+            left: row_rect.right - 48,
+            top: row_rect.top + 7,
+            right: row_rect.right - 30,
+            bottom: row_rect.top + 25,
+        }
+    }
+
     /// Paint one provider card (grid card or the floating grab preview) at
     /// `rect`. Row/eye geometry is derived from `rect` so the same routine
     /// works for the grid and for the pointer-following grab card.
@@ -2586,7 +2599,7 @@ mod windows_shell {
                 RECT {
                     left: row_rect.left + 80,
                     top: row_rect.top,
-                    right: row_rect.right - 30,
+                    right: row_focus_rect(row_rect).left - 6,
                     bottom: row_rect.bottom,
                 },
                 &row.value,
@@ -2599,6 +2612,26 @@ mod windows_shell {
                 },
                 DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS,
             );
+            if row.focus_action.is_some() {
+                let focus_rect = row_focus_rect(row_rect);
+                draw_text(
+                    hdc,
+                    focus_rect,
+                    if focused { "●" } else { "○" },
+                    14,
+                    FW_BOLD,
+                    if card.visible {
+                        if focused {
+                            COLOR_GREEN
+                        } else {
+                            COLOR_MUTED
+                        }
+                    } else {
+                        COLOR_BORDER
+                    },
+                    DT_SINGLELINE | DT_VCENTER | DT_CENTER,
+                );
+            }
             if row.toggleable {
                 draw_checkbox(hdc, row_checkbox_rect(row_rect), row.checked, card.visible);
             }
@@ -2679,7 +2712,7 @@ mod windows_shell {
                     right: state.layout.width - PANEL_MARGIN,
                     bottom: 52,
                 },
-                "Click a usage row to focus · checkboxes show/hide · drag headers to swap",
+                "Click a row or its dot to choose the bar timeframe · boxes show/hide · drag headers",
                 12,
                 FW_NORMAL,
                 COLOR_MUTED,
@@ -2781,6 +2814,11 @@ mod windows_shell {
                 // Checkbox toggles visibility; the quota label focuses the
                 // window. Optional metric rows keep the toggle for the whole
                 // row (they have no window focus concept).
+                if let Some(focus) = &row.focus_action {
+                    if rect_contains(row_focus_rect(row.rect), point) {
+                        return Some(focus.clone());
+                    }
+                }
                 if rect_contains(row_checkbox_rect(row.rect), point) {
                     return Some(row.action.clone());
                 }
@@ -4288,6 +4326,23 @@ mod windows_shell {
                 y: (row.rect.top + row.rect.bottom) / 2,
             };
             let (action, _) = resolve_lbutton_release(&state, None, label_point);
+            assert_eq!(
+                action,
+                Some(PanelAction::FocusWindow(
+                    Provider::Codex,
+                    "primary".to_string()
+                ))
+            );
+
+            // The explicit radio-style focus control must use the same action
+            // as the row label, so choosing a timeframe is discoverable while
+            // the square checkbox remains visibility-only.
+            let focus_control = row_focus_rect(row.rect);
+            let focus_point = POINT {
+                x: (focus_control.left + focus_control.right) / 2,
+                y: (focus_control.top + focus_control.bottom) / 2,
+            };
+            let (action, _) = resolve_lbutton_release(&state, None, focus_point);
             assert_eq!(
                 action,
                 Some(PanelAction::FocusWindow(
