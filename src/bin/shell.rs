@@ -27,9 +27,9 @@ mod windows_shell {
     use std::thread;
 
     use super::shell_logic::{
-        apply_drop, normalize_used_percent, release_route, render_detail_text, swap_drop,
-        usage_band, DropCard, DropGrid, ReleaseRoute, SlotRect, UsageBand, DRAG_THRESHOLD_PX,
-        GRID_COLUMNS,
+        apply_drop, normalize_used_percent, progress_fill_width, quota_progress, release_route,
+        render_detail_text, swap_drop, usage_band, DropCard, DropGrid, QuotaProgress, ReleaseRoute,
+        SlotRect, UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS,
     };
 
     use windows::core::*;
@@ -2015,6 +2015,12 @@ mod windows_shell {
         focus_action: Option<PanelAction>,
         /// Whether this quota window is the focused window for its provider.
         focused: bool,
+        /// Quota percentage row: eligible for a progress track. Non-quota rows
+        /// (credits, spend, tokens, health, status) never render one.
+        quota: bool,
+        /// Fill + band for the quota progress track. `None` renders a neutral
+        /// empty track that never implies a filled quota.
+        progress: Option<QuotaProgress>,
     }
 
     #[derive(Clone)]
@@ -2143,6 +2149,8 @@ mod windows_shell {
             action: PanelAction::None,
             focus_action: None,
             focused: false,
+            quota: false,
+            progress: None,
         }
     }
 
@@ -2186,6 +2194,8 @@ mod windows_shell {
                 focus_action: Some(PanelAction::FocusWindow(provider.clone(), window.clone())),
                 focused: focused_provider == Some(provider)
                     && focus_window == Some(window.as_str()),
+                quota: true,
+                progress: quota_progress(snapshot),
             });
         }
 
@@ -2205,6 +2215,8 @@ mod windows_shell {
                 action: PanelAction::ToggleMetric(provider.clone(), metric),
                 focus_action: None,
                 focused: false,
+                quota: false,
+                progress: None,
             });
         }
         if available_windows(snapshots, provider).is_empty() {
@@ -2634,6 +2646,42 @@ mod windows_shell {
             }
             if row.toggleable {
                 draw_checkbox(hdc, row_checkbox_rect(row_rect), row.checked, card.visible);
+            }
+            if row.quota {
+                // Thin track pinned to the bottom of the row so it stays clear
+                // of the label, value, focus dot, and checkbox. Missing values
+                // keep the neutral empty track and never imply a fill.
+                // `row_rect.right` already excludes `PANEL_CARD_PADDING`
+                // (see `reflow_grid`), so do not subtract it again.
+                let track = RECT {
+                    left: row_rect.left,
+                    top: row_rect.bottom - 5,
+                    right: row_rect.right,
+                    bottom: row_rect.bottom - 2,
+                };
+                fill_rect(hdc, track, COLOR_BORDER);
+                if let Some(bar) = row.progress {
+                    let fill_width =
+                        progress_fill_width(track.right - track.left, Some(bar.fill_percent));
+                    if fill_width > 0 {
+                        let color = match bar.band {
+                            UsageBand::Neutral => COLOR_NEUTRAL,
+                            UsageBand::Green => COLOR_GREEN,
+                            UsageBand::Yellow => COLOR_YELLOW,
+                            UsageBand::Red => COLOR_RED,
+                        };
+                        fill_rect(
+                            hdc,
+                            RECT {
+                                left: track.left,
+                                top: track.top,
+                                right: track.left + fill_width,
+                                bottom: track.bottom,
+                            },
+                            color,
+                        );
+                    }
+                }
             }
         }
     }
@@ -4257,6 +4305,11 @@ mod windows_shell {
                         "primary".to_string(),
                     )),
                     focused: false,
+                    quota: true,
+                    progress: Some(QuotaProgress {
+                        fill_percent: 50.0,
+                        band: UsageBand::Green,
+                    }),
                 }],
                 placeholder: false,
             }
