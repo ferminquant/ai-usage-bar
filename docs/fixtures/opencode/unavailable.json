@@ -1,12 +1,12 @@
 {
-  "_description": "Redacted live probe result from 2026-08-06. The proposed route is not deployed on the production host; the HTML 404 body is intentionally omitted.",
+  "_description": "Redacted historical probe result from 2026-08-06. The gateway route was unavailable at that time; the HTML 404 body is intentionally omitted.",
   "_source": "GET https://opencode.ai/zen/go/v1/usage",
   "_capturedAt": "2026-08-06T21:11:48Z",
   "_httpStatus": 404,
   "_contentType": "text/html",
   "_expected": {
     "freshness": "unavailable",
-    "error_code": "endpoint_unavailable",
+    "error_code": "network",
     "fallback": "open the authenticated OpenCode page manually"
   }
 }

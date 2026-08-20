@@ -1,8 +1,8 @@
 # OpenCode Go usage spike (#33)
 
-Status: complete. Evidence was re-checked on 2026-08-06 against the current
+Status: complete. Evidence was re-checked on 2026-08-14 against the current
 OpenCode Go, provider, and CLI documentation, the OpenCode Console usage guide,
-the upstream usage API request, and live Windows checks using the local
+the deployed Go usage endpoint, and live Windows checks using the local
 OpenCode installation. No credential, cookie, account identifier, or raw
 authenticated response is stored in this repository.
 
@@ -14,11 +14,11 @@ The issue's “OpenCode Co” wording refers to the official product name,
 | Surface | Decision |
 | --- | --- |
 | OpenCode Go plan limits | Record as product semantics only. The official docs describe dollar-weighted five-hour, weekly, and monthly limits, but these values may change. |
-| `opencode` CLI and local database | A local estimate is possible: filter `opencode-go` messages, apply the model-specific Go quota weighting, and calculate each window. This is not account-authoritative and must be labeled inferred. |
+| `opencode` CLI and local database | A local estimate remains available when no Go key is present: filter `opencode-go` messages, apply the model-specific Go quota weighting, and calculate each window. It is not account-authoritative and is labeled inferred. |
 | OpenCode Console usage export | Reject as the Go quota source. It is a service-account-only historical CSV export with bounded UTC ranges, not remaining allowance or reset metadata. |
-| Proposed `GET /zen/go/v1/usage` | Monitor, but do not implement against it yet. The upstream request is still open and the live endpoint returned HTTP 404 on 2026-08-06. |
+| `GET /zen/go/v1/usage` | **Use as the preferred account source.** A live authenticated check on 2026-08-14 returned rolling, weekly, and monthly percentages plus `resetsAt` timestamps. |
 | Browser automation | Not required for a local estimate. The authenticated dashboard remains the exact manual fallback; do not scrape HTML or copy browser credentials. |
-| Issue #34 adapter | The explicitly labeled local estimate is now implemented; an exact account adapter still waits for a released, documented individual-key usage endpoint. Weekly/monthly anchors are user-adjustable in the shell because local history cannot know the subscription anniversary. The editor accepts the dashboard's `2 days 10 hours`/`29 days 0 hours` countdown strings (or a copied `Resets in ...` line) directly. |
+| Issue #34 adapter | The adapter prefers the exact individual-key usage endpoint and reads the existing `opencode-go` key in memory only. The local estimator remains the no-key fallback; reset-anchor editing is retained for that fallback. |
 
 ## Product semantics
 
@@ -44,13 +44,14 @@ Zen-balance fallback as a separate setting rather than another Go window.
 
 | Source | Auth boundary | What it provides | Reset/freshness behavior | Decision |
 | --- | --- | --- | --- | --- |
-| [Go plan docs](https://opencode.ai/docs/go/) | Go API key created through `/connect` at [opencode.ai/auth](https://opencode.ai/auth) | Plan limits, model list, Go inference endpoints, dollar-weighted semantics | No machine-readable remaining-usage response is documented; limits may change | Product evidence only |
-| [Provider docs](https://opencode.ai/docs/providers) | `/connect` credentials are stored in `~/.local/share/opencode/auth.json` | Confirms the OpenCode Go provider and API-key flow | No quota command or response is documented | Auth/config evidence only |
+| [Go plan docs](https://opencode.ai/docs/go/) | Go API key created through `/connect` at [opencode.ai/auth](https://opencode.ai/auth) | Plan limits, model list, Go inference endpoints, dollar-weighted semantics | The general plan page documents the limits, while the authenticated gateway supplies current usage | Product semantics and auth evidence |
+| [Provider docs](https://opencode.ai/docs/providers) | `/connect` credentials are stored in `~/.local/share/opencode/auth.json` | Confirms the OpenCode Go provider and API-key flow | The usage route is a gateway surface rather than an `opencode` CLI command | Auth/config evidence |
 | [CLI docs](https://dev.opencode.ai/docs/cli/) | Local provider credential file and OpenCode session database | `opencode providers list` lists configured credentials; `opencode stats` reports per-session/per-model token and raw cost statistics | No `usage`/`quota` command; model-weighted windows are an inferred local estimate and do not include other devices/workspaces | Candidate estimate source, not exact account source |
 | `GET https://opencode.ai/zen/go/v1/models` | Bearer Go key | Live model discovery; confirms the Go gateway key and host work | No plan usage or reset fields | Inference/config probe only |
+| `GET https://opencode.ai/zen/go/v1/usage` | Bearer Go key | Account-authoritative rolling, weekly, and monthly percentages plus reset timestamps | Individual-key route is not described in the general CLI docs; preserve a stale-cache fallback if it changes | **Preferred account source** |
 | [Console usage export](https://console.opencode.ai/guides/usage) | Requires a Console service-account key (`oc_sk_...`); user session tokens are rejected | Historical CSV records with token fields, billing source, `cost_micro_cents`, and `created_at`; scopes are organization/member/service-account/model | `range` is only `24h`, `7d`, or `30d`, starting at midnight UTC; no remaining allowance or reset timestamps | Reject as Go quota source; keep separate from Zen/API billing |
-| [Upstream feature request #16017](https://github.com/anomalyco/opencode/issues/16017) | Requests an individual Go API-key surface | Confirms that dashboard rolling/weekly/monthly usage and reset timers currently lack a public API | Still open | Track upstream |
-| [Upstream PR #16513](https://github.com/anomalyco/opencode/pull/16513) | Proposed bearer API key | Proposes `GET /zen/go/v1/usage` returning rolling, weekly, and monthly usage objects | PR is open and unmerged; live authenticated probe returned HTTP 404 on 2026-08-06 | Do not depend on it yet |
+| [Upstream feature request #16017](https://github.com/anomalyco/opencode/issues/16017) | Historical request for an individual Go API-key surface | Documents the original gap between the dashboard and CLI | The deployed route now supplies the requested fields | Historical context |
+| [Upstream PR #16513](https://github.com/anomalyco/opencode/pull/16513) | Proposed bearer API key | Documents the route shape that is now live | Re-check the response shape if OpenCode changes the gateway | Implementation evidence |
 
 ### Live checks
 
@@ -62,13 +63,13 @@ opencode providers list
   OpenCode Go  api
 
 GET https://opencode.ai/zen/go/v1/models   -> HTTP 200 (model list)
-GET https://opencode.ai/zen/go/v1/usage    -> HTTP 404 (not deployed)
+GET https://opencode.ai/zen/go/v1/usage    -> HTTP 200 (rolling/weekly/monthly + resetsAt)
 ```
 
-The 404 is important: the endpoint name is present in an upstream PR, but it
-is not a supported production contract today. A later probe must be repeated
-after the upstream issue/PR changes state; do not treat a transient 404 page,
-an HTML dashboard, or a model response as quota data.
+The usage endpoint is now live, but it is still a provider gateway surface
+rather than a documented `opencode usage` CLI command. The adapter validates
+the three windows and their reset timestamps, never stores the key, and keeps
+the local ledger estimator only as a no-key fallback.
 
 ### Workspace dashboard route
 
@@ -115,10 +116,11 @@ current multiplier table or subscription anniversary.
 
 For the current published table, models with a $60 Usage tier have a 1x
 weight, while models with a $15 Usage tier have a 4x weight against Go's $60
-monthly allowance. Applying those weights to the local Go model costs in a
-Windows smoke check reproduced the dashboard's weekly and monthly percentages
-to within one percentage point. This validates the estimator as a useful
-fallback; it does not turn it into an exact account API.
+monthly allowance. A Windows smoke check showed that the local ledger can omit
+usage visible in the dashboard (for example, other devices or workspaces), so
+its weighted estimate did not match the account windows. This keeps the
+estimator useful as a no-key fallback, but it is precisely why the adapter now
+prefers the authenticated account endpoint.
 
 ## Console export boundary
 
@@ -139,23 +141,31 @@ unauthorized **service-account** keys. This boundary means a personal Go key
 cannot be silently substituted for a Console service key, and an export row
 cannot be converted into a remaining percentage or reset timestamp.
 
-## Proposed upstream usage contract (not admitted)
+## Authoritative usage contract
 
-The open [PR #16513](https://github.com/anomalyco/opencode/pull/16513) adds a
-route at `/zen/go/v1/usage` and calls the server's rolling, weekly, and monthly
-usage analyzers. Its proposed response names are `useBalance`, `rollingUsage`,
-`weeklyUsage`, and `monthlyUsage`; each usage object contains a status,
-`usagePercent`, and `resetInSec`.
+The deployed [gateway route](https://opencode.ai/zen/go/v1/usage) now returns
+the account-authoritative shape used by the adapter:
 
-That shape is useful evidence, but it is not an official released contract:
-the PR remains open, the feature issue remains open, and the live endpoint
-returned 404. The deterministic fixtures under
-[`docs/fixtures/opencode/`](../fixtures/opencode/) therefore label this shape
-as **unreleased**. The proposed route reports `usagePercent` and a countdown,
-not account-specific dollars used/remaining. If it is eventually released, an
-adapter must preserve that provider-reported percentage rather than inventing
-USD usage from model prices or from the Console export. The fixtures are test
-planning artifacts, not a reason to ship an adapter now.
+```json
+{
+  "usage": {
+    "rolling": { "percent": 22, "resetsAt": "2026-08-14T17:43:38.318Z" },
+    "weekly": { "percent": 83, "resetsAt": "2026-08-17T00:00:00.318Z" },
+    "monthly": { "percent": 60, "resetsAt": "2026-09-05T14:03:20.318Z" }
+  }
+}
+```
+
+The response is fetched with the existing `opencode-go` bearer key, and the
+adapter preserves the provider-reported percentages and RFC3339 reset times
+when present. It validates all three windows and treats missing, malformed,
+out-of-range, or non-finite usage values (and malformed reset timestamps) as
+schema drift; a missing reset field remains explicitly unknown. The older open [PR
+#16513](https://github.com/anomalyco/opencode/pull/16513) remains useful as
+implementation history, but the running service response—not that proposal—
+is the contract this repository consumes. The deterministic fixtures under
+[`docs/fixtures/opencode/`](../fixtures/opencode/) remain synthetic planning
+artifacts and are not captured account payloads.
 
 ## Deterministic fixtures and failure mapping
 
@@ -169,7 +179,7 @@ must handle:
 | `missing_rolling.json`, `missing_weekly.json`, `missing_monthly.json` | Each sibling window omitted in turn | Keep valid siblings; do not infer the missing window or turn it into zero |
 | `auth_failure.json` | 401/missing or expired Go key | `not_configured` for no key; otherwise `auth_expired`/unavailable; never log the key |
 | `malformed.json` | Success-shaped response with wrong types | `schema_drift`/unavailable; retain last good cache only as stale |
-| `unavailable.json` | Current production endpoint returns 404 | Dashboard/manual fallback; do not register a provider from an unrecognized response |
+| `unavailable.json` | Gateway route is unavailable or changes status | Preserve a recent cache as stale; otherwise report the provider as unavailable |
 | `reset_unknown.json` | Usage exists but reset metadata is absent | Preserve usage if a supported source supplies it; leave `resets_at` empty and label the result honestly |
 | `timeout.json` | Network deadline exceeded | Preserve stale cache when available; otherwise unavailable with `timeout` |
 
@@ -180,7 +190,7 @@ or raw authenticated dashboard payload.
 
 There are now two deliberately separate implementation paths:
 
-1. **Local estimate (implemented).**
+1. **Local estimate (fallback).**
    Read the local OpenCode session ledger, keep only `opencode-go` messages,
    apply the current model-specific weights, and calculate rolling, weekly,
    and monthly percentages. Mark every snapshot `source=local_api` and
@@ -191,11 +201,11 @@ There are now two deliberately separate implementation paths:
    weekly and monthly anchors; clearing them returns to the built-in
    Monday/first-of-month defaults. The rolling reset is estimated from the
    latest local Go event.
-2. **Exact account adapter (preferred).** OpenCode merges and documents an
-   individual-key endpoint equivalent to the proposed `/zen/go/v1/usage`, and
-   a live Windows smoke test confirms all three windows plus reset metadata; or
-   OpenCode documents another supported individual-subscriber endpoint with
-   the same semantics.
+2. **Exact account adapter (implemented and preferred).** The live
+   `/zen/go/v1/usage` route accepts the existing individual Go key, and a
+   Windows smoke test confirms all three windows plus reset metadata. The
+   adapter uses it whenever that key is available; the local estimator is
+   retained only for installations where no key can be found.
 
 In either path, preserve separate `rolling`, `weekly`, and `monthly` identity,
 keep Go allowance separate from Zen balance and Console service-account

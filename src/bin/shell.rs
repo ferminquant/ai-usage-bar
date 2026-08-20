@@ -13,9 +13,10 @@ fn main() {
 mod windows_shell {
     use ai_usage_bar::{
         build_registry, build_tray_view_focused_window, default_config_path,
-        is_allowed_browser_url, provider_display_name, window_display_name, AppConfig,
-        OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService, UsageSnapshot,
-        KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
+        filter_snapshots_for_view, format_reset_label, is_allowed_browser_url,
+        provider_display_name, switchable_providers_for_snapshots, window_display_name, AppConfig,
+        Freshness, MetricKind, OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService,
+        ResolvedView, UsageSnapshot, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
     };
     use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
@@ -25,7 +26,11 @@ mod windows_shell {
     use std::sync::{Arc, Once};
     use std::thread;
 
-    use super::shell_logic::{normalize_used_percent, render_detail_text, usage_band, UsageBand};
+    use super::shell_logic::{
+        apply_drop, normalize_used_percent, release_route, render_detail_text, swap_drop,
+        usage_band, DropCard, DropGrid, ReleaseRoute, SlotRect, UsageBand, DRAG_THRESHOLD_PX,
+        GRID_COLUMNS,
+    };
 
     use windows::core::*;
     use windows::Win32::Foundation::*;
@@ -66,11 +71,21 @@ mod windows_shell {
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
     const MENU_SHOW_WINDOW_BASE: usize = 1200;
     const MENU_SHOW_WINDOW_MAX: usize = 8;
+    /// Checked visibility controls are separate from the focus selectors
+    /// above. Provider enablement remains in the provider configuration and
+    /// is intentionally not toggled by these menu items.
+    const MENU_VISIBLE_PROVIDER_BASE: usize = 1300;
+    const MENU_VISIBLE_PROVIDER_MAX: usize = 8;
+    const MENU_VISIBLE_WINDOW_BASE: usize = 1400;
+    const MENU_VISIBLE_WINDOW_MAX: usize = 64;
+    const MENU_VISIBLE_METRIC_BASE: usize = 1500;
+    const MENU_VISIBLE_METRIC_MAX: usize = 64;
     const STATUS_TIMER_ID: usize = 4;
     const STATUS_INTERVAL_MS: u32 = 2_500;
     const CF_UNICODETEXT_FORMAT: u32 = 13;
 
     const WM_APP_REFRESH_DONE: u32 = 0x8000 + 1;
+    const WM_APP_PANEL_REBUILD: u32 = 0x8000 + 2;
     const OPENCODE_RESET_DIALOG_CLASS: PCWSTR = w!("AIUsageBarOpenCodeResetDialog");
     const RESET_DIALOG_SAVE: usize = 1;
     const RESET_DIALOG_CANCEL: usize = 2;
@@ -109,6 +124,7 @@ mod windows_shell {
         tooltip_visible: bool,
         refresh_in_flight: bool,
         status: Option<String>,
+        panel_hwnd: Option<HWND>,
     }
 
     struct RefreshPayload {
@@ -137,6 +153,7 @@ mod windows_shell {
                 tooltip_visible: false,
                 refresh_in_flight: false,
                 status: None,
+                panel_hwnd: None,
             }
         }
 
@@ -172,6 +189,19 @@ mod windows_shell {
         } else {
             // The pointer is owned by the window and lives until WM_NCDESTROY.
             Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Ask an already-open provider panel to rebuild itself after the parent
+    /// window's view state changes. The panel owns its message loop, so this
+    /// keeps refresh results and native-menu changes visible without closing
+    /// and reopening the panel.
+    fn request_panel_rebuild(hwnd: HWND) {
+        let Some(panel) = app_state_ref(hwnd).and_then(|state| state.panel_hwnd) else {
+            return;
+        };
+        unsafe {
+            let _ = PostMessageW(Some(panel), WM_APP_PANEL_REBUILD, WPARAM(0), LPARAM(0));
         }
     }
 
@@ -915,6 +945,7 @@ mod windows_shell {
                         },
                     );
                 }
+                request_panel_rebuild(hwnd);
             }
             Err(error) => {
                 eprintln!("could not update startup registration: {error}");
@@ -938,21 +969,17 @@ mod windows_shell {
         unsafe {
             let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
         }
-        let current_view = build_tray_view_focused_window(
-            &state.snapshots,
-            state.focus_provider.as_ref(),
-            state.focus_window.as_deref(),
-            chrono::Utc::now(),
-        );
+        recompute_view(state);
         state.tooltip = if state.snapshots.is_empty() {
             "AI Usage Bar — refreshing…".to_string()
         } else {
-            format!("{}\nRefreshing…", current_view.tooltip)
+            format!("{}\nRefreshing…", state.tooltip)
         };
         update_tooltip(hwnd, state);
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
 
         let hwnd_raw = hwnd.0 as usize;
         thread::spawn(move || {
@@ -983,27 +1010,16 @@ mod windows_shell {
 
         match payload.result {
             Ok(snapshots) => {
-                let view = build_tray_view_focused_window(
-                    &snapshots,
-                    state.focus_provider.as_ref(),
-                    state.focus_window.as_deref(),
-                    chrono::Utc::now(),
-                );
                 state.snapshots = snapshots;
-                state.apply_view(view);
+                recompute_view(state);
             }
             Err(error) => {
-                let view = build_tray_view_focused_window(
-                    &state.snapshots,
-                    state.focus_provider.as_ref(),
-                    state.focus_window.as_deref(),
-                    chrono::Utc::now(),
-                );
+                recompute_view(state);
                 let safe_error = ai_usage_bar::redact_sensitive_text(&error.to_string());
                 state.tooltip = if state.snapshots.is_empty() {
                     format!("AI Usage Bar — refresh failed: {safe_error}")
                 } else {
-                    format!("{}\nRefresh failed: {safe_error}", view.tooltip)
+                    format!("{}\nRefresh failed: {safe_error}", state.tooltip)
                 };
                 eprintln!("refresh error: {safe_error}");
             }
@@ -1013,6 +1029,7 @@ mod windows_shell {
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn set_focus_provider(hwnd: HWND, provider: Provider) {
@@ -1020,45 +1037,57 @@ mod windows_shell {
             return;
         };
         // Clear any transient status so the pill only shows the provider name.
-        state.status = None;
-        unsafe {
-            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
-        }
+        clear_status_for_window(hwnd, state);
+        let same_provider = state.focus_provider.as_ref() == Some(&provider);
         state.focus_provider = Some(provider);
-        state.focus_window = None;
-        let view = build_tray_view_focused_window(
-            &state.snapshots,
-            state.focus_provider.as_ref(),
-            state.focus_window.as_deref(),
-            chrono::Utc::now(),
-        );
-        state.apply_view(view);
+        if !same_provider {
+            // A provider switch starts at the provider's default window.
+            // Reselecting the same provider keeps its focused window (Kimi
+            // 5-hour/weekly, Ollama session/weekly, OpenCode 5-hour/weekly/
+            // monthly) instead of snapping back to the default.
+            state.focus_window = None;
+        }
+        let previous_config = state.config.clone();
+        let focused = state.focus_provider.clone();
+        let window = state.focus_window.clone();
+        state
+            .config
+            .set_view_defaults(focused.as_ref(), window.as_deref());
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist display default: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save display preference");
+        }
+        recompute_view(state);
         update_tooltip(hwnd, state);
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn set_focus_window(hwnd: HWND, window: &str) {
         let Some(state) = app_state(hwnd) else {
             return;
         };
-        state.status = None;
-        unsafe {
-            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
-        }
+        clear_status_for_window(hwnd, state);
         state.focus_window = Some(window.to_string());
-        let view = build_tray_view_focused_window(
-            &state.snapshots,
-            state.focus_provider.as_ref(),
-            state.focus_window.as_deref(),
-            chrono::Utc::now(),
-        );
-        state.apply_view(view);
+        let previous_config = state.config.clone();
+        let focused = state.focus_provider.clone();
+        state
+            .config
+            .set_view_defaults(focused.as_ref(), Some(window));
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist display default: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save display preference");
+        }
+        recompute_view(state);
         update_tooltip(hwnd, state);
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        request_panel_rebuild(hwnd);
     }
 
     fn cycle_focus_provider(hwnd: HWND) {
@@ -1080,6 +1109,308 @@ mod windows_shell {
             None => state.switchable_providers[0].clone(),
         };
         set_focus_provider(hwnd, next);
+    }
+
+    /// Apply the persisted display-only view settings to the raw refresh
+    /// report and normalize focus after a provider/window was hidden. The raw
+    /// snapshots stay in `AppState` so a hidden item can be shown again from
+    /// the context menu without requiring another refresh.
+    fn recompute_view(state: &mut AppState) {
+        let available = switchable_providers_for_snapshots(&state.snapshots);
+        let resolved = state.config.resolved_view(&available);
+        let filtered = filter_snapshots_for_view(&state.snapshots, &resolved);
+        // Provider/window/metric filters are display-only. Keep every
+        // non-hidden provider in the selector even when a row filter removes
+        // some (or all) of its snapshots, so the user can still restore the
+        // preference from Show/hide.
+        let visible_candidates: Vec<Provider> = available
+            .iter()
+            .filter(|provider| !resolved.is_provider_hidden(provider))
+            .cloned()
+            .collect();
+        let ordered_visible = ordered_providers(&visible_candidates, &resolved);
+
+        state.focus_provider = state
+            .focus_provider
+            .clone()
+            .filter(|provider| visible_candidates.contains(provider))
+            .or_else(|| {
+                resolved
+                    .default_provider
+                    .clone()
+                    .filter(|provider| visible_candidates.contains(provider))
+            })
+            .or_else(|| ordered_visible.first().cloned());
+
+        let default_window = state
+            .focus_provider
+            .as_ref()
+            .filter(|provider| resolved.default_provider.as_ref() == Some(provider))
+            .and(resolved.default_window.as_deref());
+        let focus_windows = state
+            .focus_provider
+            .as_ref()
+            .map(|provider| available_windows(&filtered, provider))
+            .unwrap_or_default();
+        state.focus_window = state
+            .focus_window
+            .as_deref()
+            .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
+            .map(str::to_string)
+            .or_else(|| {
+                default_window
+                    .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
+                    .map(str::to_string)
+            })
+            .or_else(|| focus_windows.first().cloned());
+
+        let mut view = build_tray_view_focused_window(
+            &filtered,
+            state.focus_provider.as_ref(),
+            state.focus_window.as_deref(),
+            Utc::now(),
+        );
+        view.switchable_providers = ordered_visible;
+        state.apply_view(view);
+    }
+
+    fn ordered_providers(available: &[Provider], view: &ResolvedView) -> Vec<Provider> {
+        let mut ordered = Vec::with_capacity(available.len());
+        if let Some(configured) = &view.provider_order {
+            for provider in configured {
+                if available.contains(provider) && !ordered.contains(provider) {
+                    ordered.push(provider.clone());
+                }
+            }
+        }
+        for provider in available {
+            if !ordered.contains(provider) {
+                ordered.push(provider.clone());
+            }
+        }
+        ordered
+    }
+
+    fn available_windows(snapshots: &[UsageSnapshot], provider: &Provider) -> Vec<String> {
+        let mut windows = Vec::new();
+        for snapshot in snapshots {
+            if &snapshot.provider != provider
+                || snapshot.unit != "percent"
+                || snapshot.used.is_none()
+            {
+                continue;
+            }
+            let Some(label) = snapshot.window_label.as_deref() else {
+                continue;
+            };
+            let Some(canonical) = canonical_window_key(provider, label) else {
+                continue;
+            };
+            if !windows.iter().any(|existing| existing == canonical) {
+                windows.push(canonical.to_string());
+            }
+        }
+        windows.sort_by_key(|window| window_sort_key(window));
+        windows
+    }
+
+    fn available_metrics(snapshots: &[UsageSnapshot], provider: &Provider) -> Vec<MetricKind> {
+        let mut metrics = Vec::new();
+        for snapshot in snapshots
+            .iter()
+            .filter(|snapshot| &snapshot.provider == provider)
+        {
+            // Quota is the product's primary signal and health is diagnostic;
+            // neither is an optional display toggle. Optional balances and
+            // counters (for example Credits) can be hidden per provider.
+            if matches!(snapshot.metric_kind, MetricKind::Quota | MetricKind::Health) {
+                continue;
+            }
+            if !metrics.contains(&snapshot.metric_kind) {
+                metrics.push(snapshot.metric_kind);
+            }
+        }
+        metrics.sort_by_key(|metric| metric.as_str());
+        metrics
+    }
+
+    fn metric_display_name(metric: MetricKind) -> &'static str {
+        match metric {
+            MetricKind::Quota => "Quota",
+            MetricKind::Credits => "Credits",
+            MetricKind::Spend => "Spend",
+            MetricKind::Tokens => "Tokens",
+            MetricKind::Requests => "Requests",
+            MetricKind::Health => "Health",
+        }
+    }
+
+    fn clear_status_for_window(hwnd: HWND, state: &mut AppState) {
+        state.status = None;
+        unsafe {
+            let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+        }
+    }
+
+    fn finish_view_change(hwnd: HWND, state: &mut AppState, previous_config: AppConfig) {
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist display preference: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save display preference");
+            return;
+        }
+        clear_status_for_window(hwnd, state);
+        recompute_view(state);
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+        request_panel_rebuild(hwnd);
+    }
+
+    fn toggle_provider_visibility(hwnd: HWND, provider: Provider) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let available = switchable_providers_for_snapshots(&state.snapshots);
+        if !available.contains(&provider) {
+            return;
+        }
+        let resolved = state.config.resolved_view(&available);
+        let mut hidden: Vec<Provider> = available
+            .iter()
+            .filter(|candidate| resolved.is_provider_hidden(candidate))
+            .cloned()
+            .collect();
+        if let Some(index) = hidden.iter().position(|candidate| candidate == &provider) {
+            hidden.remove(index);
+        } else {
+            let visible_count = available.len().saturating_sub(hidden.len());
+            if visible_count <= 1 {
+                set_status(hwnd, state, "Keep at least one provider visible");
+                return;
+            }
+            hidden.push(provider);
+        }
+
+        let previous_config = state.config.clone();
+        state.config.set_view_hidden_providers(&hidden);
+        finish_view_change(hwnd, state, previous_config);
+    }
+
+    fn toggle_window_visibility(hwnd: HWND, provider: Provider, window: String) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let all_windows = available_windows(&state.snapshots, &provider);
+        if !all_windows.contains(&window) {
+            return;
+        }
+        let resolved = state
+            .config
+            .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
+        let mut visible: Vec<String> = resolved
+            .windows_for(&provider)
+            .map(|windows| {
+                windows
+                    .iter()
+                    .filter(|candidate| all_windows.contains(candidate))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_else(|| all_windows.clone());
+
+        if let Some(index) = visible.iter().position(|candidate| candidate == &window) {
+            if visible.len() <= 1 {
+                set_status(hwnd, state, "Keep at least one usage window visible");
+                return;
+            }
+            visible.remove(index);
+        } else {
+            visible.push(window);
+            visible.sort_by_key(|candidate| window_sort_key(candidate));
+        }
+
+        let all_visible = visible.len() == all_windows.len()
+            && all_windows
+                .iter()
+                .all(|candidate| visible.contains(candidate));
+        let visible_refs: Vec<&str> = visible.iter().map(String::as_str).collect();
+        let previous_config = state.config.clone();
+        state.config.set_view_visible_windows(
+            &provider,
+            if all_visible {
+                None
+            } else {
+                Some(&visible_refs)
+            },
+        );
+        finish_view_change(hwnd, state, previous_config);
+    }
+
+    fn toggle_metric_visibility(hwnd: HWND, provider: Provider, metric: MetricKind) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let all_metrics = available_metrics(&state.snapshots, &provider);
+        if !all_metrics.contains(&metric) {
+            return;
+        }
+        let resolved = state
+            .config
+            .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
+        let mut visible: Vec<MetricKind> = all_metrics
+            .iter()
+            .copied()
+            .filter(|candidate| resolved.is_metric_visible(&provider, *candidate))
+            .collect();
+
+        if let Some(index) = visible.iter().position(|candidate| candidate == &metric) {
+            visible.remove(index);
+        } else {
+            visible.push(metric);
+            visible.sort_by_key(|candidate| candidate.as_str());
+        }
+
+        let all_visible = visible.len() == all_metrics.len()
+            && all_metrics
+                .iter()
+                .all(|candidate| visible.contains(candidate));
+        let default_all_visible = all_metrics
+            .iter()
+            .all(|candidate| ResolvedView::default_metric_visible(&provider, *candidate));
+        let previous_config = state.config.clone();
+        state.config.set_view_visible_metrics(
+            &provider,
+            if all_visible && default_all_visible {
+                None
+            } else {
+                Some(&visible)
+            },
+        );
+        finish_view_change(hwnd, state, previous_config);
+    }
+
+    /// True when `order` is a permutation of exactly `available` (same length,
+    /// no duplicates, same members). The panel only produces permutations, but
+    /// the guard keeps a stale/foreign order from being persisted.
+    fn is_full_permutation(order: &[Provider], available: &[Provider]) -> bool {
+        order.len() == available.len()
+            && order.iter().all(|provider| available.contains(provider))
+            && available.iter().all(|provider| order.contains(provider))
+    }
+
+    fn reorder_provider(hwnd: HWND, order: Vec<Provider>) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let available = panel_providers(&state.snapshots);
+        if !is_full_permutation(&order, &available) {
+            return;
+        }
+        let previous_config = state.config.clone();
+        state.config.set_view_provider_order(&order);
+        finish_view_change(hwnd, state, previous_config);
     }
 
     struct ResetDialogState {
@@ -1625,7 +1956,10 @@ mod windows_shell {
                 "monthly" | "total" => Some("monthly"),
                 _ => None,
             },
-            _ => None,
+            Provider::Codex | Provider::GrokConsumer | Provider::GrokApi => match label {
+                "primary" | "weekly" => Some("primary"),
+                _ => None,
+            },
         }
     }
 
@@ -1635,6 +1969,1427 @@ mod windows_shell {
             "weekly" => 1,
             "total" | "monthly" => 2,
             _ => 3,
+        }
+    }
+
+    const CONTROL_PANEL_CLASS: PCWSTR = w!("AIUsageBarControlPanel");
+    const PANEL_CARD_WIDTH: i32 = 400;
+    const PANEL_MARGIN: i32 = 18;
+    const PANEL_GAP: i32 = 14;
+    const PANEL_ROW_HEIGHT: i32 = 34;
+    const PANEL_HEADER_HEIGHT: i32 = 64;
+    const PANEL_CARD_PADDING: i32 = 14;
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum PanelAction {
+        None,
+        FocusProvider(Provider),
+        FocusWindow(Provider, String),
+        ToggleProvider(Provider),
+        ToggleWindow(Provider, String),
+        ToggleMetric(Provider, MetricKind),
+        Refresh,
+        ToggleStartup,
+        CopyDetails,
+        Quit,
+        OpenOllamaUsage,
+        OpenKimiConsole,
+        ConfigureOpenCodeResets,
+        /// Persist a complete provider order produced by a drag. Carrying the
+        /// full order (rather than a "move before" pair) lets the commit reuse
+        /// the exact drop index the preview showed.
+        Reorder(Vec<Provider>),
+    }
+
+    #[derive(Clone)]
+    struct PanelRow {
+        rect: RECT,
+        label: String,
+        value: String,
+        checked: bool,
+        toggleable: bool,
+        /// Action fired by the row's checkbox (visibility toggle).
+        action: PanelAction,
+        /// Action fired by the row label area. Quota windows focus the window;
+        /// optional metric rows keep the visibility toggle for the whole row.
+        focus_action: Option<PanelAction>,
+        /// Whether this quota window is the focused window for its provider.
+        focused: bool,
+    }
+
+    #[derive(Clone)]
+    struct PanelCard {
+        rect: RECT,
+        provider: Provider,
+        title: String,
+        visible: bool,
+        focused: bool,
+        eye_rect: RECT,
+        rows: Vec<PanelRow>,
+        /// Placeholder slot shown at the current drop index while dragging. It
+        /// has no provider/rows and is painted as an outline only.
+        placeholder: bool,
+    }
+
+    struct PanelButton {
+        rect: RECT,
+        label: String,
+        action: PanelAction,
+    }
+
+    /// State of an in-flight header gesture. The lifecycle is explicit:
+    /// `pressed` (captured, below the movement threshold) becomes `active`
+    /// once the pointer crosses [`DRAG_THRESHOLD_PX`], and ends exactly once
+    /// on mouse-up, capture loss, Escape, or panel rebuild.
+    struct PanelDragState {
+        provider: Provider,
+        press_point: POINT,
+        pointer: POINT,
+        active: bool,
+        /// Full provider order captured at press (a permutation of the grid).
+        origin_order: Vec<Provider>,
+        /// Origin cards (rects, rows, visibility) captured at press.
+        origin_cards: Vec<PanelCard>,
+        /// Flow cards (origin minus the grabbed provider) reflowed into the
+        /// two-column grid. This stable flow is only used for empty-slot
+        /// insertion; card-on-card drops use the origin card rectangles so a
+        /// target never shifts out from under the pointer.
+        flow: Vec<PanelCard>,
+        /// Drop index in flow space for an empty-slot insertion.
+        drop_index: Option<usize>,
+        /// Provider currently under the pointer, if any. Card-on-card drops
+        /// swap this provider with the grabbed one.
+        drop_target: Option<Provider>,
+        /// The grabbed card's origin rect (floating preview anchor).
+        grabbed_rect: RECT,
+    }
+
+    struct PanelLayout {
+        width: i32,
+        height: i32,
+        cards: Vec<PanelCard>,
+        buttons: Vec<PanelButton>,
+    }
+
+    struct PanelState {
+        parent: HWND,
+        layout: PanelLayout,
+        result: Option<PanelAction>,
+        drag: Option<PanelDragState>,
+        /// A rebuild was requested while a drag owned the mouse; run it once
+        /// the gesture ends instead of rebuilding mid-drag.
+        rebuild_pending: bool,
+    }
+
+    fn rect_contains(rect: RECT, point: POINT) -> bool {
+        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+    }
+
+    fn panel_snapshot_value(snapshot: &UsageSnapshot, now: DateTime<Utc>) -> String {
+        if snapshot.unit == "percent" {
+            let remaining = snapshot
+                .remaining
+                .or_else(|| snapshot.used.map(|used| 100.0 - used));
+            let amount = remaining
+                .map(|value| format!("{:.0}% left", value.clamp(0.0, 100.0)))
+                .unwrap_or_else(|| "—".to_string());
+            let reset = snapshot
+                .resets_at
+                .map(|value| format_reset_label(Some(&value.to_rfc3339()), now))
+                .unwrap_or_else(|| "—".to_string());
+            return format!("{amount} · {reset}");
+        }
+
+        let amount = snapshot
+            .used
+            .map(|value| format!("{value:.0} {}", snapshot.unit))
+            .unwrap_or_else(|| "—".to_string());
+        if snapshot.unlimited {
+            format!("{amount} · unlimited")
+        } else {
+            amount
+        }
+    }
+
+    fn panel_providers(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
+        let mut providers = Vec::new();
+        for snapshot in snapshots {
+            if !providers.contains(&snapshot.provider) {
+                providers.push(snapshot.provider.clone());
+            }
+        }
+        providers
+    }
+
+    fn panel_status_row(snapshot: &UsageSnapshot) -> PanelRow {
+        let value = if let Some(error) = &snapshot.error {
+            error.code.as_str().replace('_', " ")
+        } else {
+            match snapshot.freshness {
+                Freshness::Unavailable => "Unavailable".to_string(),
+                Freshness::NotConfigured => "Not configured".to_string(),
+                Freshness::NotApplicable => "Not applicable".to_string(),
+                Freshness::Stale => "Stale".to_string(),
+                Freshness::Cached => "Cached".to_string(),
+                Freshness::Live => "No usage data".to_string(),
+            }
+        };
+        PanelRow {
+            rect: RECT::default(),
+            label: "Status".to_string(),
+            value,
+            checked: false,
+            toggleable: false,
+            action: PanelAction::None,
+            focus_action: None,
+            focused: false,
+        }
+    }
+
+    fn panel_card_rows(
+        snapshots: &[UsageSnapshot],
+        provider: &Provider,
+        view: &ResolvedView,
+        focused_provider: Option<&Provider>,
+        focus_window: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Vec<PanelRow> {
+        let mut rows = Vec::new();
+        for window in available_windows(snapshots, provider) {
+            let snapshot = snapshots.iter().find(|candidate| {
+                &candidate.provider == provider
+                    && candidate.metric_kind == MetricKind::Quota
+                    && candidate
+                        .window_label
+                        .as_deref()
+                        .and_then(|label| canonical_window_key(provider, label))
+                        == Some(window.as_str())
+            });
+            let value = snapshot
+                .map(|snapshot| panel_snapshot_value(snapshot, now))
+                .unwrap_or_else(|| "—".to_string());
+            let checked = view
+                .windows_for(provider)
+                .map(|windows| windows.iter().any(|candidate| candidate == &window))
+                .unwrap_or(true);
+            rows.push(PanelRow {
+                rect: RECT::default(),
+                label: window_display_name(provider, &window),
+                value,
+                checked,
+                toggleable: true,
+                // Clicking the label focuses the window; the checkbox toggles
+                // visibility. Focus and visibility stay independent, so Kimi's
+                // 5-hour and weekly rows (and other multi-window providers)
+                // remain visible and independently focusable.
+                action: PanelAction::ToggleWindow(provider.clone(), window.clone()),
+                focus_action: Some(PanelAction::FocusWindow(provider.clone(), window.clone())),
+                focused: focused_provider == Some(provider)
+                    && focus_window == Some(window.as_str()),
+            });
+        }
+
+        for metric in available_metrics(snapshots, provider) {
+            let snapshot = snapshots.iter().find(|candidate| {
+                &candidate.provider == provider && candidate.metric_kind == metric
+            });
+            let value = snapshot
+                .map(|snapshot| panel_snapshot_value(snapshot, now))
+                .unwrap_or_else(|| "—".to_string());
+            rows.push(PanelRow {
+                rect: RECT::default(),
+                label: metric_display_name(metric).to_string(),
+                value,
+                checked: view.is_metric_visible(provider, metric),
+                toggleable: true,
+                action: PanelAction::ToggleMetric(provider.clone(), metric),
+                focus_action: None,
+                focused: false,
+            });
+        }
+        if available_windows(snapshots, provider).is_empty() {
+            if let Some(snapshot) = snapshots
+                .iter()
+                .find(|candidate| &candidate.provider == provider)
+            {
+                if !rows.iter().any(|row| row.label == "Status") {
+                    rows.push(panel_status_row(snapshot));
+                }
+            }
+        }
+        rows
+    }
+
+    /// Lay `cards` into a row-major grid with `columns` columns, updating each
+    /// card's rect, eye rect, and row rects. Card heights are preserved.
+    fn reflow_grid(cards: &mut [PanelCard], columns: usize) {
+        if cards.is_empty() {
+            return;
+        }
+        let columns = columns.max(1);
+        let row_count = cards.len().div_ceil(columns);
+        let mut row_heights = vec![0_i32; row_count];
+        for (index, card) in cards.iter().enumerate() {
+            let row = index / columns;
+            row_heights[row] = row_heights[row].max(card.rect.bottom - card.rect.top);
+        }
+        let mut row_tops = Vec::with_capacity(row_heights.len());
+        let mut top = PANEL_MARGIN + PANEL_HEADER_HEIGHT;
+        for row_height in row_heights {
+            row_tops.push(top);
+            top += row_height + PANEL_GAP;
+        }
+
+        for (index, card) in cards.iter_mut().enumerate() {
+            let column = index % columns;
+            let row = index / columns;
+            let left = PANEL_MARGIN + column as i32 * (PANEL_CARD_WIDTH + PANEL_GAP);
+            let card_height = card.rect.bottom - card.rect.top;
+            card.rect = RECT {
+                left,
+                top: row_tops[row],
+                right: left + PANEL_CARD_WIDTH,
+                bottom: row_tops[row] + card_height,
+            };
+            card.eye_rect = RECT {
+                left: card.rect.right - 42,
+                top: card.rect.top + 14,
+                right: card.rect.right - 12,
+                bottom: card.rect.top + 42,
+            };
+            let mut row_y = card.rect.top + PANEL_HEADER_HEIGHT;
+            for item in &mut card.rows {
+                item.rect = RECT {
+                    left: card.rect.left + PANEL_CARD_PADDING,
+                    top: row_y,
+                    right: card.rect.right - PANEL_CARD_PADDING,
+                    bottom: row_y + PANEL_ROW_HEIGHT,
+                };
+                row_y += PANEL_ROW_HEIGHT;
+            }
+        }
+    }
+
+    /// Recompute card and footer rectangles after a provider order or card
+    /// height changes. Rows are laid out in a deterministic row-major grid;
+    /// this makes the visual order match the order shown by drag-and-drop.
+    fn reflow_panel_layout(layout: &mut PanelLayout) {
+        let columns = layout.cards.len().clamp(1, 2);
+        reflow_grid(&mut layout.cards, columns);
+        layout.width =
+            PANEL_MARGIN * 2 + columns as i32 * PANEL_CARD_WIDTH + (columns as i32 - 1) * PANEL_GAP;
+
+        let card_bottom = layout
+            .cards
+            .iter()
+            .map(|card| card.rect.bottom)
+            .max()
+            .unwrap_or(PANEL_MARGIN + PANEL_HEADER_HEIGHT);
+        let footer_y = card_bottom + 4 + 8;
+        let button_width = 108;
+        let buttons_per_row = ((layout.width - PANEL_MARGIN * 2 + PANEL_GAP)
+            / (button_width + PANEL_GAP))
+            .max(1) as usize;
+        for (index, button) in layout.buttons.iter_mut().enumerate() {
+            let column = index % buttons_per_row;
+            let row = index / buttons_per_row;
+            let left = PANEL_MARGIN + column as i32 * (button_width + PANEL_GAP);
+            let top = footer_y + row as i32 * (32 + PANEL_GAP);
+            button.rect = RECT {
+                left,
+                top,
+                right: left + button_width,
+                bottom: top + 32,
+            };
+        }
+        let footer_rows = layout.buttons.len().div_ceil(buttons_per_row);
+        layout.height = footer_y
+            + footer_rows.max(1) as i32 * 32
+            + footer_rows.saturating_sub(1) as i32 * PANEL_GAP
+            + PANEL_MARGIN;
+    }
+
+    fn build_control_panel_layout(hwnd: HWND) -> Option<PanelLayout> {
+        let state = app_state_ref(hwnd)?;
+        let available = panel_providers(&state.snapshots);
+        if available.is_empty() {
+            return None;
+        }
+        let view = state.config.resolved_view(&available);
+        let providers = ordered_providers(&available, &view);
+        let now = Utc::now();
+        let mut cards = Vec::new();
+        for provider in providers {
+            let rows = panel_card_rows(
+                &state.snapshots,
+                &provider,
+                &view,
+                state.focus_provider.as_ref(),
+                state.focus_window.as_deref(),
+                now,
+            );
+            let card_height = PANEL_HEADER_HEIGHT
+                + (rows.len() as i32 * PANEL_ROW_HEIGHT)
+                + PANEL_CARD_PADDING * 2;
+            cards.push(PanelCard {
+                rect: RECT {
+                    left: 0,
+                    top: 0,
+                    right: PANEL_CARD_WIDTH,
+                    bottom: card_height,
+                },
+                title: provider_display_name(&provider).to_string(),
+                visible: !view.is_provider_hidden(&provider),
+                focused: state.focus_provider.as_ref() == Some(&provider),
+                eye_rect: RECT::default(),
+                provider,
+                rows,
+                placeholder: false,
+            });
+        }
+
+        let mut footer_actions = vec![
+            ("Refresh", PanelAction::Refresh),
+            (
+                if ai_usage_bar::startup::auto_start_enabled().unwrap_or(false) {
+                    "Startup ✓"
+                } else {
+                    "Startup"
+                },
+                PanelAction::ToggleStartup,
+            ),
+            ("Copy", PanelAction::CopyDetails),
+            ("Quit", PanelAction::Quit),
+        ];
+        match state.focus_provider.as_ref() {
+            Some(Provider::OllamaCloud) => {
+                footer_actions.push(("Open usage", PanelAction::OpenOllamaUsage));
+            }
+            Some(Provider::Kimi) => {
+                footer_actions.push(("Open console", PanelAction::OpenKimiConsole));
+            }
+            Some(Provider::OpenCodeGo) => {
+                footer_actions.push(("Reset times…", PanelAction::ConfigureOpenCodeResets));
+            }
+            _ => {}
+        }
+        let mut layout = PanelLayout {
+            width: 0,
+            height: 0,
+            cards,
+            buttons: footer_actions
+                .into_iter()
+                .map(|(label, action)| PanelButton {
+                    rect: RECT::default(),
+                    label: label.to_string(),
+                    action,
+                })
+                .collect(),
+        };
+        reflow_panel_layout(&mut layout);
+        Some(layout)
+    }
+
+    fn panel_state(hwnd: HWND) -> Option<&'static mut PanelState> {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut PanelState;
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr })
+        }
+    }
+
+    fn panel_window_position(parent: HWND, width: i32, height: i32) -> (i32, i32) {
+        unsafe {
+            let mut widget_rect = RECT::default();
+            let _ = GetWindowRect(parent, &mut widget_rect);
+            let (_, work) = panel_monitor_work_area(parent).unwrap_or((
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+            ));
+            let mut x = widget_rect.left;
+            let mut y = widget_rect.top - height - 8;
+            if y < work.top {
+                y = widget_rect.bottom + 8;
+            }
+            x = x.clamp(work.left, (work.right - width).max(work.left));
+            y = y.clamp(work.top, (work.bottom - height).max(work.top));
+            (x, y)
+        }
+    }
+
+    fn position_control_panel_window(panel: HWND, parent: HWND, width: i32, height: i32) {
+        let (x, y) = panel_window_position(parent, width, height);
+        unsafe {
+            let _ = SetWindowPos(
+                panel,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    fn rebuild_control_panel(panel: HWND) {
+        let Some(parent) = panel_state(panel).map(|state| state.parent) else {
+            return;
+        };
+        // Never rebuild mid-drag: the gesture owns the layout. Defer the
+        // rebuild until the drag ends so a refresh result cannot wipe the
+        // drag state (which previously caused repeated-drag lockups).
+        if let Some(state) = panel_state(panel) {
+            if state.drag.is_some() {
+                state.rebuild_pending = true;
+                return;
+            }
+        }
+        let Some(layout) = build_control_panel_layout(parent) else {
+            unsafe {
+                let _ = DestroyWindow(panel);
+            }
+            return;
+        };
+        let (width, height) = (layout.width, layout.height);
+        if let Some(state) = panel_state(panel) {
+            state.layout = layout;
+            state.drag = None;
+            state.rebuild_pending = false;
+        }
+        position_control_panel_window(panel, parent, width, height);
+        unsafe {
+            let _ = InvalidateRect(Some(panel), None, false);
+        }
+    }
+
+    fn draw_checkbox(hdc: HDC, rect: RECT, checked: bool, enabled: bool) {
+        let color = if enabled { COLOR_MUTED } else { COLOR_BORDER };
+        stroke_round_rect(hdc, rect, 3, color);
+        if checked {
+            draw_text(
+                hdc,
+                RECT {
+                    left: rect.left,
+                    top: rect.top - 1,
+                    right: rect.right,
+                    bottom: rect.bottom + 1,
+                },
+                "✓",
+                13,
+                FW_BOLD,
+                if enabled { COLOR_GREEN } else { COLOR_NEUTRAL },
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+            );
+        }
+    }
+
+    /// Checkbox hit/draw box for a quota or metric row.
+    fn row_checkbox_rect(row_rect: RECT) -> RECT {
+        RECT {
+            left: row_rect.right - 20,
+            top: row_rect.top + 7,
+            right: row_rect.right - 4,
+            bottom: row_rect.top + 23,
+        }
+    }
+
+    /// Radio-style focus control for a quota row. The row itself remains a
+    /// focus target for an easy click, but the explicit dot makes it clear
+    /// which window currently drives the compact bar; the square checkbox to
+    /// its right continues to control visibility independently.
+    fn row_focus_rect(row_rect: RECT) -> RECT {
+        RECT {
+            left: row_rect.right - 48,
+            top: row_rect.top + 7,
+            right: row_rect.right - 30,
+            bottom: row_rect.top + 25,
+        }
+    }
+
+    /// Paint one provider card (grid card or the floating grab preview) at
+    /// `rect`. Row/eye geometry is derived from `rect` so the same routine
+    /// works for the grid and for the pointer-following grab card.
+    fn paint_card(hdc: HDC, card: &PanelCard, rect: RECT, lifted: bool) {
+        let background = if card.visible {
+            COLOR_BACKGROUND
+        } else {
+            COLOR_OUTER
+        };
+        let border = if lifted {
+            COLOR_YELLOW
+        } else if card.focused {
+            COLOR_GREEN
+        } else if card.visible {
+            COLOR_CARD_BORDER
+        } else {
+            COLOR_BORDER
+        };
+        fill_round_rect(hdc, rect, 10, background);
+        stroke_round_rect(hdc, rect, 10, border);
+        let eye_rect = RECT {
+            left: rect.right - 42,
+            top: rect.top + 14,
+            right: rect.right - 12,
+            bottom: rect.top + 42,
+        };
+        draw_text(
+            hdc,
+            RECT {
+                left: rect.left + PANEL_CARD_PADDING,
+                top: rect.top + 14,
+                right: eye_rect.left - 4,
+                bottom: rect.top + 48,
+            },
+            &card.title,
+            17,
+            FW_BOLD,
+            if card.visible {
+                COLOR_TEXT
+            } else {
+                COLOR_NEUTRAL
+            },
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+        );
+        draw_checkbox(hdc, eye_rect, card.visible, true);
+
+        for (index, row) in card.rows.iter().enumerate() {
+            let row_rect = RECT {
+                left: rect.left + PANEL_CARD_PADDING,
+                top: rect.top + PANEL_HEADER_HEIGHT + index as i32 * PANEL_ROW_HEIGHT,
+                right: rect.right - PANEL_CARD_PADDING,
+                bottom: rect.top
+                    + PANEL_HEADER_HEIGHT
+                    + index as i32 * PANEL_ROW_HEIGHT
+                    + PANEL_ROW_HEIGHT,
+            };
+            let text_color = if card.visible && row.checked {
+                COLOR_TEXT
+            } else {
+                COLOR_NEUTRAL
+            };
+            let focused = row.focused && card.visible;
+            draw_text(
+                hdc,
+                RECT {
+                    left: row_rect.left,
+                    top: row_rect.top,
+                    right: row_rect.left + 82,
+                    bottom: row_rect.bottom,
+                },
+                &row.label,
+                13,
+                if focused { FW_BOLD } else { FW_NORMAL },
+                if focused { COLOR_GREEN } else { text_color },
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+            draw_text(
+                hdc,
+                RECT {
+                    left: row_rect.left + 80,
+                    top: row_rect.top,
+                    right: row_focus_rect(row_rect).left - 6,
+                    bottom: row_rect.bottom,
+                },
+                &row.value,
+                12,
+                FW_NORMAL,
+                if card.visible && row.checked {
+                    COLOR_MUTED
+                } else {
+                    COLOR_BORDER
+                },
+                DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS,
+            );
+            if row.focus_action.is_some() {
+                let focus_rect = row_focus_rect(row_rect);
+                draw_text(
+                    hdc,
+                    focus_rect,
+                    if focused { "●" } else { "○" },
+                    14,
+                    FW_BOLD,
+                    if card.visible {
+                        if focused {
+                            COLOR_GREEN
+                        } else {
+                            COLOR_MUTED
+                        }
+                    } else {
+                        COLOR_BORDER
+                    },
+                    DT_SINGLELINE | DT_VCENTER | DT_CENTER,
+                );
+            }
+            if row.toggleable {
+                draw_checkbox(hdc, row_checkbox_rect(row_rect), row.checked, card.visible);
+            }
+        }
+    }
+
+    /// Dashed outline for the empty drop slot during a drag.
+    fn paint_placeholder(hdc: HDC, rect: RECT) {
+        unsafe {
+            let pen = CreatePen(PS_DASH, 1, COLOR_YELLOW);
+            let old_pen = SelectObject(hdc, pen.into());
+            let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen.into());
+        }
+    }
+
+    fn paint_control_panel(hwnd: HWND) {
+        let Some(state) = panel_state(hwnd) else {
+            return;
+        };
+        unsafe {
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut paint);
+            // Fill the real client rect so a mid-drag preview (which never
+            // resizes the popup) cannot leave stale bands below the cards.
+            let mut client = RECT {
+                left: 0,
+                top: 0,
+                right: state.layout.width,
+                bottom: state.layout.height,
+            };
+            let _ = GetClientRect(hwnd, &mut client);
+            let buffer = if client.right > 0 && client.bottom > 0 {
+                let buffer_dc = CreateCompatibleDC(Some(hdc));
+                if buffer_dc.is_invalid() {
+                    None
+                } else {
+                    let bitmap = CreateCompatibleBitmap(hdc, client.right, client.bottom);
+                    if bitmap.is_invalid() {
+                        let _ = DeleteDC(buffer_dc);
+                        None
+                    } else {
+                        let old_bitmap = SelectObject(buffer_dc, bitmap.into());
+                        Some((buffer_dc, bitmap, old_bitmap))
+                    }
+                }
+            } else {
+                None
+            };
+            let paint_hdc = buffer
+                .as_ref()
+                .map(|(buffer_dc, _, _)| *buffer_dc)
+                .unwrap_or(hdc);
+
+            fill_rect(paint_hdc, client, COLOR_OUTER);
+            draw_text(
+                paint_hdc,
+                RECT {
+                    left: PANEL_MARGIN,
+                    top: 10,
+                    right: state.layout.width - PANEL_MARGIN,
+                    bottom: 34,
+                },
+                "AI Usage",
+                20,
+                FW_BOLD,
+                COLOR_TEXT,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+            draw_text(
+                paint_hdc,
+                RECT {
+                    left: PANEL_MARGIN,
+                    top: 34,
+                    right: state.layout.width - PANEL_MARGIN,
+                    bottom: 52,
+                },
+                "Click a row or its dot to choose the bar timeframe · boxes show/hide · drag headers",
+                12,
+                FW_NORMAL,
+                COLOR_MUTED,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+
+            let drop_target = state
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.drop_target.as_ref());
+            for card in &state.layout.cards {
+                if card.placeholder {
+                    paint_placeholder(paint_hdc, card.rect);
+                } else {
+                    paint_card(
+                        paint_hdc,
+                        card,
+                        card.rect,
+                        drop_target == Some(&card.provider),
+                    );
+                }
+            }
+
+            for button in &state.layout.buttons {
+                fill_round_rect(paint_hdc, button.rect, 6, COLOR_BACKGROUND);
+                stroke_round_rect(paint_hdc, button.rect, 6, COLOR_CARD_BORDER);
+                draw_text(
+                    paint_hdc,
+                    button.rect,
+                    &button.label,
+                    13,
+                    FW_NORMAL,
+                    COLOR_TEXT,
+                    DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+                );
+            }
+
+            // The grabbed card floats above the grid, following the pointer
+            // with the grab offset. It was removed from the flow, so it is
+            // painted exactly once, on top.
+            if let Some(drag) = &state.drag {
+                if drag.active {
+                    let dx = drag.pointer.x - drag.press_point.x;
+                    let dy = drag.pointer.y - drag.press_point.y;
+                    let rect = RECT {
+                        left: drag.grabbed_rect.left + dx,
+                        top: drag.grabbed_rect.top + dy,
+                        right: drag.grabbed_rect.right + dx,
+                        bottom: drag.grabbed_rect.bottom + dy,
+                    };
+                    if let Some(grabbed) = drag
+                        .origin_cards
+                        .iter()
+                        .find(|card| card.provider == drag.provider)
+                    {
+                        paint_card(paint_hdc, grabbed, rect, true);
+                    }
+                }
+            }
+
+            if let Some((buffer_dc, bitmap, old_bitmap)) = buffer {
+                let _ = BitBlt(
+                    hdc,
+                    0,
+                    0,
+                    client.right,
+                    client.bottom,
+                    Some(buffer_dc),
+                    0,
+                    0,
+                    SRCCOPY,
+                );
+                SelectObject(buffer_dc, old_bitmap);
+                let _ = DeleteObject(bitmap.into());
+                let _ = DeleteDC(buffer_dc);
+            }
+            let _ = EndPaint(hwnd, &paint);
+        }
+    }
+
+    fn panel_action_at(state: &PanelState, point: POINT) -> Option<PanelAction> {
+        for card in &state.layout.cards {
+            if card.placeholder {
+                continue;
+            }
+            if rect_contains(card.eye_rect, point) {
+                return Some(PanelAction::ToggleProvider(card.provider.clone()));
+            }
+            if !rect_contains(card.rect, point) {
+                continue;
+            }
+            for row in &card.rows {
+                if !rect_contains(row.rect, point) {
+                    continue;
+                }
+                if !card.visible || !row.toggleable {
+                    continue;
+                }
+                // Checkbox toggles visibility; the quota label focuses the
+                // window. Optional metric rows keep the toggle for the whole
+                // row (they have no window focus concept).
+                if let Some(focus) = &row.focus_action {
+                    if rect_contains(row_focus_rect(row.rect), point) {
+                        return Some(focus.clone());
+                    }
+                }
+                if rect_contains(row_checkbox_rect(row.rect), point) {
+                    return Some(row.action.clone());
+                }
+                if let Some(focus) = &row.focus_action {
+                    return Some(focus.clone());
+                }
+                return Some(row.action.clone());
+            }
+            return Some(if card.visible {
+                PanelAction::FocusProvider(card.provider.clone())
+            } else {
+                PanelAction::ToggleProvider(card.provider.clone())
+            });
+        }
+        state
+            .layout
+            .buttons
+            .iter()
+            .find(|button| rect_contains(button.rect, point))
+            .map(|button| button.action.clone())
+    }
+
+    fn panel_drag_card_at(state: &PanelState, point: POINT) -> Option<Provider> {
+        state.layout.cards.iter().find_map(|card| {
+            if card.placeholder || !card.visible {
+                return None;
+            }
+            let header = RECT {
+                left: card.rect.left,
+                top: card.rect.top,
+                right: card.rect.right,
+                bottom: card.rect.top + PANEL_HEADER_HEIGHT,
+            };
+            (rect_contains(header, point) && !rect_contains(card.eye_rect, point))
+                .then(|| card.provider.clone())
+        })
+    }
+
+    /// A placeholder card for the current drop slot. It carries the grabbed
+    /// card's height so the grid rows keep their shape while the rest of the
+    /// flow reflows around the slot.
+    fn placeholder_card(drag: &PanelDragState) -> PanelCard {
+        PanelCard {
+            rect: RECT {
+                left: 0,
+                top: 0,
+                right: PANEL_CARD_WIDTH,
+                bottom: drag.grabbed_rect.bottom - drag.grabbed_rect.top,
+            },
+            provider: drag.provider.clone(),
+            title: String::new(),
+            visible: false,
+            focused: false,
+            eye_rect: RECT::default(),
+            rows: Vec::new(),
+            placeholder: true,
+        }
+    }
+
+    fn to_slot_rect(rect: RECT) -> SlotRect {
+        SlotRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+
+    /// The two-column grid bounds that the drop model resolves against.
+    fn panel_grid_bounds(cards: &[PanelCard]) -> SlotRect {
+        SlotRect {
+            left: PANEL_MARGIN,
+            top: cards
+                .iter()
+                .map(|card| card.rect.top)
+                .min()
+                .unwrap_or(PANEL_MARGIN + PANEL_HEADER_HEIGHT),
+            right: PANEL_MARGIN + 2 * PANEL_CARD_WIDTH + PANEL_GAP,
+            bottom: cards
+                .iter()
+                .map(|card| card.rect.bottom)
+                .max()
+                .unwrap_or(PANEL_MARGIN + PANEL_HEADER_HEIGHT),
+        }
+    }
+
+    fn panel_drop_cards(cards: &[PanelCard]) -> Vec<DropCard<Provider>> {
+        cards
+            .iter()
+            .map(|card| DropCard {
+                id: card.provider.clone(),
+                rect: to_slot_rect(card.rect),
+                visible: card.visible,
+            })
+            .collect()
+    }
+
+    fn preview_cards_for_drag(drag: &PanelDragState) -> Vec<PanelCard> {
+        // Keep the grid in its origin arrangement while dragging. The grabbed
+        // card leaves a stable outline at its original slot, and the real card
+        // follows the pointer. This prevents the card under the pointer from
+        // moving every time the candidate drop index changes.
+        let mut cards = drag.origin_cards.clone();
+        if let Some(card) = cards.iter_mut().find(|card| card.provider == drag.provider) {
+            let rect = card.rect;
+            let mut placeholder = placeholder_card(drag);
+            placeholder.rect = rect;
+            *card = placeholder;
+        }
+        cards
+    }
+
+    fn card_drop_target_at(drag: &PanelDragState, point: POINT) -> Option<Provider> {
+        drag.origin_cards.iter().find_map(|card| {
+            (card.provider != drag.provider && card.visible && rect_contains(card.rect, point))
+                .then(|| card.provider.clone())
+        })
+    }
+
+    /// Resolve an empty-slot insertion against the stable flow captured when
+    /// the drag began. Card-on-card targets are handled separately as swaps.
+    fn resolve_insert_index_at(drag: &PanelDragState, point: POINT) -> Option<usize> {
+        // Releasing over the grabbed card's origin is a cancellation, not an
+        // append: the dragged card is intentionally absent from the flow used
+        // for empty-slot hit-testing.
+        if drag
+            .origin_cards
+            .iter()
+            .find(|card| card.provider == drag.provider)
+            .is_some_and(|card| rect_contains(card.rect, point))
+        {
+            return None;
+        }
+        if card_drop_target_at(drag, point).is_some() {
+            return None;
+        }
+        let grid = panel_grid_bounds(&drag.flow);
+        let drop_cards = panel_drop_cards(&drag.flow);
+        DropGrid::drop_index(&drop_cards, grid, (point.x, point.y))
+    }
+
+    fn resolve_insert_index(drag: &PanelDragState) -> Option<usize> {
+        resolve_insert_index_at(drag, drag.pointer)
+    }
+
+    /// Replace the live layout with the stable origin grid plus a placeholder
+    /// at the grabbed card's original slot. The popup is never resized or
+    /// repositioned here; that happens once on commit via the panel rebuild.
+    fn rebuild_preview_cards(state: &mut PanelState) {
+        let Some(drag) = state.drag.as_ref() else {
+            return;
+        };
+        let cards = preview_cards_for_drag(drag);
+        state.layout.cards = cards;
+        reflow_panel_layout(&mut state.layout);
+    }
+
+    /// Update the stable card target or empty-slot index from the current
+    /// pointer. The origin grid is only rebuilt when that target changes;
+    /// pointer movement itself only repaints the floating card.
+    fn update_drag_preview(state: &mut PanelState) -> bool {
+        let Some(drag) = state.drag.as_ref() else {
+            return false;
+        };
+        let target = card_drop_target_at(drag, drag.pointer);
+        let index = target
+            .is_none()
+            .then(|| resolve_insert_index(drag))
+            .flatten();
+        if state
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.drop_target == target && drag.drop_index == index)
+        {
+            return false;
+        }
+        if let Some(drag) = state.drag.as_mut() {
+            drag.drop_target = target;
+            drag.drop_index = index;
+        }
+        rebuild_preview_cards(state);
+        true
+    }
+
+    /// Restore the layout captured at press (used for cancelled drags and
+    /// capture loss).
+    fn restore_origin_layout(state: &mut PanelState, origin_cards: &[PanelCard]) {
+        state.layout.cards = origin_cards.to_vec();
+        reflow_panel_layout(&mut state.layout);
+    }
+
+    /// Route a mouse release to a panel action, returning the action to
+    /// dispatch and whether the pre-press layout must be restored (a
+    /// cancelled gesture). Releases are classified by the gesture that
+    /// started at press, so every click reaches the hit-tester:
+    ///
+    /// - No gesture (`Click`): the press landed on the eye toggle, a
+    ///   quota/metric row checkbox, a row, or a footer button — all of which
+    ///   live outside the draggable header. Hit-test the release point
+    ///   directly; this is the path that toggles provider and quota-window
+    ///   visibility, so it must run even though `state.drag` is `None`.
+    /// - Inactive header gesture (`HeaderClick`): provider focus/visibility
+    ///   hit test at the release point; a miss on empty chrome restores the
+    ///   pre-press layout.
+    /// - Active drag (`Reorder`): swap or empty-slot insertion; releasing
+    ///   with no target restores the origin layout.
+    fn resolve_lbutton_release(
+        state: &PanelState,
+        drag: Option<&PanelDragState>,
+        point: POINT,
+    ) -> (Option<PanelAction>, bool) {
+        match release_route(drag.map(|drag| drag.active)) {
+            ReleaseRoute::Click => (panel_action_at(state, point), false),
+            ReleaseRoute::HeaderClick => {
+                let action = panel_action_at(state, point);
+                let restore = action.is_none();
+                (action, restore)
+            }
+            ReleaseRoute::Reorder => {
+                let drag = drag.expect("Reorder route implies a started gesture");
+                // A card-on-card drop is a direct swap. The target remains at
+                // its origin rectangle throughout the gesture, so the
+                // committed order cannot rotate unrelated cards through the
+                // two-column grid.
+                let action = if let Some(target) = card_drop_target_at(drag, point) {
+                    let mut order = drag.origin_order.clone();
+                    swap_drop(&mut order, &drag.provider, &target)
+                        .then_some(PanelAction::Reorder(order))
+                } else {
+                    resolve_insert_index_at(drag, point).and_then(|index| {
+                        let mut order = drag.origin_order.clone();
+                        apply_drop(&mut order, &drag.provider, index)
+                            .then_some(PanelAction::Reorder(order))
+                    })
+                };
+                let restore = action.is_none();
+                (action, restore)
+            }
+        }
+    }
+
+    fn point_from_lparam(lparam: LPARAM) -> POINT {
+        POINT {
+            x: (lparam.0 as i16) as i32,
+            y: ((lparam.0 >> 16) as i16) as i32,
+        }
+    }
+
+    unsafe extern "system" fn control_panel_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                paint_control_panel(hwnd);
+                LRESULT(0)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_MOUSEMOVE => {
+                if let Some(state) = panel_state(hwnd) {
+                    if let Some(drag) = &mut state.drag {
+                        drag.pointer = point_from_lparam(lparam);
+                        if !drag.active {
+                            let dx = drag.pointer.x - drag.press_point.x;
+                            let dy = drag.pointer.y - drag.press_point.y;
+                            // Small movement threshold: ordinary header
+                            // clicks stay clicks (provider focus); only real
+                            // drags enter the floating preview.
+                            if dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
+                                drag.active = true;
+                                update_drag_preview(state);
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                            }
+                        } else {
+                            update_drag_preview(state);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                    }
+                }
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    ..Default::default()
+                };
+                let _ = TrackMouseEvent(&mut tracking);
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                let point = point_from_lparam(lparam);
+                if let Some(state) = panel_state(hwnd) {
+                    if state.drag.is_none() {
+                        if let Some(provider) = panel_drag_card_at(state, point) {
+                            let Some(card) = state
+                                .layout
+                                .cards
+                                .iter()
+                                .find(|card| card.provider == provider)
+                            else {
+                                return LRESULT(0);
+                            };
+                            let grabbed_rect = card.rect;
+                            let origin_order: Vec<Provider> = state
+                                .layout
+                                .cards
+                                .iter()
+                                .map(|card| card.provider.clone())
+                                .collect();
+                            let origin_cards = state.layout.cards.clone();
+                            // Flow = origin minus the grabbed provider,
+                            // reflowed in two columns so the drop model sees
+                            // the same geometry the preview paints.
+                            let mut flow: Vec<PanelCard> = origin_cards
+                                .iter()
+                                .filter(|card| card.provider != provider)
+                                .cloned()
+                                .collect();
+                            reflow_grid(&mut flow, GRID_COLUMNS);
+                            state.drag = Some(PanelDragState {
+                                press_point: point,
+                                pointer: point,
+                                active: false,
+                                origin_order,
+                                origin_cards,
+                                flow,
+                                drop_index: None,
+                                drop_target: None,
+                                grabbed_rect,
+                                provider,
+                            });
+                            let _ = SetCapture(hwnd);
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                let point = point_from_lparam(lparam);
+                let mut rebuild = false;
+                if let Some(state) = panel_state(hwnd) {
+                    let drag = state.drag.take();
+                    let (action, restore) = resolve_lbutton_release(state, drag.as_ref(), point);
+                    if restore {
+                        // Cancelled gesture (invalid drop target or a header
+                        // click that landed on empty chrome): restore the
+                        // pre-press layout.
+                        let drag = drag.expect("restore is only requested for started gestures");
+                        restore_origin_layout(state, &drag.origin_cards);
+                        rebuild = state.rebuild_pending;
+                    }
+                    if let Some(action) = action {
+                        state.result = Some(action);
+                    }
+                }
+                let _ = ReleaseCapture();
+                // A rebuild deferred during the drag runs now only when there
+                // is no action; action paths rebuild after dispatch.
+                if rebuild {
+                    rebuild_control_panel(hwnd);
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+            WM_APP_PANEL_REBUILD => {
+                if let Some(state) = panel_state(hwnd) {
+                    if state.drag.is_some() {
+                        // Deferred rebuild: the drag owns the layout.
+                        state.rebuild_pending = true;
+                        return LRESULT(0);
+                    }
+                }
+                rebuild_control_panel(hwnd);
+                LRESULT(0)
+            }
+            WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => {
+                if let Some(state) = panel_state(hwnd) {
+                    if let Some(drag) = state.drag.take() {
+                        restore_origin_layout(state, &drag.origin_cards);
+                    }
+                }
+                let _ = ReleaseCapture();
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_KILLFOCUS => {
+                let _ = ReleaseCapture();
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                // Fires when the gesture ends by ReleaseCapture or when the
+                // system takes capture away (alt-tab, other window). Mouse-up
+                // already takes the drag, so this runs at most once per
+                // gesture and only for genuinely lost capture.
+                let mut rebuild = false;
+                if let Some(state) = panel_state(hwnd) {
+                    if let Some(drag) = state.drag.take() {
+                        restore_origin_layout(state, &drag.origin_cards);
+                        rebuild = state.rebuild_pending;
+                    }
+                }
+                if rebuild {
+                    rebuild_control_panel(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_NCDESTROY => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    fn dispatch_panel_action(hwnd: HWND, action: PanelAction) {
+        match action {
+            PanelAction::FocusProvider(provider) => set_focus_provider(hwnd, provider),
+            // Focusing a window also focuses its provider, then selects the
+            // window; reselecting the same provider keeps its focused window.
+            PanelAction::FocusWindow(provider, window) => {
+                set_focus_provider(hwnd, provider);
+                set_focus_window(hwnd, &window);
+            }
+            PanelAction::None => {}
+            PanelAction::ToggleProvider(provider) => toggle_provider_visibility(hwnd, provider),
+            PanelAction::ToggleWindow(provider, window) => {
+                toggle_window_visibility(hwnd, provider, window)
+            }
+            PanelAction::ToggleMetric(provider, metric) => {
+                toggle_metric_visibility(hwnd, provider, metric)
+            }
+            PanelAction::Refresh => begin_refresh(hwnd),
+            PanelAction::ToggleStartup => toggle_startup_registration(hwnd),
+            PanelAction::CopyDetails => copy_details_to_clipboard(hwnd),
+            PanelAction::OpenOllamaUsage => open_ollama_usage_page(hwnd),
+            PanelAction::OpenKimiConsole => open_kimi_console(hwnd),
+            PanelAction::ConfigureOpenCodeResets => open_opencode_reset_dialog(hwnd),
+            PanelAction::Quit => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
+            PanelAction::Reorder(order) => reorder_provider(hwnd, order),
+        }
+    }
+
+    fn show_control_panel(hwnd: HWND) -> bool {
+        if let Some(state) = app_state(hwnd) {
+            set_tooltip_visible(hwnd, state, false);
+        }
+        let Some(layout) = build_control_panel_layout(hwnd) else {
+            return false;
+        };
+
+        unsafe {
+            let hinst = match GetModuleHandleW(None) {
+                Ok(module) => HINSTANCE(module.0),
+                Err(_) => return false,
+            };
+            static REGISTER_CLASS: Once = Once::new();
+            REGISTER_CLASS.call_once(|| {
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(control_panel_wnd_proc),
+                    hInstance: hinst,
+                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    lpszClassName: CONTROL_PANEL_CLASS,
+                    style: CS_HREDRAW | CS_VREDRAW,
+                    ..Default::default()
+                };
+                let _ = RegisterClassW(&class);
+            });
+
+            let mut state = Box::new(PanelState {
+                parent: hwnd,
+                layout,
+                result: None,
+                drag: None,
+                rebuild_pending: false,
+            });
+            let state_ptr = (&mut *state) as *mut PanelState;
+            let (x, y) = panel_window_position(hwnd, state.layout.width, state.layout.height);
+            let panel = match CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                CONTROL_PANEL_CLASS,
+                w!("AI Usage"),
+                WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
+                x,
+                y,
+                state.layout.width,
+                state.layout.height,
+                Some(hwnd),
+                None,
+                Some(hinst),
+                None,
+            ) {
+                Ok(panel) => panel,
+                Err(_) => return false,
+            };
+            SetWindowLongPtrW(panel, GWLP_USERDATA, state_ptr as isize);
+            if let Some(app) = app_state(hwnd) {
+                app.panel_hwnd = Some(panel);
+            }
+            position_control_panel_window(panel, hwnd, state.layout.width, state.layout.height);
+            let _ = SetForegroundWindow(panel);
+            let _ = SetFocus(Some(panel));
+
+            let mut message = MSG::default();
+            let mut parent_alive = true;
+            while IsWindow(Some(panel)).as_bool() {
+                let result = GetMessageW(&mut message, None, 0, 0);
+                if result.0 <= 0 {
+                    if result.0 == 0 {
+                        PostQuitMessage(message.wParam.0 as i32);
+                    }
+                    break;
+                }
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+
+                let action = panel_state(panel).and_then(|state| state.result.take());
+                if let Some(action) = action {
+                    if matches!(action, PanelAction::Quit) {
+                        let _ = DestroyWindow(panel);
+                        dispatch_panel_action(hwnd, action);
+                        parent_alive = false;
+                        break;
+                    }
+                    dispatch_panel_action(hwnd, action);
+                    if IsWindow(Some(panel)).as_bool() {
+                        rebuild_control_panel(panel);
+                    }
+                }
+            }
+            if parent_alive && IsWindow(Some(hwnd)).as_bool() {
+                if let Some(app) = app_state(hwnd) {
+                    if app.panel_hwnd == Some(panel) {
+                        app.panel_hwnd = None;
+                    }
+                }
+            }
+            drop(state);
+            if parent_alive && IsWindow(Some(hwnd)).as_bool() {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+                ensure_widget_topmost(hwnd);
+            }
+            true
+        }
+    }
+
+    fn panel_monitor_work_area(hwnd: HWND) -> Option<(RECT, RECT)> {
+        unsafe {
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if monitor.0.is_null() {
+                return None;
+            }
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return None;
+            }
+            Some((info.rcMonitor, info.rcWork))
         }
     }
 
@@ -1664,6 +3419,9 @@ mod windows_shell {
             // Keep wide strings alive until TrackPopupMenu returns.
             let mut provider_labels: Vec<Vec<u16>> = Vec::new();
             let mut window_labels: Vec<Vec<u16>> = Vec::new();
+            let mut visibility_labels: Vec<Vec<u16>> = Vec::new();
+            let mut visibility_window_commands: Vec<(Provider, String)> = Vec::new();
+            let mut visibility_metric_commands: Vec<(Provider, MetricKind)> = Vec::new();
             let switchable = app_state_ref(hwnd)
                 .map(|s| s.switchable_providers.clone())
                 .unwrap_or_default();
@@ -1687,6 +3445,140 @@ mod windows_shell {
                         MENU_SHOW_PROVIDER_BASE + index,
                         PCWSTR(provider_labels[index].as_ptr()),
                     );
+                }
+            }
+
+            // Display visibility is deliberately separate from the focus
+            // selectors above and from provider enablement in AppConfig.
+            let all_providers = app_state_ref(hwnd)
+                .map(|state| switchable_providers_for_snapshots(&state.snapshots))
+                .unwrap_or_default();
+            let resolved_view = app_state_ref(hwnd)
+                .map(|state| state.config.resolved_view(&all_providers))
+                .unwrap_or_default();
+
+            // All visibility controls live in one top-level "Show/hide"
+            // submenu. Provider visibility is global; window and optional
+            // metric visibility are nested under the provider they affect so
+            // labels such as "Show 5-hour" cannot be mistaken for a global
+            // setting.
+            let submenu = CreatePopupMenu().ok();
+            if let Some(submenu) = submenu.as_ref() {
+                for (index, provider) in all_providers
+                    .iter()
+                    .take(MENU_VISIBLE_PROVIDER_MAX)
+                    .enumerate()
+                {
+                    let flags = if !resolved_view.is_provider_hidden(provider) {
+                        MF_STRING | MF_CHECKED
+                    } else {
+                        MF_STRING
+                    };
+                    let label = format!("Show {}", provider_display_name(provider));
+                    visibility_labels.push(to_wide(&label));
+                    let _ = AppendMenuW(
+                        *submenu,
+                        flags,
+                        MENU_VISIBLE_PROVIDER_BASE + index,
+                        PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                    );
+                }
+
+                if !all_providers.is_empty() {
+                    let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                }
+
+                for provider in all_providers.iter().take(MENU_VISIBLE_PROVIDER_MAX) {
+                    let Ok(provider_menu) = CreatePopupMenu() else {
+                        continue;
+                    };
+                    let mut has_items = false;
+                    let all_windows = available_windows(
+                        app_state_ref(hwnd)
+                            .map(|state| state.snapshots.as_slice())
+                            .unwrap_or_default(),
+                        provider,
+                    );
+                    let visible_windows = resolved_view.windows_for(provider);
+                    for window in all_windows.iter().take(MENU_SHOW_WINDOW_MAX) {
+                        if visibility_window_commands.len() >= MENU_VISIBLE_WINDOW_MAX {
+                            break;
+                        }
+                        let checked = visible_windows
+                            .map(|windows| windows.iter().any(|candidate| candidate == window))
+                            .unwrap_or(true);
+                        let flags = if checked {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        let label = format!("Show {}", window_display_name(provider, window));
+                        visibility_labels.push(to_wide(&label));
+                        let index = visibility_window_commands.len();
+                        let appended = AppendMenuW(
+                            provider_menu,
+                            flags,
+                            MENU_VISIBLE_WINDOW_BASE + index,
+                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                        )
+                        .is_ok();
+                        if appended {
+                            visibility_window_commands.push((provider.clone(), window.clone()));
+                            has_items = true;
+                        }
+                    }
+
+                    let all_metrics = app_state_ref(hwnd)
+                        .map(|state| available_metrics(&state.snapshots, provider))
+                        .unwrap_or_default();
+                    if !all_metrics.is_empty() && has_items {
+                        let _ = AppendMenuW(provider_menu, MF_SEPARATOR, 0, w!(""));
+                    }
+                    for metric in all_metrics {
+                        if visibility_metric_commands.len() >= MENU_VISIBLE_METRIC_MAX {
+                            break;
+                        }
+                        let flags = if resolved_view.is_metric_visible(provider, metric) {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        let label = format!("Show {}", metric_display_name(metric));
+                        visibility_labels.push(to_wide(&label));
+                        let index = visibility_metric_commands.len();
+                        let appended = AppendMenuW(
+                            provider_menu,
+                            flags,
+                            MENU_VISIBLE_METRIC_BASE + index,
+                            PCWSTR(visibility_labels.last().unwrap().as_ptr()),
+                        )
+                        .is_ok();
+                        if appended {
+                            visibility_metric_commands.push((provider.clone(), metric));
+                            has_items = true;
+                        }
+                    }
+
+                    if has_items {
+                        if GetMenuItemCount(Some(*submenu)) > 0 {
+                            let _ = AppendMenuW(*submenu, MF_SEPARATOR, 0, w!(""));
+                        }
+                        let label = to_wide(provider_display_name(provider));
+                        let attached = AppendMenuW(
+                            *submenu,
+                            MF_POPUP,
+                            provider_menu.0 as usize,
+                            PCWSTR(label.as_ptr()),
+                        )
+                        .is_ok();
+                        if attached {
+                            visibility_labels.push(label);
+                        } else {
+                            let _ = DestroyMenu(provider_menu);
+                        }
+                    } else {
+                        let _ = DestroyMenu(provider_menu);
+                    }
                 }
             }
 
@@ -1762,6 +3654,26 @@ mod windows_shell {
                 }
             }
 
+            // Attach the submenu only when it holds at least one control. If
+            // attaching it fails, destroy the unattached popup immediately;
+            // the parent menu can only clean up submenus it owns.
+            let _ = submenu.and_then(|handle| {
+                if GetMenuItemCount(Some(handle)) <= 0 {
+                    let _ = DestroyMenu(handle);
+                    return None;
+                }
+
+                let separator_added = AppendMenuW(menu, MF_SEPARATOR, 0, w!("")).is_ok();
+                let attached = separator_added
+                    && AppendMenuW(menu, MF_POPUP, handle.0 as usize, w!("Show/hide")).is_ok();
+                if attached {
+                    Some(handle)
+                } else {
+                    let _ = DestroyMenu(handle);
+                    None
+                }
+            });
+
             let ollama_focused = focused.as_ref() == Some(&Provider::OllamaCloud);
             let kimi_focused = focused.as_ref() == Some(&Provider::Kimi);
             let opencode_focused = focused.as_ref() == Some(&Provider::OpenCodeGo);
@@ -1835,6 +3747,7 @@ mod windows_shell {
             // Keep labels live until here.
             let _ = provider_labels;
             let _ = window_labels;
+            let _ = visibility_labels;
 
             match command {
                 MENU_REFRESH => begin_refresh(hwnd),
@@ -1860,6 +3773,34 @@ mod windows_shell {
                 {
                     if let Some(window) = available_windows.get(id - MENU_SHOW_WINDOW_BASE) {
                         set_focus_window(hwnd, window);
+                    }
+                }
+                id if (MENU_VISIBLE_PROVIDER_BASE
+                    ..MENU_VISIBLE_PROVIDER_BASE + MENU_VISIBLE_PROVIDER_MAX)
+                    .contains(&id) =>
+                {
+                    if let Some(provider) = all_providers.get(id - MENU_VISIBLE_PROVIDER_BASE) {
+                        toggle_provider_visibility(hwnd, provider.clone());
+                    }
+                }
+                id if (MENU_VISIBLE_WINDOW_BASE
+                    ..MENU_VISIBLE_WINDOW_BASE + MENU_VISIBLE_WINDOW_MAX)
+                    .contains(&id) =>
+                {
+                    if let Some((provider, window)) =
+                        visibility_window_commands.get(id - MENU_VISIBLE_WINDOW_BASE)
+                    {
+                        toggle_window_visibility(hwnd, provider.clone(), window.clone());
+                    }
+                }
+                id if (MENU_VISIBLE_METRIC_BASE
+                    ..MENU_VISIBLE_METRIC_BASE + MENU_VISIBLE_METRIC_MAX)
+                    .contains(&id) =>
+                {
+                    if let Some((provider, metric)) =
+                        visibility_metric_commands.get(id - MENU_VISIBLE_METRIC_BASE)
+                    {
+                        toggle_metric_visibility(hwnd, provider.clone(), *metric);
                     }
                 }
                 _ => {}
@@ -1925,7 +3866,9 @@ mod windows_shell {
             }
             WM_RBUTTONUP => {
                 // Swallow further mouse-move tip until the menu is done.
-                show_context_menu(hwnd);
+                if !show_control_panel(hwnd) {
+                    show_context_menu(hwnd);
+                }
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == REFRESH_TIMER_ID => {
@@ -2128,6 +4071,113 @@ mod windows_shell {
         }
 
         #[test]
+        fn canonical_weekly_aliases_cover_codex_and_grok_cards() {
+            assert_eq!(
+                canonical_window_key(&Provider::Codex, "primary"),
+                Some("primary")
+            );
+            assert_eq!(
+                canonical_window_key(&Provider::GrokConsumer, "primary"),
+                Some("primary")
+            );
+            assert_eq!(
+                canonical_window_key(&Provider::GrokApi, "weekly"),
+                Some("primary")
+            );
+        }
+
+        #[test]
+        fn provider_reorder_uses_insert_at_index_without_losing_cards() {
+            let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
+            // Drag Codex to flow index 1 (flow is [GrokApi, Kimi]): Codex lands
+            // between GrokApi and Kimi.
+            assert!(apply_drop(&mut order, &Provider::Codex, 1));
+            assert_eq!(
+                order,
+                vec![Provider::GrokApi, Provider::Codex, Provider::Kimi]
+            );
+            // Appending at the flow length moves the dragged card last.
+            let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
+            assert!(apply_drop(&mut order, &Provider::Codex, 2));
+            assert_eq!(
+                order,
+                vec![Provider::GrokApi, Provider::Kimi, Provider::Codex]
+            );
+            // A no-op drop (drag to its own flow index) still returns true.
+            let mut order = vec![Provider::Codex, Provider::GrokApi, Provider::Kimi];
+            assert!(apply_drop(&mut order, &Provider::GrokApi, 1));
+            assert_eq!(
+                order,
+                vec![Provider::Codex, Provider::GrokApi, Provider::Kimi]
+            );
+        }
+
+        #[test]
+        fn drag_resolution_maps_pointer_halves_and_hidden_slots() {
+            let grid = SlotRect {
+                left: 18,
+                top: 82,
+                right: 832,
+                bottom: 396,
+            };
+            let cards = vec![
+                DropCard {
+                    id: Provider::Codex,
+                    rect: SlotRect {
+                        left: 18,
+                        top: 82,
+                        right: 418,
+                        bottom: 232,
+                    },
+                    visible: true,
+                },
+                DropCard {
+                    id: Provider::Kimi,
+                    rect: SlotRect {
+                        left: 432,
+                        top: 82,
+                        right: 832,
+                        bottom: 232,
+                    },
+                    visible: false,
+                },
+            ];
+
+            // Left half of Codex -> insert before it.
+            assert_eq!(DropGrid::drop_index(&cards, grid, (100, 100)), Some(0));
+            // Right half of Codex -> insert after it (before hidden Kimi).
+            assert_eq!(DropGrid::drop_index(&cards, grid, (300, 100)), Some(1));
+            // Hidden Kimi keeps its slot but is not a drop target.
+            assert_eq!(DropGrid::drop_index(&cards, grid, (600, 100)), None);
+            // The footer region below the row appends.
+            assert_eq!(DropGrid::drop_index(&cards, grid, (100, 400)), Some(2));
+        }
+
+        #[test]
+        fn reorder_action_accepts_only_full_permutations() {
+            let available = vec![
+                Provider::Codex,
+                Provider::GrokApi,
+                Provider::Kimi,
+                Provider::OllamaCloud,
+            ];
+            let ok = vec![
+                Provider::OllamaCloud,
+                Provider::Codex,
+                Provider::GrokApi,
+                Provider::Kimi,
+            ];
+            assert!(is_full_permutation(&ok, &available));
+            assert!(!is_full_permutation(&ok[..3], &available));
+            let mut duplicated = ok.clone();
+            duplicated[0] = Provider::Codex;
+            assert!(!is_full_permutation(&duplicated, &available));
+            let mut foreign = ok.clone();
+            foreign[0] = Provider::GrokConsumer;
+            assert!(!is_full_permutation(&foreign, &available));
+        }
+
+        #[test]
         fn clipboard_payload_uses_the_same_detail_renderer_as_the_menu_action() {
             assert_eq!(render_detail_text(&[]), "No provider data");
         }
@@ -2167,6 +4217,232 @@ mod windows_shell {
                 format_reset_countdown(Some(now + ChronoDuration::days(29)), now),
                 "29 days 0 hours"
             );
+        }
+
+        // --- Mouse release routing -------------------------------------------
+
+        fn test_card(provider: Provider, top: i32, left: i32) -> PanelCard {
+            let rect = RECT {
+                left,
+                top,
+                right: left + PANEL_CARD_WIDTH,
+                bottom: top + PANEL_HEADER_HEIGHT + PANEL_ROW_HEIGHT + PANEL_CARD_PADDING * 2,
+            };
+            PanelCard {
+                rect,
+                title: provider_display_name(&provider).to_string(),
+                visible: true,
+                focused: false,
+                eye_rect: RECT {
+                    left: rect.right - 42,
+                    top: rect.top + 14,
+                    right: rect.right - 12,
+                    bottom: rect.top + 42,
+                },
+                provider: provider.clone(),
+                rows: vec![PanelRow {
+                    rect: RECT {
+                        left: rect.left + PANEL_CARD_PADDING,
+                        top: rect.top + PANEL_HEADER_HEIGHT,
+                        right: rect.right - PANEL_CARD_PADDING,
+                        bottom: rect.top + PANEL_HEADER_HEIGHT + PANEL_ROW_HEIGHT,
+                    },
+                    label: "primary".to_string(),
+                    value: "50% left".to_string(),
+                    checked: true,
+                    toggleable: true,
+                    action: PanelAction::ToggleWindow(provider.clone(), "primary".to_string()),
+                    focus_action: Some(PanelAction::FocusWindow(
+                        provider.clone(),
+                        "primary".to_string(),
+                    )),
+                    focused: false,
+                }],
+                placeholder: false,
+            }
+        }
+
+        fn test_layout() -> PanelLayout {
+            let mut cards = vec![
+                test_card(Provider::Codex, 82, 18),
+                test_card(Provider::GrokApi, 82, 432),
+            ];
+            reflow_grid(&mut cards, GRID_COLUMNS);
+            let mut layout = PanelLayout {
+                width: 0,
+                height: 0,
+                cards,
+                buttons: vec![PanelButton {
+                    rect: RECT::default(),
+                    label: "Refresh".to_string(),
+                    action: PanelAction::Refresh,
+                }],
+            };
+            reflow_panel_layout(&mut layout);
+            layout
+        }
+
+        fn test_state() -> PanelState {
+            PanelState {
+                parent: HWND::default(),
+                layout: test_layout(),
+                result: None,
+                drag: None,
+                rebuild_pending: false,
+            }
+        }
+
+        #[test]
+        fn release_without_drag_routes_checkbox_eye_and_row_clicks() {
+            // Regression: the drag refactor routed releases only through an
+            // existing header gesture (`state.drag.take()`). Clicks on the
+            // checkbox, eye toggle, rows, or footer buttons never started a
+            // gesture, so their releases were dropped and the checkmarks no
+            // longer toggled provider/quota-window visibility. Every release
+            // must reach the hit-tester, even with `drag == None`.
+            let state = test_state();
+            let card = state.layout.cards[0].clone();
+            let row = &card.rows[0];
+
+            // Checkbox hit area: toggles quota-window visibility.
+            let checkbox = row_checkbox_rect(row.rect);
+            let checkbox_center = POINT {
+                x: (checkbox.left + checkbox.right) / 2,
+                y: (checkbox.top + checkbox.bottom) / 2,
+            };
+            let (action, restore) = resolve_lbutton_release(&state, None, checkbox_center);
+            assert_eq!(
+                action,
+                Some(PanelAction::ToggleWindow(
+                    Provider::Codex,
+                    "primary".to_string()
+                ))
+            );
+            assert!(!restore, "plain clicks never restore the layout");
+
+            // Row label area: focuses the window.
+            let label_point = POINT {
+                x: row.rect.left + 10,
+                y: (row.rect.top + row.rect.bottom) / 2,
+            };
+            let (action, _) = resolve_lbutton_release(&state, None, label_point);
+            assert_eq!(
+                action,
+                Some(PanelAction::FocusWindow(
+                    Provider::Codex,
+                    "primary".to_string()
+                ))
+            );
+
+            // The explicit radio-style focus control must use the same action
+            // as the row label, so choosing a timeframe is discoverable while
+            // the square checkbox remains visibility-only.
+            let focus_control = row_focus_rect(row.rect);
+            let focus_point = POINT {
+                x: (focus_control.left + focus_control.right) / 2,
+                y: (focus_control.top + focus_control.bottom) / 2,
+            };
+            let (action, _) = resolve_lbutton_release(&state, None, focus_point);
+            assert_eq!(
+                action,
+                Some(PanelAction::FocusWindow(
+                    Provider::Codex,
+                    "primary".to_string()
+                ))
+            );
+
+            // Eye toggle: provider visibility.
+            let eye = POINT {
+                x: (card.eye_rect.left + card.eye_rect.right) / 2,
+                y: (card.eye_rect.top + card.eye_rect.bottom) / 2,
+            };
+            let (action, _) = resolve_lbutton_release(&state, None, eye);
+            assert_eq!(action, Some(PanelAction::ToggleProvider(Provider::Codex)));
+        }
+
+        #[test]
+        fn release_with_inactive_header_gesture_focuses_provider() {
+            let state = test_state();
+            let card = state.layout.cards[0].clone();
+            let header_point = POINT {
+                x: card.rect.left + 10,
+                y: (card.rect.top + (card.rect.top + PANEL_HEADER_HEIGHT)) / 2,
+            };
+            // A press on the header started a gesture; staying under the drag
+            // threshold means the release is a header click (provider focus).
+            let drag = PanelDragState {
+                provider: Provider::Codex,
+                press_point: header_point,
+                pointer: header_point,
+                active: false,
+                origin_order: state
+                    .layout
+                    .cards
+                    .iter()
+                    .map(|card| card.provider.clone())
+                    .collect(),
+                origin_cards: state.layout.cards.clone(),
+                flow: state
+                    .layout
+                    .cards
+                    .iter()
+                    .filter(|card| card.provider != Provider::Codex)
+                    .cloned()
+                    .collect(),
+                drop_index: None,
+                drop_target: None,
+                grabbed_rect: card.rect,
+            };
+            let (action, restore) = resolve_lbutton_release(&state, Some(&drag), header_point);
+            assert_eq!(action, Some(PanelAction::FocusProvider(Provider::Codex)));
+            assert!(!restore, "a header click on the header is not a cancel");
+        }
+
+        #[test]
+        fn active_drag_release_commits_reorder_not_a_click() {
+            let state = test_state();
+            let cards = state.layout.cards.clone();
+            let origin_order: Vec<Provider> =
+                cards.iter().map(|card| card.provider.clone()).collect();
+            let flow: Vec<PanelCard> = cards
+                .iter()
+                .filter(|card| card.provider != Provider::Codex)
+                .cloned()
+                .collect();
+            let drag = PanelDragState {
+                provider: Provider::Codex,
+                press_point: POINT {
+                    x: cards[0].rect.left + 10,
+                    y: cards[0].rect.top + 10,
+                },
+                pointer: POINT {
+                    x: cards[1].rect.left + 10,
+                    y: cards[1].rect.top + 10,
+                },
+                active: true,
+                origin_order,
+                origin_cards: cards.clone(),
+                flow,
+                drop_index: None,
+                drop_target: None,
+                grabbed_rect: cards[0].rect,
+            };
+            // Releasing over the other card swaps the two providers instead of
+            // firing a click on the dragged card's slot.
+            let release = POINT {
+                x: cards[1].rect.left + 10,
+                y: cards[1].rect.top + 10,
+            };
+            let (action, restore) = resolve_lbutton_release(&state, Some(&drag), release);
+            assert!(
+                matches!(
+                    action,
+                    Some(PanelAction::Reorder(order))
+                        if order == vec![Provider::GrokApi, Provider::Codex]
+                ),
+                "dropping Codex on GrokApi must swap the two providers"
+            );
+            assert!(!restore, "a successful drop is not a cancel");
         }
     }
 }
