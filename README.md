@@ -27,9 +27,12 @@ Typical interactions:
 
 - **Click** the pill to cycle the focused provider.
 - **Hover** to see live, cached, stale, unavailable, and not-configured states.
-- **Right-click** to choose a provider or quota window, refresh, copy details,
-  open a provider's usage page, edit OpenCode reset anchors, or enable/disable
-  running automatically when Windows starts.
+- **Right-click** to choose a provider or quota window, refresh, show or hide
+  providers and rows, copy details, open a provider's usage page,
+  edit OpenCode reset anchors, or enable/disable running automatically when
+  Windows starts. Unchecking a provider hides and disables it together; the
+  compact **Disabled** toggle reveals disabled cards so they can be restored
+  without editing JSON.
 
 ## Supported providers
 
@@ -79,10 +82,10 @@ manifest say so. The package and upgrade process are documented in
 
 ### Configure providers
 
-Copy [docs/config.example.json](docs/config.example.json) to
-`%APPDATA%\AI Usage Bar\config.json`. Set `enabled` to `false` for any hosted
-provider you do not want to query. Provider credentials remain in the provider's
-own local CLI/session store.
+The provider panel is the preferred way to enable or disable hosted providers:
+uncheck a provider to hide it and stop its refreshes, then turn on **Disabled**
+to restore it later. Provider credentials remain in the provider's own local
+CLI/session store. The JSON file is still available for advanced configuration.
 
 ### Build from source
 

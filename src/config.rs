@@ -30,6 +30,10 @@ fn default_view_version() -> u32 {
     VIEW_VERSION
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_provider_enabled() -> bool {
     true
 }
@@ -37,8 +41,8 @@ fn default_provider_enabled() -> bool {
 /// Per-provider settings persisted in the user configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSettings {
-    /// Whether this provider should be scheduled for refresh. Display
-    /// visibility is controlled independently by [`AppConfig::view`].
+    /// Whether this provider should be scheduled for refresh. The shell keeps
+    /// this in sync with the provider-level hide control in [`AppConfig::view`].
     #[serde(default = "default_provider_enabled")]
     pub enabled: bool,
     /// Optional next weekly reset anchor for OpenCode Go, in UTC.
@@ -79,14 +83,14 @@ pub struct ProviderViewSettings {
     pub metric_kinds: Option<Vec<String>>,
 }
 
-/// Versioned, display-only preferences persisted in [`AppConfig::view`].
+/// Versioned view preferences persisted in [`AppConfig::view`]. Provider-level
+/// visibility is paired with enablement by the shell so a hidden provider is
+/// not refreshed in the background.
 ///
-/// This section never affects provider refresh scheduling: provider
-/// `enabled` remains the query/refresh switch, and a provider can be enabled
-/// but hidden (or visible but disabled). Unknown provider/window/metric
-/// identifiers are ignored during resolution, and because the section is
-/// display-only, an unsupported `version` falls back to defaults instead of
-/// failing the whole configuration.
+/// The shell uses provider visibility and `enabled` together so a hidden
+/// provider is not refreshed. Unknown provider/window/metric identifiers are
+/// ignored during resolution, and an unsupported `version` falls back to
+/// defaults instead of failing the whole configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewSettings {
     #[serde(default = "default_view_version")]
@@ -96,10 +100,14 @@ pub struct ViewSettings {
     /// the caller's existing order after them. Unknown providers are dropped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_order: Vec<String>,
-    /// Providers hidden from the expanded view. They remain enabled and are
-    /// still refreshed by the daemon.
+    /// Providers hidden from the expanded view. The shell also disables these
+    /// providers so hiding a provider stops its refresh work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_providers: Vec<String>,
+    /// Whether disabled providers should be shown in the expanded view. The
+    /// default keeps the panel focused on providers that are enabled.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_disabled_providers: bool,
     /// Per-provider window/metric visibility, keyed by provider identifier.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderViewSettings>,
@@ -118,6 +126,7 @@ impl Default for ViewSettings {
             version: VIEW_VERSION,
             provider_order: Vec::new(),
             hidden_providers: Vec::new(),
+            show_disabled_providers: false,
             providers: BTreeMap::new(),
             default_provider: None,
             default_window: None,
@@ -125,7 +134,8 @@ impl Default for ViewSettings {
     }
 }
 
-/// Display preferences resolved against the compiled provider model.
+/// Display and provider-control preferences resolved against the compiled
+/// provider model.
 ///
 /// Resolution is deterministic: unknown identifiers are dropped, duplicates
 /// are collapsed, and contradictions fall back (a hidden or unknown default
@@ -138,8 +148,11 @@ pub struct ResolvedView {
     /// Known providers listed by the user, in their configured order. The
     /// caller appends any available providers not listed here.
     pub provider_order: Option<Vec<Provider>>,
-    /// Known providers hidden from display. They remain eligible for refresh.
+    /// Known providers hidden from display. The shell treats these as
+    /// disabled for scheduling as well.
     pub hidden_providers: Vec<Provider>,
+    /// Whether disabled providers should be included in the expanded view.
+    pub show_disabled_providers: bool,
     /// Per-provider visible quota-window filters. `None` means all windows;
     /// an empty list is an explicit hide-all choice.
     pub visible_windows: BTreeMap<Provider, Vec<String>>,
@@ -261,6 +274,7 @@ impl ResolvedView {
         Self {
             provider_order,
             hidden_providers,
+            show_disabled_providers: view.show_disabled_providers,
             visible_windows,
             visible_metrics,
             default_provider,
@@ -311,8 +325,9 @@ pub struct AppConfig {
     pub version: u32,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderSettings>,
-    /// Display-only preferences. Absent keeps the current display behavior;
-    /// never stored when unset so existing config files stay compatible.
+    /// View and provider-control preferences. Absent keeps the current
+    /// display behavior; never stored when unset so existing config files stay
+    /// compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<ViewSettings>,
 }
@@ -448,13 +463,19 @@ impl AppConfig {
 
     /// Replace the persisted set of providers hidden from display.
     ///
-    /// Hidden providers remain enabled and are still refreshed. Pass an empty
-    /// slice to show every provider again.
+    /// The shell pairs this with provider enablement when the user clicks a
+    /// provider control. Pass an empty slice to show every provider again.
     pub fn set_view_hidden_providers(&mut self, hidden: &[Provider]) {
         self.ensure_view().hidden_providers = hidden
             .iter()
             .map(|provider| provider.as_str().to_string())
             .collect();
+    }
+
+    /// Persist whether disabled providers should be shown in the expanded
+    /// provider panel.
+    pub fn set_view_show_disabled_providers(&mut self, show: bool) {
+        self.ensure_view().show_disabled_providers = show;
     }
 
     /// Set the quota windows shown for one provider.
@@ -684,14 +705,21 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
         registry.register_not_configured(Provider::Kimi)?;
     }
 
-    for provider in [
+    let providers = [
         Provider::Codex,
         Provider::GrokConsumer,
         Provider::OllamaCloud,
         Provider::Kimi,
         Provider::OpenCodeGo,
-    ] {
-        registry.set_enabled(&provider, config.provider_enabled(&provider))?;
+    ];
+    // A persisted hidden provider may come from an older build where hiding
+    // was display-only. Treat it as disabled at bootstrap so the new control
+    // never leaves a hidden adapter refreshing in the background.
+    let resolved_view = config.resolved_view(&providers);
+    for provider in &providers {
+        let enabled =
+            config.provider_enabled(provider) && !resolved_view.is_provider_hidden(provider);
+        registry.set_enabled(provider, enabled)?;
     }
 
     Ok(registry)
@@ -774,6 +802,7 @@ mod tests {
         let mut config = AppConfig::default();
         config.set_view_provider_order(&[Provider::Kimi, Provider::Codex]);
         config.set_view_hidden_providers(&[Provider::GrokConsumer]);
+        config.set_view_show_disabled_providers(true);
         config.set_view_visible_windows(&Provider::Kimi, Some(&["5-hour", "weekly"]));
         config.set_view_visible_metrics(
             &Provider::Codex,
@@ -790,6 +819,7 @@ mod tests {
             Some(vec![Provider::Kimi, Provider::Codex])
         );
         assert_eq!(resolved.hidden_providers, vec![Provider::GrokConsumer]);
+        assert!(resolved.show_disabled_providers);
         assert_eq!(
             resolved.windows_for(&Provider::Kimi),
             Some(["5-hour".to_string(), "weekly".to_string()].as_slice())
@@ -827,10 +857,12 @@ mod tests {
         );
 
         config.set_view_hidden_providers(&[]);
+        config.set_view_show_disabled_providers(false);
         config.set_view_visible_windows(&Provider::OllamaCloud, None);
         config.set_view_visible_metrics(&Provider::OllamaCloud, None);
         let restored = config.resolved_view(&available);
         assert!(restored.hidden_providers.is_empty());
+        assert!(!restored.show_disabled_providers);
         assert!(restored.windows_for(&Provider::OllamaCloud).is_none());
         assert!(restored.metrics_for(&Provider::OllamaCloud).is_none());
     }
@@ -878,6 +910,16 @@ mod tests {
             config.resolved_view(&[Provider::Codex]),
             ResolvedView::default()
         );
+    }
+
+    #[test]
+    fn hidden_provider_is_disabled_at_registry_bootstrap() {
+        let mut config = AppConfig::default();
+        config.set_view_hidden_providers(&[Provider::Codex]);
+
+        let registry = build_registry(&config).unwrap();
+
+        assert!(!registry.is_enabled(&Provider::Codex).unwrap());
     }
 
     #[test]
