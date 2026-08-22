@@ -1,0 +1,57 @@
+{
+  "_description": "Redacted fixture: Codex rate limits with the separate gpt-reserve/base_model_inference bucket that the usage bar ignores.",
+  "_source": "codex app-server --listen stdio:// | method: account/rateLimits/read",
+  "_capturedAt": "2026-08-22T00:00:00Z",
+  "id": "rl1",
+  "result": {
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 15,
+        "windowDurationMins": 10080,
+        "resetsAt": 1787840212
+      },
+      "secondary": null,
+      "credits": {
+        "hasCredits": false,
+        "unlimited": false,
+        "balance": "0"
+      },
+      "planType": "plus",
+      "rateLimitReachedType": null
+    },
+    "rateLimitsByLimitId": {
+      "base_model_inference": {
+        "limitId": "base_model_inference",
+        "limitName": "gpt-reserve",
+        "primary": {
+          "usedPercent": 0,
+          "windowDurationMins": 10080,
+          "resetsAt": 1788001400
+        },
+        "secondary": null,
+        "credits": null,
+        "planType": "plus",
+        "rateLimitReachedType": null
+      },
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": {
+          "usedPercent": 15,
+          "windowDurationMins": 10080,
+          "resetsAt": 1787840212
+        },
+        "secondary": null,
+        "credits": {
+          "hasCredits": false,
+          "unlimited": false,
+          "balance": "0"
+        },
+        "planType": "plus",
+        "rateLimitReachedType": null
+      }
+    }
+  }
+}
