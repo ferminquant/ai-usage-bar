@@ -5,6 +5,8 @@ use serde::Deserialize;
 const CODEX_PROVIDER: Provider = Provider::Codex;
 const CODEX_SOURCE: Source = Source::Cli;
 const CODEX_CONFIDENCE: Confidence = Confidence::Exact;
+const IGNORED_RATE_LIMIT_ID: &str = "base_model_inference";
+const IGNORED_RATE_LIMIT_NAME: &str = "gpt-reserve";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodexAdapter;
@@ -232,6 +234,17 @@ fn parse_snapshot(
     Ok(out)
 }
 
+fn is_ignored_rate_limit_bucket(map_key: Option<&str>, snap: &RateLimitSnapshot) -> bool {
+    [map_key, snap.limit_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| value.eq_ignore_ascii_case(IGNORED_RATE_LIMIT_ID))
+        || snap
+            .limit_name
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(IGNORED_RATE_LIMIT_NAME))
+}
+
 pub fn parse_rate_limits_response(
     raw: &serde_json::Value,
     observed_at: DateTime<Utc>,
@@ -242,7 +255,13 @@ pub fn parse_rate_limits_response(
 
     let snapshots = if let Some(by_id) = resp.rate_limits_by_limit_id {
         let mut all = Vec::new();
-        for (_id, snap) in by_id {
+        for (id, snap) in by_id {
+            // The web UI currently exposes this separate internal reserve
+            // bucket. It is not part of the Codex usage bar, so keep it out
+            // of the shared snapshot stream before it reaches the viewmodel.
+            if is_ignored_rate_limit_bucket(Some(&id), &snap) {
+                continue;
+            }
             all.extend(
                 parse_snapshot(&snap, account_id, observed_at)
                     .map_err(CodexAdapterError::SchemaDrift)?,
@@ -250,7 +269,12 @@ pub fn parse_rate_limits_response(
         }
         all
     } else if let Some(snap) = resp.rate_limits {
-        parse_snapshot(&snap, account_id, observed_at).map_err(CodexAdapterError::SchemaDrift)?
+        if is_ignored_rate_limit_bucket(None, &snap) {
+            Vec::new()
+        } else {
+            parse_snapshot(&snap, account_id, observed_at)
+                .map_err(CodexAdapterError::SchemaDrift)?
+        }
     } else {
         return Err(CodexAdapterError::SchemaDrift(
             "no rateLimits or rateLimitsByLimitId".to_string(),
@@ -535,6 +559,22 @@ mod tests {
         assert_eq!(primary.window_kind, WindowKind::Weekly);
         assert_eq!(secondary.used, Some(80.0));
         assert_eq!(secondary.window_kind, WindowKind::Daily);
+    }
+
+    #[test]
+    fn ignores_gpt_reserve_bucket() {
+        let raw = load_fixture("ignored_reserve_bucket.json");
+        let snaps = parse_rate_limits_response(&raw, fixture_time(), "codex-test").unwrap();
+
+        assert_eq!(snaps.len(), 2);
+        let quotas: Vec<_> = snaps
+            .iter()
+            .filter(|snapshot| snapshot.metric_kind == MetricKind::Quota)
+            .collect();
+        assert_eq!(quotas.len(), 1);
+        let primary = quotas[0];
+        assert_eq!(primary.used, Some(15.0));
+        assert_eq!(primary.window_label.as_deref(), Some("primary"));
     }
 
     #[test]
