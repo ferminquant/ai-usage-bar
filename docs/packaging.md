@@ -108,6 +108,15 @@ unless `-SkipStartup` is supplied. The preference is kept separately from the
 command so an external cleanup cannot turn an enabled installation into a
 silent opt-out.
 
+For installs created before the durable preference existed, the installer has
+no recorded "disabled" signal and can only infer the intent from the previous
+state file: if it recorded startup as registered, an upgrade treats a missing
+`Run` value as a lost registration and repairs it. This is what makes repair
+possible, but it also means a user who disabled startup before the preference
+existed and then upgraded could have startup re-enabled once. Such installs
+self-correct immediately if the user opens the shell menu and toggles startup
+off again; the preference is written from that point on.
+
 ## Verify and install a published release
 
 Published releases remain manual. They may be Authenticode-signed or explicitly
