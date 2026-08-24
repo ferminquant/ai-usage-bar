@@ -39,6 +39,20 @@ pub fn startup_value_matches_executable(value: &str, executable: &Path) -> bool 
     startup_path.eq_ignore_ascii_case(executable.to_string_lossy().as_ref())
 }
 
+/// Interpret a `REG_DWORD` startup-preference value.
+///
+/// Values outside {0, 1} are not values this app wrote and are treated as "no
+/// preference recorded" so a single corrupted DWORD cannot wedge the toggle.
+/// This mirrors `Get-StartupPreference` in the installer.
+#[cfg(windows)]
+fn dword_to_startup_preference(value: u32) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 #[cfg(windows)]
 mod windows_registry {
     use super::{startup_value_matches_executable, STARTUP_VALUE_NAME};
@@ -265,13 +279,10 @@ mod windows_registry {
         }
         // Re-validate the value type against the buffer we just read into so a
         // concurrent writer cannot smuggle a non-REG_DWORD value past us.
-        if value_type != REG_DWORD
-            || actual_byte_count != std::mem::size_of::<u32>() as u32
-            || value > 1
-        {
+        if value_type != REG_DWORD || actual_byte_count != std::mem::size_of::<u32>() as u32 {
             return Err(StartupError::InvalidValue);
         }
-        Ok(Some(value != 0))
+        Ok(super::dword_to_startup_preference(value))
     }
 
     fn open_preference_key(
@@ -431,6 +442,9 @@ mod tests {
     use super::{startup_command_path, startup_value_matches_executable};
     use std::path::Path;
 
+    #[cfg(windows)]
+    use super::dword_to_startup_preference;
+
     #[test]
     fn parses_quoted_and_unquoted_run_commands() {
         assert_eq!(
@@ -455,5 +469,17 @@ mod tests {
             r#""C:\Other\ai-usage-bar-shell.exe""#,
             executable,
         ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn startup_preference_dword_mapping() {
+        assert_eq!(dword_to_startup_preference(0), Some(false));
+        assert_eq!(dword_to_startup_preference(1), Some(true));
+        // Anything outside {0, 1} means "no preference recorded", matching
+        // Get-StartupPreference in the installer, so a corrupted DWORD cannot
+        // wedge the startup toggle.
+        assert_eq!(dword_to_startup_preference(2), None);
+        assert_eq!(dword_to_startup_preference(u32::MAX), None);
     }
 }

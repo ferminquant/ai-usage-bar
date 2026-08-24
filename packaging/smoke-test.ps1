@@ -89,7 +89,16 @@ function Get-StartupPreference {
     if ($null -eq $property) {
         return $null
     }
-    return ([int]$property.$startupPreferenceValueName -eq 1)
+    $raw = $property.$startupPreferenceValueName
+    if ($raw -is [bool]) {
+        return $raw
+    }
+    if ($raw -eq 0 -or $raw -eq 1) {
+        return ([int]$raw -eq 1)
+    }
+    # Mirror install.ps1 and src/startup.rs: an out-of-range DWORD means
+    # "no preference recorded", not a boolean.
+    return $null
 }
 
 function Set-StartupPreference {
@@ -105,10 +114,9 @@ $savedStartupPreferencePresent = $false
 $savedStartupPreference = $null
 $savedStartupPreferenceKeyPresent = Test-Path -LiteralPath $startupPreferenceKey
 if ($savedStartupPreferenceKeyPresent) {
-    $savedPreferenceProperty = Get-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
-    if ($null -ne $savedPreferenceProperty) {
+    $savedStartupPreference = Get-StartupPreference
+    if ($null -ne $savedStartupPreference) {
         $savedStartupPreferencePresent = $true
-        $savedStartupPreference = ([int]$savedPreferenceProperty.$startupPreferenceValueName -eq 1)
     }
 }
 $savedPreservationSentinelPresent = $false
