@@ -44,6 +44,7 @@ pub fn startup_value_matches_executable(value: &str, executable: &Path) -> bool 
 /// Values outside {0, 1} are not values this app wrote and are treated as "no
 /// preference recorded" so a single corrupted DWORD cannot wedge the toggle.
 /// This mirrors `Get-StartupPreference` in the installer.
+#[cfg(windows)]
 fn dword_to_startup_preference(value: u32) -> Option<bool> {
     match value {
         0 => Some(false),
