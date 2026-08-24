@@ -102,8 +102,11 @@ the same per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 entry used by the installer and shows a checkmark when the current shell is
 registered. Disabling it removes only an entry that points to this shell. A
 conflicting entry is left untouched and reported as an error. Upgrades
-preserve a disabled startup preference; a first install enables startup by
-default unless `-SkipStartup` is supplied.
+preserve a disabled startup preference and repair a missing `Run` value when
+startup was previously enabled; a first install enables startup by default
+unless `-SkipStartup` is supplied. The preference is kept separately from the
+command so an external cleanup cannot turn an enabled installation into a
+silent opt-out.
 
 ## Verify and install a published release
 
