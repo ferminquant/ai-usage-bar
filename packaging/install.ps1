@@ -322,6 +322,11 @@ try {
     }
 
     if ($registerStartup) {
+        # Installer writes the Run value before the preference. This is the
+        # opposite order to src/startup.rs's set_auto_start_enabled (which writes
+        # the preference first). Both restore the previous preference on failure
+        # so the two records cannot drift apart; the ordering difference is kept
+        # intentional here so each path owns its own rollback state.
         Set-RunValue -Name $StartupValueName -Value $expectedStartup
         $startupChanged = $true
     }

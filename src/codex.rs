@@ -234,15 +234,34 @@ fn parse_snapshot(
     Ok(out)
 }
 
+/// Ignore the Codex web UI's separate internal `base_model_inference`
+/// (gpt-reserve) bucket. `limit_id` is the stable, machine-readable key; the
+/// display name is only a secondary signal so a user-facing bucket that
+/// happens to reuse the name is never silently dropped.
 fn is_ignored_rate_limit_bucket(map_key: Option<&str>, snap: &RateLimitSnapshot) -> bool {
-    [map_key, snap.limit_id.as_deref()]
+    let id_matches = [map_key, snap.limit_id.as_deref()]
         .into_iter()
         .flatten()
-        .any(|value| value.eq_ignore_ascii_case(IGNORED_RATE_LIMIT_ID))
-        || snap
-            .limit_name
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case(IGNORED_RATE_LIMIT_NAME))
+        .any(|value| value.eq_ignore_ascii_case(IGNORED_RATE_LIMIT_ID));
+    if id_matches {
+        return true;
+    }
+
+    // A name-only match is unexpected: the reserve bucket always carries the
+    // stable id above. Surface it so the filter can be revisited instead of
+    // silently dropping a bucket that may actually be user-facing.
+    if snap
+        .limit_name
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case(IGNORED_RATE_LIMIT_NAME))
+    {
+        eprintln!(
+            "ai-usage-bar: codex bucket has reserve name {:?} but not the reserve limit id {:?}; not ignoring",
+            snap.limit_name.as_deref(),
+            IGNORED_RATE_LIMIT_ID
+        );
+    }
+    false
 }
 
 pub fn parse_rate_limits_response(
@@ -269,6 +288,11 @@ pub fn parse_rate_limits_response(
         }
         all
     } else if let Some(snap) = resp.rate_limits {
+        // Both this singular path and the map branch above may legitimately
+        // yield an empty stream when every returned bucket is the ignored
+        // internal reserve bucket. That mirrors the map path rather than
+        // signalling an error: the adapter saw a healthy response, just nothing
+        // the usage bar tracks.
         if is_ignored_rate_limit_bucket(None, &snap) {
             Vec::new()
         } else {
@@ -575,6 +599,15 @@ mod tests {
         let primary = quotas[0];
         assert_eq!(primary.used, Some(15.0));
         assert_eq!(primary.window_label.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn ignores_singular_reserve_bucket() {
+        // A response whose singular `rateLimits` is only the ignored reserve
+        // bucket must produce no snapshots (matching the map branch).
+        let raw = load_fixture("ignored_singular_reserve_bucket.json");
+        let snaps = parse_rate_limits_response(&raw, fixture_time(), "codex-test").unwrap();
+        assert!(snaps.is_empty());
     }
 
     #[test]

@@ -39,6 +39,19 @@ pub fn startup_value_matches_executable(value: &str, executable: &Path) -> bool 
     startup_path.eq_ignore_ascii_case(executable.to_string_lossy().as_ref())
 }
 
+/// Interpret a `REG_DWORD` startup-preference value.
+///
+/// Values outside {0, 1} are not values this app wrote and are treated as "no
+/// preference recorded" so a single corrupted DWORD cannot wedge the toggle.
+/// This mirrors `Get-StartupPreference` in the installer.
+fn dword_to_startup_preference(value: u32) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 #[cfg(windows)]
 mod windows_registry {
     use super::{startup_value_matches_executable, STARTUP_VALUE_NAME};
@@ -263,10 +276,10 @@ mod windows_registry {
         if status != ERROR_SUCCESS {
             return Err(registry_error(status));
         }
-        if actual_byte_count != std::mem::size_of::<u32>() as u32 || value > 1 {
+        if actual_byte_count != std::mem::size_of::<u32>() as u32 {
             return Err(StartupError::InvalidValue);
         }
-        Ok(Some(value != 0))
+        Ok(super::dword_to_startup_preference(value))
     }
 
     fn open_preference_key(
@@ -308,7 +321,9 @@ mod windows_registry {
         let key = create_preference_key(KEY_SET_VALUE)?;
         let value_name_units = preference_value_name();
         let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
-        let value = u32::from(enabled).to_ne_bytes();
+        // REG_DWORD is little-endian per the registry contract, independent of
+        // host endianness. Use an explicit little-endian encoding.
+        let value = u32::from(enabled).to_le_bytes();
         let status = unsafe { RegSetValueExW(key.0, value_name, None, REG_DWORD, Some(&value)) };
         if status != ERROR_SUCCESS {
             return Err(registry_error(status));
@@ -416,7 +431,9 @@ pub use windows_registry::{auto_start_enabled, set_auto_start_enabled, StartupEr
 
 #[cfg(test)]
 mod tests {
-    use super::{startup_command_path, startup_value_matches_executable};
+    use super::{
+        dword_to_startup_preference, startup_command_path, startup_value_matches_executable,
+    };
     use std::path::Path;
 
     #[test]
@@ -443,5 +460,16 @@ mod tests {
             r#""C:\Other\ai-usage-bar-shell.exe""#,
             executable,
         ));
+    }
+
+    #[test]
+    fn startup_preference_dword_mapping() {
+        assert_eq!(dword_to_startup_preference(0), Some(false));
+        assert_eq!(dword_to_startup_preference(1), Some(true));
+        // Anything outside {0, 1} means "no preference recorded", matching
+        // Get-StartupPreference in the installer, so a corrupted DWORD cannot
+        // wedge the startup toggle.
+        assert_eq!(dword_to_startup_preference(2), None);
+        assert_eq!(dword_to_startup_preference(u32::MAX), None);
     }
 }
