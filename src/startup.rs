@@ -8,6 +8,13 @@ use std::path::Path;
 
 pub const STARTUP_VALUE_NAME: &str = "AI Usage Bar";
 
+/// Registry value used to remember the user's startup preference separately
+/// from the executable command. Windows or another cleanup tool can remove a
+/// `Run` value; keeping the preference in our own key lets the installer
+/// restore that command without silently re-enabling a user who deliberately
+/// turned startup off.
+pub const STARTUP_PREFERENCE_VALUE_NAME: &str = "StartupEnabled";
+
 /// Extract the executable path from a Windows `Run` command value.
 ///
 /// AI Usage Bar writes a quoted path with no arguments. The small amount of
@@ -42,11 +49,12 @@ mod windows_registry {
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
-        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ, REG_NONE,
-        REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_EXPAND_SZ,
+        REG_NONE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
     const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    const PREFERENCE_KEY: windows::core::PCWSTR = w!("Software\\AI Usage Bar");
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum StartupError {
@@ -64,8 +72,10 @@ mod windows_registry {
                     write!(formatter, "could not determine the current executable")
                 }
                 Self::Registry(code) => write!(formatter, "Windows registry error {code}"),
-                Self::InvalidValueType => write!(formatter, "startup value is not a string"),
-                Self::InvalidValue => write!(formatter, "startup value is malformed"),
+                Self::InvalidValueType => {
+                    write!(formatter, "startup registry value has an invalid type")
+                }
+                Self::InvalidValue => write!(formatter, "startup registry value is malformed"),
                 Self::OwnedByAnotherExecutable => write!(
                     formatter,
                     "startup entry is owned by another executable; reinstall or repair it first"
@@ -201,6 +211,137 @@ mod windows_registry {
         STARTUP_VALUE_NAME.encode_utf16().chain(Some(0)).collect()
     }
 
+    fn preference_value_name() -> Vec<u16> {
+        super::STARTUP_PREFERENCE_VALUE_NAME
+            .encode_utf16()
+            .chain(Some(0))
+            .collect()
+    }
+
+    fn read_startup_preference() -> Result<Option<bool>, StartupError> {
+        let key = match open_preference_key(KEY_READ) {
+            Ok(key) => key,
+            Err(StartupError::Registry(code)) if code == ERROR_FILE_NOT_FOUND.0 => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let value_name_units = preference_value_name();
+        let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
+        let mut value_type = REG_NONE;
+        let mut byte_count = 0u32;
+        let status = unsafe {
+            RegQueryValueExW(
+                key.0,
+                value_name,
+                None,
+                Some(&mut value_type),
+                None,
+                Some(&mut byte_count),
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        if value_type != REG_DWORD || byte_count != std::mem::size_of::<u32>() as u32 {
+            return Err(StartupError::InvalidValueType);
+        }
+
+        let mut value = 0u32;
+        let mut actual_byte_count = byte_count;
+        let status = unsafe {
+            RegQueryValueExW(
+                key.0,
+                value_name,
+                None,
+                Some(&mut value_type),
+                Some((&mut value as *mut u32).cast()),
+                Some(&mut actual_byte_count),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        if actual_byte_count != std::mem::size_of::<u32>() as u32 || value > 1 {
+            return Err(StartupError::InvalidValue);
+        }
+        Ok(Some(value != 0))
+    }
+
+    fn open_preference_key(
+        access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    ) -> Result<RegistryKey, StartupError> {
+        let mut key = HKEY::default();
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PREFERENCE_KEY, None, access, &mut key) };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        Ok(RegistryKey(key))
+    }
+
+    fn create_preference_key(
+        access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    ) -> Result<RegistryKey, StartupError> {
+        let mut key = HKEY::default();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PREFERENCE_KEY,
+                None,
+                w!(""),
+                REG_OPTION_NON_VOLATILE,
+                access,
+                None,
+                &mut key,
+                None,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        Ok(RegistryKey(key))
+    }
+
+    fn write_startup_preference(enabled: bool) -> Result<(), StartupError> {
+        let key = create_preference_key(KEY_SET_VALUE)?;
+        let value_name_units = preference_value_name();
+        let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
+        let value = u32::from(enabled).to_ne_bytes();
+        let status = unsafe { RegSetValueExW(key.0, value_name, None, REG_DWORD, Some(&value)) };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        Ok(())
+    }
+
+    fn delete_startup_preference() -> Result<(), StartupError> {
+        let key = match open_preference_key(KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(StartupError::Registry(code)) if code == ERROR_FILE_NOT_FOUND.0 => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let value_name_units = preference_value_name();
+        let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
+        let status = unsafe { RegDeleteValueW(key.0, value_name) };
+        if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
+            return Err(registry_error(status));
+        }
+        Ok(())
+    }
+
+    fn restore_startup_preference(previous: Option<bool>) {
+        match previous {
+            Some(enabled) => {
+                let _ = write_startup_preference(enabled);
+            }
+            None => {
+                let _ = delete_startup_preference();
+            }
+        }
+    }
+
     pub fn auto_start_enabled() -> Result<bool, StartupError> {
         let Some(value) = read_startup_value()? else {
             return Ok(false);
@@ -214,33 +355,56 @@ mod windows_registry {
     pub fn set_auto_start_enabled(enabled: bool) -> Result<(), StartupError> {
         let executable = current_executable()?;
         let existing = read_startup_value()?;
+        let previous_preference = read_startup_preference()?;
         let value_name_units = value_name();
         let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
-
-        if !enabled {
-            let Some(existing) = existing.as_ref() else {
-                return Ok(());
-            };
-            if !startup_value_matches_executable(existing, &executable) {
-                return Err(StartupError::OwnedByAnotherExecutable);
-            }
-            let key = open_run_key(KEY_SET_VALUE)?;
-            let status = unsafe { RegDeleteValueW(key.0, value_name) };
-            if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
-                return Err(registry_error(status));
-            }
-            return Ok(());
-        }
 
         if let Some(existing) = existing.as_ref() {
             if !startup_value_matches_executable(existing, &executable) {
                 return Err(StartupError::OwnedByAnotherExecutable);
             }
         }
-        let key = create_run_key(KEY_SET_VALUE)?;
-        let command = command_for(&executable)?;
+
+        // Update the preference first. If the Run-key operation fails, put the
+        // previous preference back so the two records cannot drift apart.
+        write_startup_preference(enabled)?;
+
+        if !enabled {
+            if existing.is_none() {
+                return Ok(());
+            }
+            let key = match open_run_key(KEY_SET_VALUE) {
+                Ok(key) => key,
+                Err(error) => {
+                    restore_startup_preference(previous_preference);
+                    return Err(error);
+                }
+            };
+            let status = unsafe { RegDeleteValueW(key.0, value_name) };
+            if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
+                restore_startup_preference(previous_preference);
+                return Err(registry_error(status));
+            }
+            return Ok(());
+        }
+
+        let key = match create_run_key(KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(error) => {
+                restore_startup_preference(previous_preference);
+                return Err(error);
+            }
+        };
+        let command = match command_for(&executable) {
+            Ok(command) => command,
+            Err(error) => {
+                restore_startup_preference(previous_preference);
+                return Err(error);
+            }
+        };
         let status = unsafe { RegSetValueExW(key.0, value_name, None, REG_SZ, Some(&command)) };
         if status != ERROR_SUCCESS {
+            restore_startup_preference(previous_preference);
             return Err(registry_error(status));
         }
         Ok(())

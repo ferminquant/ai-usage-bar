@@ -74,6 +74,8 @@ function Stop-InstalledShell {
 }
 
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupPreferenceKey = "HKCU:\Software\AI Usage Bar"
+$startupPreferenceValueName = "StartupEnabled"
 $expectedStartup = '"' + (Join-Path $InstallRoot "ai-usage-bar-shell.exe") + '"'
 $registeredStartup = $null
 if (Test-Path -LiteralPath $runKey) {
@@ -92,6 +94,9 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Stop AI Usage Bar and remove installe
         $registeredStartup.Trim('"') -ieq $expectedStartup.Trim('"') -and
         (Test-Path -LiteralPath $runKey)) {
         Remove-ItemProperty -LiteralPath $runKey -Name $StartupValueName -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $startupPreferenceKey) {
+        Remove-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
     }
 
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force

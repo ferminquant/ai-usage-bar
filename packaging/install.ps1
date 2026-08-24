@@ -101,7 +101,9 @@ function Set-RunValue {
         [string]$Value
     )
     $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    New-Item -Path $runKey -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $runKey)) {
+        New-Item -Path $runKey -Force | Out-Null
+    }
     New-ItemProperty -LiteralPath $runKey -Name $Name -Value $Value -PropertyType String -Force | Out-Null
 }
 
@@ -110,6 +112,51 @@ function Remove-RunValue {
     $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     if (Test-Path -LiteralPath $runKey) {
         Remove-ItemProperty -LiteralPath $runKey -Name $Name -ErrorAction SilentlyContinue
+    }
+}
+
+$startupPreferenceKey = "HKCU:\Software\AI Usage Bar"
+$startupPreferenceValueName = "StartupEnabled"
+
+function Get-StartupPreference {
+    if (-not (Test-Path -LiteralPath $startupPreferenceKey)) {
+        return $null
+    }
+    $property = Get-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+    if ($null -eq $property) {
+        return $null
+    }
+    $raw = $property.$startupPreferenceValueName
+    if ($raw -is [bool]) {
+        return $raw
+    }
+    if ($raw -eq 0 -or $raw -eq 1) {
+        return ([int]$raw -eq 1)
+    }
+    return $null
+}
+
+function Set-StartupPreference {
+    param([bool]$Enabled)
+    if (-not (Test-Path -LiteralPath $startupPreferenceKey)) {
+        New-Item -Path $startupPreferenceKey -Force | Out-Null
+    }
+    New-ItemProperty -LiteralPath $startupPreferenceKey `
+        -Name $startupPreferenceValueName -Value ([int]$Enabled) -PropertyType DWord -Force | Out-Null
+}
+
+function Remove-StartupPreference {
+    if (Test-Path -LiteralPath $startupPreferenceKey) {
+        Remove-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+    }
+}
+
+function Restore-StartupPreference {
+    param($Preference)
+    if ($null -eq $Preference) {
+        Remove-StartupPreference
+    } else {
+        Set-StartupPreference -Enabled ([bool]$Preference)
     }
 }
 
@@ -184,6 +231,19 @@ if (-not $checksumByPath.ContainsKey("package-manifest.json") -or
 
 $existingManifest = Join-Path $InstallRoot "package-manifest.json"
 $existingInstallation = Test-Path -LiteralPath $existingManifest -PathType Leaf
+$existingState = $null
+$existingStatePath = Join-Path $InstallRoot "install-state.json"
+if ($existingInstallation -and (Test-Path -LiteralPath $existingStatePath -PathType Leaf)) {
+    try {
+        $candidateState = Get-Content -LiteralPath $existingStatePath -Raw | ConvertFrom-Json
+        if ($candidateState.product -eq "AI Usage Bar" -and [int]$candidateState.schema_version -eq 1) {
+            $existingState = $candidateState
+        }
+    } catch {
+        # The manifest remains the authoritative installation marker. A
+        # malformed state file should not prevent a repair install.
+    }
+}
 if (Test-Path -LiteralPath $InstallRoot) {
     $existingChildren = @(Get-ChildItem -LiteralPath $InstallRoot -Force)
     if ($existingChildren.Count -gt 0 -and -not (Test-Path -LiteralPath $existingManifest -PathType Leaf)) {
@@ -193,9 +253,29 @@ if (Test-Path -LiteralPath $InstallRoot) {
 
 $expectedStartup = '"' + (Join-Path $InstallRoot "ai-usage-bar-shell.exe") + '"'
 $previousStartup = Get-RunValue -Name $StartupValueName
+$previousPreference = Get-StartupPreference
+if ($null -eq $previousPreference -and $null -ne $existingState) {
+    if ($existingState.PSObject.Properties.Name -contains "startup_enabled") {
+        $previousPreference = [bool]$existingState.startup_enabled
+    } elseif ($existingState.PSObject.Properties.Name -contains "startup_value_name" -and
+        -not [string]::IsNullOrWhiteSpace([string]$existingState.startup_value_name)) {
+        # Migrate pre-preference installations that recorded startup as
+        # enabled even though the Run value was later lost.
+        $previousPreference = $true
+    } else {
+        $previousPreference = $false
+    }
+}
+if ($null -eq $previousPreference -and $existingInstallation) {
+    # A manifest-only/legacy installation has no durable preference. Preserve
+    # the old behavior: an existing Run value means enabled; no value means
+    # the user opted out.
+    $previousPreference = -not [string]::IsNullOrWhiteSpace($previousStartup)
+}
 $preserveStartupDisabled = $existingInstallation -and
-    [string]::IsNullOrWhiteSpace($previousStartup) -and -not $Force
+    $null -ne $previousPreference -and -not [bool]$previousPreference -and -not $Force
 $registerStartup = -not $SkipStartup -and -not $preserveStartupDisabled
+$startupEnabledAfterInstall = $registerStartup
 if ($registerStartup -and -not $Force -and
     -not [string]::IsNullOrWhiteSpace($previousStartup) -and
     $previousStartup.Trim('"') -ine $expectedStartup.Trim('"')) {
@@ -211,6 +291,7 @@ $failedRoot = "$InstallRoot.__failed_$runId"
 $oldInstallMoved = $false
 $newInstallMoved = $false
 $startupChanged = $false
+$startupPreferenceChanged = $false
 $rollbackRestored = $false
 $backupCleanupAllowed = $false
 $installSucceeded = $false
@@ -243,9 +324,11 @@ try {
     if ($registerStartup) {
         Set-RunValue -Name $StartupValueName -Value $expectedStartup
         $startupChanged = $true
-        if ($TestFailureMode -eq "after-startup") {
-            throw "Synthetic install failure after startup registration"
-        }
+    }
+    Set-StartupPreference -Enabled $startupEnabledAfterInstall
+    $startupPreferenceChanged = $true
+    if ($TestFailureMode -eq "after-startup") {
+        throw "Synthetic install failure after startup registration"
     }
 
     $state = [ordered]@{
@@ -255,6 +338,7 @@ try {
         installed_at_utc = (Get-Date).ToUniversalTime().ToString("o")
         install_root = $InstallRoot
         startup_value_name = if ($registerStartup) { $StartupValueName } else { $null }
+        startup_enabled = [bool]$startupEnabledAfterInstall
         config_path = if ($env:APPDATA) { Join-Path $env:APPDATA "AI Usage Bar\config.json" } else { $null }
         provider_data_is_outside_install_root = $true
     }
@@ -269,6 +353,13 @@ try {
     }
 } catch {
     $originalError = $_
+    if ($startupPreferenceChanged) {
+        try {
+            Restore-StartupPreference -Preference $previousPreference
+        } catch {
+            Write-Warning ("Could not restore startup preference; manual recovery may be required: {0}" -f $_.Exception.Message)
+        }
+    }
     if ($startupChanged) {
         try {
             if ([string]::IsNullOrWhiteSpace($previousStartup)) {
