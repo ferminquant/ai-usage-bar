@@ -97,6 +97,13 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Stop AI Usage Bar and remove installe
     }
     if (Test-Path -LiteralPath $startupPreferenceKey) {
         Remove-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+        # Drop the preference key if it now has no values or subkeys left, so we
+        # do not leave behind an empty registry key dedicated to this app.
+        $preferenceKeyItem = Get-Item -LiteralPath $startupPreferenceKey
+        if (@($preferenceKeyItem.Property).Count -eq 0 -and
+            @(Get-ChildItem -LiteralPath $startupPreferenceKey -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $startupPreferenceKey -Force
+        }
     }
 
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force

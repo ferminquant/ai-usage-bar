@@ -103,7 +103,8 @@ function Set-StartupPreference {
 
 $savedStartupPreferencePresent = $false
 $savedStartupPreference = $null
-if (Test-Path -LiteralPath $startupPreferenceKey) {
+$savedStartupPreferenceKeyPresent = Test-Path -LiteralPath $startupPreferenceKey
+if ($savedStartupPreferenceKeyPresent) {
     $savedPreferenceProperty = Get-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
     if ($null -ne $savedPreferenceProperty) {
         $savedStartupPreferencePresent = $true
@@ -447,10 +448,15 @@ try {
     if ($null -ne $startupValue -and $startupValue.Trim('"') -ieq $shellPath.Trim('"')) {
         Remove-ItemProperty -LiteralPath $runKey -Name $startupValueName -ErrorAction SilentlyContinue
     }
-    if ($savedStartupPreferencePresent) {
-        Set-StartupPreference -Enabled $savedStartupPreference
+    if ($savedStartupPreferenceKeyPresent) {
+        if ($savedStartupPreferencePresent) {
+            Set-StartupPreference -Enabled $savedStartupPreference
+        } elseif (Test-Path -LiteralPath $startupPreferenceKey) {
+            Remove-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+        }
     } elseif (Test-Path -LiteralPath $startupPreferenceKey) {
-        Remove-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+        # The test created this key; remove it so a clean profile is left clean.
+        Remove-Item -LiteralPath $startupPreferenceKey -Recurse -Force
     }
     if ($savedPreservationSentinelPresent) {
         if (-not (Test-Path -LiteralPath $runKey)) {

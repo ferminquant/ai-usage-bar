@@ -263,7 +263,12 @@ mod windows_registry {
         if status != ERROR_SUCCESS {
             return Err(registry_error(status));
         }
-        if actual_byte_count != std::mem::size_of::<u32>() as u32 || value > 1 {
+        // Re-validate the value type against the buffer we just read into so a
+        // concurrent writer cannot smuggle a non-REG_DWORD value past us.
+        if value_type != REG_DWORD
+            || actual_byte_count != std::mem::size_of::<u32>() as u32
+            || value > 1
+        {
             return Err(StartupError::InvalidValue);
         }
         Ok(Some(value != 0))
@@ -308,7 +313,9 @@ mod windows_registry {
         let key = create_preference_key(KEY_SET_VALUE)?;
         let value_name_units = preference_value_name();
         let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
-        let value = u32::from(enabled).to_ne_bytes();
+        // REG_DWORD is defined as little-endian, so write it explicitly rather
+        // than relying on the host byte order.
+        let value = u32::from(enabled).to_le_bytes();
         let status = unsafe { RegSetValueExW(key.0, value_name, None, REG_DWORD, Some(&value)) };
         if status != ERROR_SUCCESS {
             return Err(registry_error(status));
@@ -355,7 +362,12 @@ mod windows_registry {
     pub fn set_auto_start_enabled(enabled: bool) -> Result<(), StartupError> {
         let executable = current_executable()?;
         let existing = read_startup_value()?;
-        let previous_preference = read_startup_preference()?;
+        // A corrupt or externally-cleaned preference value should not make the
+        // startup toggle unusable. Treat an unreadable preference as "no
+        // previous preference": the write below (or the restore path) then
+        // overwrites the bad value, which is self-healing and matches the
+        // lenient PowerShell reader.
+        let previous_preference = read_startup_preference().unwrap_or(None);
         let value_name_units = value_name();
         let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
 
