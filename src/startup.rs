@@ -432,10 +432,11 @@ pub use windows_registry::{auto_start_enabled, set_auto_start_enabled, StartupEr
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        dword_to_startup_preference, startup_command_path, startup_value_matches_executable,
-    };
+    use super::{startup_command_path, startup_value_matches_executable};
     use std::path::Path;
+
+    #[cfg(windows)]
+    use super::dword_to_startup_preference;
 
     #[test]
     fn parses_quoted_and_unquoted_run_commands() {
@@ -464,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn startup_preference_dword_mapping() {
         assert_eq!(dword_to_startup_preference(0), Some(false));
         assert_eq!(dword_to_startup_preference(1), Some(true));
