@@ -50,6 +50,10 @@ $cliStderrPath = Join-Path $SandboxPath "cli.stderr.log"
 $shellStdoutPath = Join-Path $SandboxPath "shell.stdout.log"
 $shellStderrPath = Join-Path $SandboxPath "shell.stderr.log"
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupPreferenceKey = "HKCU:\Software\AI Usage Bar"
+$startupPreferenceValueName = "StartupEnabled"
+$preservationSentinelName = "AI Usage Bar Smoke Preserve $PID"
+$preservationSentinelValue = "preserved-$PID"
 
 foreach ($directory in @(
     $testAppData,
@@ -75,6 +79,53 @@ function Get-RunValue {
         return $null
     }
     return [string]$property.$Name
+}
+
+function Get-StartupPreference {
+    if (-not (Test-Path -LiteralPath $startupPreferenceKey)) {
+        return $null
+    }
+    $property = Get-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+    if ($null -eq $property) {
+        return $null
+    }
+    return ([int]$property.$startupPreferenceValueName -eq 1)
+}
+
+function Set-StartupPreference {
+    param([bool]$Enabled)
+    if (-not (Test-Path -LiteralPath $startupPreferenceKey)) {
+        New-Item -Path $startupPreferenceKey -Force | Out-Null
+    }
+    New-ItemProperty -LiteralPath $startupPreferenceKey `
+        -Name $startupPreferenceValueName -Value ([int]$Enabled) -PropertyType DWord -Force | Out-Null
+}
+
+$savedStartupPreferencePresent = $false
+$savedStartupPreference = $null
+$savedStartupPreferenceKeyPresent = Test-Path -LiteralPath $startupPreferenceKey
+if ($savedStartupPreferenceKeyPresent) {
+    $savedPreferenceProperty = Get-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+    if ($null -ne $savedPreferenceProperty) {
+        $savedStartupPreferencePresent = $true
+        $savedStartupPreference = ([int]$savedPreferenceProperty.$startupPreferenceValueName -eq 1)
+    }
+}
+$savedPreservationSentinelPresent = $false
+$savedPreservationSentinel = $null
+if (Test-Path -LiteralPath $runKey) {
+    $savedSentinelProperty = Get-ItemProperty -LiteralPath $runKey -Name $preservationSentinelName -ErrorAction SilentlyContinue
+    if ($null -ne $savedSentinelProperty) {
+        $savedPreservationSentinelPresent = $true
+        $savedPreservationSentinel = [string]$savedSentinelProperty.$preservationSentinelName
+    }
+}
+
+function Assert-PreservationSentinel {
+    $value = Get-RunValue -Name $preservationSentinelName
+    if ($value -cne $preservationSentinelValue) {
+        throw "Installer did not preserve unrelated Run values"
+    }
 }
 
 function Invoke-PackageScript {
@@ -128,6 +179,12 @@ $summary = [ordered]@{
 }
 
 try {
+    if (-not (Test-Path -LiteralPath $runKey)) {
+        New-Item -Path $runKey -Force | Out-Null
+    }
+    New-ItemProperty -LiteralPath $runKey -Name $preservationSentinelName `
+        -Value $preservationSentinelValue -PropertyType String -Force | Out-Null
+
     $env:APPDATA = $testAppData
     $env:LOCALAPPDATA = $testLocalAppData
     $env:USERPROFILE = $testProfile
@@ -149,6 +206,10 @@ try {
         $startupValue.Trim('"') -ine $shellPath.Trim('"')) {
         throw "Startup registration does not point to the installed shell"
     }
+    if (-not (Get-StartupPreference)) {
+        throw "Startup preference was not persisted as enabled"
+    }
+    Assert-PreservationSentinel
     $summary.checks.install_and_startup = "passed"
 
     Set-Content -LiteralPath $configPath -Value "{`n" -Encoding ASCII
@@ -296,11 +357,37 @@ try {
         -not (Test-Path -LiteralPath (Join-Path $installRoot "ai-usage-bar.exe") -PathType Leaf)) {
         throw "Upgrade did not install the new package version"
     }
+    if (-not (Get-StartupPreference) -or $null -eq $afterUpgradeState.startup_enabled) {
+        throw "Upgrade did not preserve the enabled startup preference"
+    }
+    Assert-PreservationSentinel
     $summary.checks.upgrade_preserves_config = "passed"
+
+    # Simulate a lost Run value while the persisted preference remains enabled.
+    # A later upgrade must repair the registration instead of interpreting the
+    # missing value as an intentional opt-out.
+    Remove-ItemProperty -LiteralPath $runKey -Name $startupValueName -ErrorAction Stop
+    Invoke-PackageScript -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
+        PackageRoot = $upgradePackageRoot
+        InstallRoot = $installRoot
+        StartupValueName = $startupValueName
+    }
+    $repairedStartup = Get-RunValue -Name $startupValueName
+    $repairedState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
+        ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace($repairedStartup) -or
+        $repairedStartup.Trim('"') -ine $shellPath.Trim('"') -or
+        -not (Get-StartupPreference) -or
+        $repairedState.startup_enabled -ne $true) {
+        throw "Upgrade did not repair a lost startup registration"
+    }
+    Assert-PreservationSentinel
+    $summary.checks.upgrade_repairs_lost_startup = "passed"
 
     # Simulate the shell's right-click "Run on Windows startup" toggle and
     # verify a later upgrade does not silently re-enable the user's choice.
     Remove-ItemProperty -LiteralPath $runKey -Name $startupValueName -ErrorAction Stop
+    Set-StartupPreference -Enabled $false
     Invoke-PackageScript -ScriptPath (Join-Path $upgradePackageRoot "install.ps1") -Parameters @{
         PackageRoot = $upgradePackageRoot
         InstallRoot = $installRoot
@@ -309,9 +396,13 @@ try {
     $disabledUpgradeStartup = Get-RunValue -Name $startupValueName
     $disabledUpgradeState = Get-Content -LiteralPath (Join-Path $installRoot "install-state.json") -Raw |
         ConvertFrom-Json
-    if ($null -ne $disabledUpgradeStartup -or $null -ne $disabledUpgradeState.startup_value_name) {
+    if ($null -ne $disabledUpgradeStartup -or
+        $null -ne $disabledUpgradeState.startup_value_name -or
+        $disabledUpgradeState.startup_enabled -ne $false -or
+        (Get-StartupPreference)) {
         throw "Upgrade re-enabled a startup registration that the user disabled"
     }
+    Assert-PreservationSentinel
     $summary.checks.upgrade_preserves_disabled_startup = "passed"
 
     Invoke-PackageScript -ScriptPath $uninstallScript -Parameters @{
@@ -324,12 +415,16 @@ try {
     if ($null -ne (Get-RunValue -Name $startupValueName)) {
         throw "Uninstall left the startup registration behind"
     }
+    if ($null -ne (Get-StartupPreference)) {
+        throw "Uninstall left the startup preference behind"
+    }
     if ((Get-Content -LiteralPath $configPath -Raw).Trim() -cne $configContents.Trim()) {
         throw "Uninstall removed or changed the user configuration"
     }
     if ((Get-Content -LiteralPath $credentialSentinel -Raw).Trim() -cne $credentialContents.Trim()) {
         throw "Uninstall removed or changed provider-owned data"
     }
+    Assert-PreservationSentinel
     $summary.checks.uninstall_preserves_user_data = "passed"
     $summary.result = "passed"
     $summaryJson = $summary | ConvertTo-Json -Depth 8
@@ -352,6 +447,25 @@ try {
     $startupValue = Get-RunValue -Name $startupValueName
     if ($null -ne $startupValue -and $startupValue.Trim('"') -ieq $shellPath.Trim('"')) {
         Remove-ItemProperty -LiteralPath $runKey -Name $startupValueName -ErrorAction SilentlyContinue
+    }
+    if ($savedStartupPreferenceKeyPresent) {
+        if ($savedStartupPreferencePresent) {
+            Set-StartupPreference -Enabled $savedStartupPreference
+        } elseif (Test-Path -LiteralPath $startupPreferenceKey) {
+            Remove-ItemProperty -LiteralPath $startupPreferenceKey -Name $startupPreferenceValueName -ErrorAction SilentlyContinue
+        }
+    } elseif (Test-Path -LiteralPath $startupPreferenceKey) {
+        # The test created this key; remove it so a clean profile is left clean.
+        Remove-Item -LiteralPath $startupPreferenceKey -Recurse -Force
+    }
+    if ($savedPreservationSentinelPresent) {
+        if (-not (Test-Path -LiteralPath $runKey)) {
+            New-Item -Path $runKey -Force | Out-Null
+        }
+        New-ItemProperty -LiteralPath $runKey -Name $preservationSentinelName `
+            -Value $savedPreservationSentinel -PropertyType String -Force | Out-Null
+    } elseif (Test-Path -LiteralPath $runKey) {
+        Remove-ItemProperty -LiteralPath $runKey -Name $preservationSentinelName -ErrorAction SilentlyContinue
     }
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")

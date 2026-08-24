@@ -1463,7 +1463,7 @@ mod windows_shell {
         }
 
         let mut total_seconds = 0_i64;
-        for pair in tokens.chunks_exact(2) {
+        for pair in tokens.as_chunks::<2>().0 {
             let amount = pair[0].parse::<i64>().map_err(|_| {
                 "Paste a countdown such as \"2 days 10 hours\" or \"5 hours 0 minutes\"".to_string()
             })?;
