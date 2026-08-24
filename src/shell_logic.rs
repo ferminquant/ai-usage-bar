@@ -1,4 +1,4 @@
-use ai_usage_bar::{format_reset_label, ProviderCard, UsageSnapshot};
+use ai_usage_bar::{format_reset_label, Freshness, MetricKind, ProviderCard, UsageSnapshot};
 use chrono::Utc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,47 @@ pub(crate) fn usage_band(used_percent: Option<f64>) -> UsageBand {
         Some(percent) if percent >= 70.0 => UsageBand::Yellow,
         Some(_) => UsageBand::Green,
     }
+}
+
+/// Fill geometry for a quota percentage row's progress track. The fill width
+/// follows the *used* percentage (the quota consumed, so a near-full bar means
+/// the window is nearly exhausted) while the band color reuses the existing
+/// green/yellow/red thresholds on the same used percentage. The "X% left" text
+/// stays the authoritative display; the bar is a separate visual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct QuotaProgress {
+    pub fill_percent: f64,
+    pub band: UsageBand,
+}
+
+/// Compute the progress-bar fill for a quota window snapshot. Returns `None`
+/// for missing snapshots, non-percentage metrics, unlimited rows, unavailable
+/// providers, and values that cannot be normalized; callers render a neutral
+/// empty track in those states.
+pub(crate) fn quota_progress(snapshot: Option<&UsageSnapshot>) -> Option<QuotaProgress> {
+    let snapshot = snapshot?;
+    if snapshot.metric_kind != MetricKind::Quota
+        || !snapshot.is_percentage()
+        || snapshot.unlimited
+        || snapshot.freshness == Freshness::Unavailable
+    {
+        return None;
+    }
+    let fill_percent = normalize_used_percent(snapshot.used)?;
+    Some(QuotaProgress {
+        fill_percent,
+        band: usage_band(snapshot.used),
+    })
+}
+
+/// Width of the filled portion of a `track_width`-pixel progress track for a
+/// normalized used percentage. A missing value leaves the track empty.
+pub(crate) fn progress_fill_width(track_width: i32, fill_percent: Option<f64>) -> i32 {
+    let Some(percent) = normalize_used_percent(fill_percent) else {
+        return 0;
+    };
+    let width = track_width as f64 * percent / 100.0;
+    width.round().clamp(0.0, track_width as f64) as i32
 }
 
 /// Columns in the row-major provider-card grid.
@@ -329,6 +370,108 @@ mod tests {
         assert_eq!(usage_band(Some(89.9)), UsageBand::Yellow);
         assert_eq!(usage_band(Some(90.0)), UsageBand::Red);
         assert_eq!(usage_band(Some(150.0)), UsageBand::Red);
+    }
+
+    #[test]
+    fn quota_progress_fills_from_used_and_bands_by_used_thresholds() {
+        let green = make_snapshot(Some(40.0), Some(60.0), MetricKind::Quota, "percent");
+        let bar = quota_progress(Some(&green)).unwrap();
+        assert_eq!(bar.fill_percent, 40.0);
+        assert_eq!(bar.band, UsageBand::Green);
+
+        let yellow = make_snapshot(Some(75.0), Some(25.0), MetricKind::Quota, "percent");
+        let bar = quota_progress(Some(&yellow)).unwrap();
+        assert_eq!(bar.fill_percent, 75.0);
+        assert_eq!(bar.band, UsageBand::Yellow);
+
+        let red = make_snapshot(Some(95.0), Some(5.0), MetricKind::Quota, "percent");
+        let bar = quota_progress(Some(&red)).unwrap();
+        assert_eq!(bar.fill_percent, 95.0);
+        assert_eq!(bar.band, UsageBand::Red);
+
+        // Band thresholds sit at 70 and 90 used percent; the fill scales with
+        // the same used value.
+        for (used, band) in [
+            (69.9, UsageBand::Green),
+            (70.0, UsageBand::Yellow),
+            (89.9, UsageBand::Yellow),
+            (90.0, UsageBand::Red),
+        ] {
+            let snapshot =
+                make_snapshot(Some(used), Some(100.0 - used), MetricKind::Quota, "percent");
+            let bar = quota_progress(Some(&snapshot)).unwrap();
+            assert_eq!(bar.fill_percent, used);
+            assert_eq!(bar.band, band);
+        }
+
+        // A present remaining value must not change the fill; the bar tracks
+        // used, never the "% left" text.
+        let remaining_only_drives_text =
+            make_snapshot(Some(30.0), Some(70.0), MetricKind::Quota, "percent");
+        assert_eq!(
+            quota_progress(Some(&remaining_only_drives_text))
+                .unwrap()
+                .fill_percent,
+            30.0
+        );
+    }
+
+    #[test]
+    fn quota_progress_is_empty_for_unknown_unlimited_and_non_quota_states() {
+        // Missing snapshot.
+        assert_eq!(quota_progress(None), None);
+
+        // Non-quota metrics never get a bar, even with a percent unit.
+        let credits = make_snapshot(Some(40.0), Some(60.0), MetricKind::Credits, "percent");
+        assert_eq!(quota_progress(Some(&credits)), None);
+        let spend = make_snapshot(Some(40.0), Some(60.0), MetricKind::Spend, "percent");
+        assert_eq!(quota_progress(Some(&spend)), None);
+        let tokens = make_snapshot(Some(40.0), Some(60.0), MetricKind::Tokens, "percent");
+        assert_eq!(quota_progress(Some(&tokens)), None);
+
+        // Quota metrics without a percent unit are not percentage rows.
+        let requests = make_snapshot(Some(40.0), Some(60.0), MetricKind::Quota, "requests");
+        assert_eq!(quota_progress(Some(&requests)), None);
+
+        // Unlimited quota rows have no meaningful fill.
+        let mut unlimited = make_snapshot(Some(40.0), Some(60.0), MetricKind::Quota, "percent");
+        unlimited.unlimited = true;
+        assert_eq!(quota_progress(Some(&unlimited)), None);
+
+        // Unavailable providers must not imply a filled quota.
+        let mut unavailable = make_snapshot(Some(40.0), Some(60.0), MetricKind::Quota, "percent");
+        unavailable.freshness = Freshness::Unavailable;
+        assert_eq!(quota_progress(Some(&unavailable)), None);
+
+        // Stale-without-value / non-finite / otherwise missing values.
+        let missing = make_snapshot(None, None, MetricKind::Quota, "percent");
+        assert_eq!(quota_progress(Some(&missing)), None);
+        let mut non_finite = make_snapshot(
+            Some(f64::INFINITY),
+            Some(60.0),
+            MetricKind::Quota,
+            "percent",
+        );
+        assert_eq!(quota_progress(Some(&non_finite)), None);
+        non_finite.used = Some(f64::NAN);
+        assert_eq!(quota_progress(Some(&non_finite)), None);
+
+        // A remaining value alone never produces a fill; used is authoritative.
+        let used_missing = make_snapshot(None, Some(60.0), MetricKind::Quota, "percent");
+        assert_eq!(quota_progress(Some(&used_missing)), None);
+    }
+
+    #[test]
+    fn progress_fill_width_scales_with_track_and_percent() {
+        assert_eq!(progress_fill_width(200, Some(50.0)), 100);
+        assert_eq!(progress_fill_width(200, Some(100.0)), 200);
+        assert_eq!(progress_fill_width(200, Some(0.0)), 0);
+        assert_eq!(progress_fill_width(200, None), 0);
+        assert_eq!(progress_fill_width(300, Some(33.33)), 100);
+        assert_eq!(progress_fill_width(100, Some(75.0)), 75);
+        assert_eq!(progress_fill_width(0, Some(50.0)), 0);
+        assert_eq!(progress_fill_width(200, Some(150.0)), 200);
+        assert_eq!(progress_fill_width(200, Some(f64::NAN)), 0);
     }
 
     #[test]
