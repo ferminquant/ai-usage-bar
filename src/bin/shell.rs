@@ -13,10 +13,11 @@ fn main() {
 mod windows_shell {
     use ai_usage_bar::{
         build_registry, build_tray_view_focused_window, default_config_path,
-        filter_snapshots_for_view, format_reset_label, is_allowed_browser_url,
-        provider_display_name, switchable_providers_for_snapshots, window_display_name, AppConfig,
-        Freshness, MetricKind, OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService,
-        ResolvedView, UsageSnapshot, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
+        filter_snapshots_for_view, forced_window_for_provider, format_reset_label,
+        is_allowed_browser_url, provider_display_name, switchable_providers_for_snapshots,
+        window_display_name, window_is_selectable, AppConfig, Freshness, MetricKind,
+        OpenCodeResetSettings, Provider, RefreshPolicy, RefreshService, ResolvedView,
+        UsageSnapshot, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL,
     };
     use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, TimeZone, Utc};
     use chrono_tz::America::Toronto;
@@ -66,14 +67,14 @@ mod windows_shell {
     const MENU_OPEN_KIMI_CONSOLE: usize = 1005;
     const MENU_CONFIG_OPENCODE_RESETS: usize = 1006;
     const MENU_TOGGLE_STARTUP: usize = 1007;
+    const MENU_TOGGLE_DISABLED: usize = 1008;
     /// Dynamic "Show <provider>" items: MENU_SHOW_PROVIDER_BASE + index.
     const MENU_SHOW_PROVIDER_BASE: usize = 1100;
     const MENU_SHOW_PROVIDER_MAX: usize = 8;
     const MENU_SHOW_WINDOW_BASE: usize = 1200;
     const MENU_SHOW_WINDOW_MAX: usize = 8;
-    /// Checked visibility controls are separate from the focus selectors
-    /// above. Provider enablement remains in the provider configuration and
-    /// is intentionally not toggled by these menu items.
+    /// Provider visibility controls also toggle provider refresh enablement;
+    /// window and metric controls remain display-only.
     const MENU_VISIBLE_PROVIDER_BASE: usize = 1300;
     const MENU_VISIBLE_PROVIDER_MAX: usize = 8;
     const MENU_VISIBLE_WINDOW_BASE: usize = 1400;
@@ -107,6 +108,7 @@ mod windows_shell {
         refresh_service: Arc<RefreshService>,
         config: AppConfig,
         config_path: PathBuf,
+        known_providers: Vec<Provider>,
         snapshots: Vec<UsageSnapshot>,
         used_percent: Option<f64>,
         /// Pill subtitle, e.g. "Codex" / "Grok".
@@ -117,6 +119,9 @@ mod windows_shell {
         /// `session`/`weekly`; Kimi exposes `5-hour`/`weekly` and an optional
         /// `total` when the managed endpoint reports it.
         focus_window: Option<String>,
+        /// Temporary OpenCode safety override while an outer quota is
+        /// exhausted. This is not persisted as the user's preference.
+        forced_focus_window: Option<String>,
         switchable_providers: Vec<Provider>,
         tooltip: String,
         tooltip_hwnd: Option<HWND>,
@@ -136,16 +141,19 @@ mod windows_shell {
             refresh_service: Arc<RefreshService>,
             config: AppConfig,
             config_path: PathBuf,
+            known_providers: Vec<Provider>,
         ) -> Self {
             Self {
                 refresh_service,
                 config,
                 config_path,
+                known_providers,
                 snapshots: Vec::new(),
                 used_percent: None,
                 pill_status: "Loading…".to_string(),
                 focus_provider: None,
                 focus_window: None,
+                forced_focus_window: None,
                 switchable_providers: Vec::new(),
                 tooltip: "AI Usage Bar — loading…".to_string(),
                 tooltip_hwnd: None,
@@ -309,7 +317,13 @@ mod windows_shell {
         }
     }
 
-    fn paint_widget(hwnd: HWND, used_percent: Option<f64>, refreshing: bool, status: Option<&str>) {
+    fn paint_widget(
+        hwnd: HWND,
+        used_percent: Option<f64>,
+        refreshing: bool,
+        status: Option<&str>,
+        marker: Option<&str>,
+    ) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
@@ -350,20 +364,37 @@ mod windows_shell {
                 COLOR_TEXT,
                 DT_SINGLELINE | DT_VCENTER | DT_LEFT,
             );
+            let status_right = if marker.is_some() { 132 } else { CARD_W - 8 };
             draw_text(
                 hdc,
                 RECT {
-                    left: 88,
+                    left: 82,
                     top: 4,
-                    right: CARD_W - 8,
+                    right: status_right,
                     bottom: 27,
                 },
                 status_label,
-                11,
+                if marker.is_some() { 10 } else { 11 },
                 FW_NORMAL,
                 COLOR_MUTED,
                 DT_SINGLELINE | DT_VCENTER | DT_LEFT,
             );
+            if let Some(marker) = marker {
+                draw_text(
+                    hdc,
+                    RECT {
+                        left: 133,
+                        top: 4,
+                        right: CARD_W - 5,
+                        bottom: 27,
+                    },
+                    marker,
+                    9,
+                    FW_BOLD,
+                    COLOR_TEXT,
+                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
+                );
+            }
 
             let track = RECT {
                 left: 17,
@@ -1010,7 +1041,17 @@ mod windows_shell {
 
         match payload.result {
             Ok(snapshots) => {
-                state.snapshots = snapshots;
+                let resolved = state.config.resolved_view(&state.known_providers);
+                let active_providers: Vec<Provider> = state
+                    .known_providers
+                    .iter()
+                    .filter(|provider| provider_is_active(state, provider, &resolved))
+                    .cloned()
+                    .collect();
+                state.snapshots = snapshots
+                    .into_iter()
+                    .filter(|snapshot| active_providers.contains(&snapshot.provider))
+                    .collect();
                 recompute_view(state);
             }
             Err(error) => {
@@ -1039,6 +1080,8 @@ mod windows_shell {
         // Clear any transient status so the pill only shows the provider name.
         clear_status_for_window(hwnd, state);
         let same_provider = state.focus_provider.as_ref() == Some(&provider);
+        let forced_gate_active =
+            same_provider && forced_window_for_provider(&state.snapshots, &provider).is_some();
         state.focus_provider = Some(provider);
         if !same_provider {
             // A provider switch starts at the provider's default window.
@@ -1046,13 +1089,19 @@ mod windows_shell {
             // 5-hour/weekly, Ollama session/weekly, OpenCode 5-hour/weekly/
             // monthly) instead of snapping back to the default.
             state.focus_window = None;
+            state.forced_focus_window = None;
         }
         let previous_config = state.config.clone();
         let focused = state.focus_provider.clone();
         let window = state.focus_window.clone();
-        state
-            .config
-            .set_view_defaults(focused.as_ref(), window.as_deref());
+        // A forced OpenCode gate is a temporary safety override. Reselecting
+        // the same provider must not persist that override as the user's
+        // preferred window; the configured choice should return after reset.
+        if !forced_gate_active {
+            state
+                .config
+                .set_view_defaults(focused.as_ref(), window.as_deref());
+        }
         if let Err(error) = state.config.save(&state.config_path) {
             eprintln!("could not persist display default: {error}");
             state.config = previous_config;
@@ -1071,6 +1120,29 @@ mod windows_shell {
             return;
         };
         clear_status_for_window(hwnd, state);
+
+        let Some(provider) = state.focus_provider.clone() else {
+            return;
+        };
+        if !window_is_selectable(&state.snapshots, &provider, window) {
+            let forced = forced_window_for_provider(&state.snapshots, &provider)
+                .expect("an unselectable window must have a forced gate");
+            state.focus_window = Some(forced.to_string());
+            recompute_view(state);
+            update_tooltip(hwnd, state);
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            request_panel_rebuild(hwnd);
+            let label = window_display_name(&provider, forced);
+            set_status(
+                hwnd,
+                state,
+                &format!("OpenCode locked to {label} until reset"),
+            );
+            return;
+        }
+
         state.focus_window = Some(window.to_string());
         let previous_config = state.config.clone();
         let focused = state.focus_provider.clone();
@@ -1111,21 +1183,32 @@ mod windows_shell {
         set_focus_provider(hwnd, next);
     }
 
-    /// Apply the persisted display-only view settings to the raw refresh
-    /// report and normalize focus after a provider/window was hidden. The raw
-    /// snapshots stay in `AppState` so a hidden item can be shown again from
-    /// the context menu without requiring another refresh.
+    /// A provider is active in the shell only when it is enabled and not
+    /// hidden. The two settings are kept in sync by the provider control, but
+    /// treating legacy hidden entries as inactive keeps older configs safe.
+    fn provider_is_active(state: &AppState, provider: &Provider, view: &ResolvedView) -> bool {
+        state.config.provider_enabled(provider) && !view.is_provider_hidden(provider)
+    }
+
+    /// Apply the persisted view settings to the raw refresh report and
+    /// normalize focus after a provider/window was hidden. Disabled providers
+    /// are removed by the refresh service; active provider snapshots remain
+    /// available for display filters.
     fn recompute_view(state: &mut AppState) {
+        // Resolve against every compiled provider, not only providers with a
+        // current usable quota. This keeps unavailable providers addressable
+        // by the panel and ensures a hidden Kimi error row cannot leak into
+        // the tooltip.
+        let all_providers = state.known_providers.clone();
         let available = switchable_providers_for_snapshots(&state.snapshots);
-        let resolved = state.config.resolved_view(&available);
+        let resolved = state.config.resolved_view(&all_providers);
         let filtered = filter_snapshots_for_view(&state.snapshots, &resolved);
-        // Provider/window/metric filters are display-only. Keep every
-        // non-hidden provider in the selector even when a row filter removes
-        // some (or all) of its snapshots, so the user can still restore the
-        // preference from Show/hide.
+        // Keep every active provider in the selector even when a row filter
+        // removes some (or all) of its snapshots. Disabled providers are
+        // available through the panel's Disabled toggle instead.
         let visible_candidates: Vec<Provider> = available
             .iter()
-            .filter(|provider| !resolved.is_provider_hidden(provider))
+            .filter(|provider| provider_is_active(state, provider, &resolved))
             .cloned()
             .collect();
         let ordered_visible = ordered_providers(&visible_candidates, &resolved);
@@ -1152,13 +1235,33 @@ mod windows_shell {
             .as_ref()
             .map(|provider| available_windows(&filtered, provider))
             .unwrap_or_default();
-        state.focus_window = state
-            .focus_window
-            .as_deref()
-            .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
+        let forced_window = state
+            .focus_provider
+            .as_ref()
+            .and_then(|provider| forced_window_for_provider(&state.snapshots, provider))
+            .filter(|window| focus_windows.iter().any(|candidate| candidate == window));
+        if let Some(forced) = forced_window {
+            state.forced_focus_window = Some(forced.to_string());
+        } else if state.forced_focus_window.take().is_some() {
+            // The outer limit reset. Clear the temporary selection so the
+            // configured default (or the normal first window) can resume.
+            state.focus_window = None;
+        }
+        // A forced OpenCode gate takes precedence over both the current
+        // selection and the configured default. When the gate clears, using
+        // the configured default first naturally restores the user's choice
+        // instead of leaving the temporary forced window selected forever.
+        state.focus_window = forced_window
             .map(str::to_string)
             .or_else(|| {
                 default_window
+                    .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                state
+                    .focus_window
+                    .as_deref()
                     .filter(|window| focus_windows.iter().any(|candidate| candidate == window))
                     .map(str::to_string)
             })
@@ -1268,33 +1371,97 @@ mod windows_shell {
         request_panel_rebuild(hwnd);
     }
 
-    fn toggle_provider_visibility(hwnd: HWND, provider: Provider) {
+    /// Toggle a provider as one user-facing control: checking it makes the
+    /// provider visible and enabled; unchecking it hides the provider and
+    /// disables refresh scheduling. Disabled providers can be revealed with
+    /// the panel's Disabled toggle and restored from their card.
+    fn toggle_provider_control(hwnd: HWND, provider: Provider) {
         let Some(state) = app_state(hwnd) else {
             return;
         };
-        let available = switchable_providers_for_snapshots(&state.snapshots);
-        if !available.contains(&provider) {
+        if !state.known_providers.contains(&provider) {
             return;
         }
-        let resolved = state.config.resolved_view(&available);
-        let mut hidden: Vec<Provider> = available
+        let resolved = state.config.resolved_view(&state.known_providers);
+        let next_enabled =
+            !state.config.provider_enabled(&provider) || resolved.is_provider_hidden(&provider);
+        let mut hidden: Vec<Provider> = state
+            .known_providers
             .iter()
             .filter(|candidate| resolved.is_provider_hidden(candidate))
             .cloned()
             .collect();
-        if let Some(index) = hidden.iter().position(|candidate| candidate == &provider) {
-            hidden.remove(index);
+        if next_enabled {
+            hidden.retain(|candidate| candidate != &provider);
         } else {
-            let visible_count = available.len().saturating_sub(hidden.len());
-            if visible_count <= 1 {
-                set_status(hwnd, state, "Keep at least one provider visible");
-                return;
+            if !hidden.contains(&provider) {
+                hidden.push(provider.clone());
             }
-            hidden.push(provider);
         }
 
         let previous_config = state.config.clone();
+        let previous_runtime_enabled = state
+            .refresh_service
+            .provider_enabled(&provider)
+            .unwrap_or_else(|_| previous_config.provider_enabled(&provider));
+        state.config.set_provider_enabled(&provider, next_enabled);
         state.config.set_view_hidden_providers(&hidden);
+        if let Err(error) = state
+            .refresh_service
+            .set_provider_enabled(&provider, next_enabled)
+        {
+            eprintln!("could not update provider state: {error}");
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not update provider");
+            return;
+        }
+        if let Err(error) = state.config.save(&state.config_path) {
+            eprintln!("could not persist provider state: {error}");
+            let _ = state
+                .refresh_service
+                .set_provider_enabled(&provider, previous_runtime_enabled);
+            state.config = previous_config;
+            set_status(hwnd, state, "Could not save provider setting");
+            return;
+        }
+
+        if !next_enabled {
+            // Drop any live result already held by the shell so disabling a
+            // provider takes effect immediately in the UI.
+            state
+                .snapshots
+                .retain(|snapshot| snapshot.provider != provider);
+        }
+        clear_status_for_window(hwnd, state);
+        recompute_view(state);
+        update_tooltip(hwnd, state);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+        request_panel_rebuild(hwnd);
+        set_status(
+            hwnd,
+            state,
+            if next_enabled {
+                "Provider enabled"
+            } else {
+                "Provider disabled"
+            },
+        );
+        if next_enabled {
+            begin_refresh(hwnd);
+        }
+    }
+
+    fn toggle_disabled_providers_visibility(hwnd: HWND) {
+        let Some(state) = app_state(hwnd) else {
+            return;
+        };
+        let resolved = state.config.resolved_view(&state.known_providers);
+        let previous_config = state.config.clone();
+        state
+            .config
+            .set_view_show_disabled_providers(!resolved.show_disabled_providers);
         finish_view_change(hwnd, state, previous_config);
     }
 
@@ -1306,9 +1473,15 @@ mod windows_shell {
         if !all_windows.contains(&window) {
             return;
         }
-        let resolved = state
-            .config
-            .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
+        if forced_window_for_provider(&state.snapshots, &provider) == Some(window.as_str()) {
+            set_status(
+                hwnd,
+                state,
+                "The exhausted OpenCode window must remain visible",
+            );
+            return;
+        }
+        let resolved = state.config.resolved_view(&state.known_providers);
         let mut visible: Vec<String> = resolved
             .windows_for(&provider)
             .map(|windows| {
@@ -1356,9 +1529,7 @@ mod windows_shell {
         if !all_metrics.contains(&metric) {
             return;
         }
-        let resolved = state
-            .config
-            .resolved_view(&switchable_providers_for_snapshots(&state.snapshots));
+        let resolved = state.config.resolved_view(&state.known_providers);
         let mut visible: Vec<MetricKind> = all_metrics
             .iter()
             .copied()
@@ -1404,12 +1575,27 @@ mod windows_shell {
         let Some(state) = app_state(hwnd) else {
             return;
         };
-        let available = panel_providers(&state.snapshots);
-        if !is_full_permutation(&order, &available) {
+        let view = state.config.resolved_view(&state.known_providers);
+        let visible: Vec<Provider> = state
+            .known_providers
+            .iter()
+            .filter(|provider| provider_is_active(state, provider, &view))
+            .cloned()
+            .collect();
+        if !is_full_permutation(&order, &visible) {
             return;
         }
+        // Disabled providers are not active card slots. Keep them as a stable
+        // tail in the persisted order so re-enabling one later does not lose
+        // its relative position.
+        let mut full_order = order;
+        for provider in &state.known_providers {
+            if !full_order.contains(provider) {
+                full_order.push(provider.clone());
+            }
+        }
         let previous_config = state.config.clone();
-        state.config.set_view_provider_order(&order);
+        state.config.set_view_provider_order(&full_order);
         finish_view_change(hwnd, state, previous_config);
     }
 
@@ -1956,10 +2142,28 @@ mod windows_shell {
                 "monthly" | "total" => Some("monthly"),
                 _ => None,
             },
-            Provider::Codex | Provider::GrokConsumer | Provider::GrokApi => match label {
+            Provider::Codex => match label {
+                "5-hour" => Some("5-hour"),
                 "primary" | "weekly" => Some("primary"),
                 _ => None,
             },
+            Provider::GrokConsumer | Provider::GrokApi => match label {
+                "primary" | "weekly" => Some("primary"),
+                _ => None,
+            },
+        }
+    }
+
+    /// Compact marker shown beside the focused provider in the taskbar pill.
+    /// Keep the marker short enough to fit the fixed-width widget while still
+    /// distinguishing the quota window that drives its progress bar.
+    fn compact_window_marker(provider: &Provider, window: &str) -> Option<&'static str> {
+        match (provider, window) {
+            (_, "5-hour" | "session") => Some("5h"),
+            (_, "weekly" | "primary") => Some("W"),
+            (Provider::OpenCodeGo, "monthly") => Some("M"),
+            (Provider::Kimi, "total") => Some("T"),
+            _ => None,
         }
     }
 
@@ -1988,6 +2192,7 @@ mod windows_shell {
         ToggleProvider(Provider),
         ToggleWindow(Provider, String),
         ToggleMetric(Provider, MetricKind),
+        ToggleDisabledProviders,
         Refresh,
         ToggleStartup,
         CopyDetails,
@@ -2117,16 +2322,6 @@ mod windows_shell {
         }
     }
 
-    fn panel_providers(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
-        let mut providers = Vec::new();
-        for snapshot in snapshots {
-            if !providers.contains(&snapshot.provider) {
-                providers.push(snapshot.provider.clone());
-            }
-        }
-        providers
-    }
-
     fn panel_status_row(snapshot: &UsageSnapshot) -> PanelRow {
         let value = if let Some(error) = &snapshot.error {
             error.code.as_str().replace('_', " ")
@@ -2144,6 +2339,21 @@ mod windows_shell {
             rect: RECT::default(),
             label: "Status".to_string(),
             value,
+            checked: false,
+            toggleable: false,
+            action: PanelAction::None,
+            focus_action: None,
+            focused: false,
+            quota: false,
+            progress: None,
+        }
+    }
+
+    fn panel_disabled_status_row() -> PanelRow {
+        PanelRow {
+            rect: RECT::default(),
+            label: "Status".to_string(),
+            value: "Disabled".to_string(),
             checked: false,
             toggleable: false,
             action: PanelAction::None,
@@ -2176,9 +2386,13 @@ mod windows_shell {
             let value = snapshot
                 .map(|snapshot| panel_snapshot_value(snapshot, now))
                 .unwrap_or_else(|| "—".to_string());
+            let forced = forced_window_for_provider(snapshots, provider);
             let checked = view
                 .windows_for(provider)
-                .map(|windows| windows.iter().any(|candidate| candidate == &window))
+                .map(|windows| {
+                    forced == Some(window.as_str())
+                        || windows.iter().any(|candidate| candidate == &window)
+                })
                 .unwrap_or(true);
             rows.push(PanelRow {
                 rect: RECT::default(),
@@ -2323,23 +2537,30 @@ mod windows_shell {
 
     fn build_control_panel_layout(hwnd: HWND) -> Option<PanelLayout> {
         let state = app_state_ref(hwnd)?;
-        let available = panel_providers(&state.snapshots);
+        let available = state.known_providers.clone();
         if available.is_empty() {
             return None;
         }
         let view = state.config.resolved_view(&available);
-        let providers = ordered_providers(&available, &view);
         let now = Utc::now();
         let mut cards = Vec::new();
-        for provider in providers {
-            let rows = panel_card_rows(
-                &state.snapshots,
-                &provider,
-                &view,
-                state.focus_provider.as_ref(),
-                state.focus_window.as_deref(),
-                now,
-            );
+        for provider in ordered_providers(&available, &view) {
+            let active = provider_is_active(state, &provider, &view);
+            if !active && !view.show_disabled_providers {
+                continue;
+            }
+            let rows = if active {
+                panel_card_rows(
+                    &state.snapshots,
+                    &provider,
+                    &view,
+                    state.focus_provider.as_ref(),
+                    state.focus_window.as_deref(),
+                    now,
+                )
+            } else {
+                vec![panel_disabled_status_row()]
+            };
             let card_height = PANEL_HEADER_HEIGHT
                 + (rows.len() as i32 * PANEL_ROW_HEIGHT)
                 + PANEL_CARD_PADDING * 2;
@@ -2351,8 +2572,8 @@ mod windows_shell {
                     bottom: card_height,
                 },
                 title: provider_display_name(&provider).to_string(),
-                visible: !view.is_provider_hidden(&provider),
-                focused: state.focus_provider.as_ref() == Some(&provider),
+                visible: active,
+                focused: active && state.focus_provider.as_ref() == Some(&provider),
                 eye_rect: RECT::default(),
                 provider,
                 rows,
@@ -2361,27 +2582,38 @@ mod windows_shell {
         }
 
         let mut footer_actions = vec![
-            ("Refresh", PanelAction::Refresh),
+            (
+                if view.show_disabled_providers {
+                    "Disabled ✓".to_string()
+                } else {
+                    "Disabled".to_string()
+                },
+                PanelAction::ToggleDisabledProviders,
+            ),
+            ("Refresh".to_string(), PanelAction::Refresh),
             (
                 if ai_usage_bar::startup::auto_start_enabled().unwrap_or(false) {
-                    "Startup ✓"
+                    "Startup ✓".to_string()
                 } else {
-                    "Startup"
+                    "Startup".to_string()
                 },
                 PanelAction::ToggleStartup,
             ),
-            ("Copy", PanelAction::CopyDetails),
-            ("Quit", PanelAction::Quit),
+            ("Copy".to_string(), PanelAction::CopyDetails),
+            ("Quit".to_string(), PanelAction::Quit),
         ];
         match state.focus_provider.as_ref() {
             Some(Provider::OllamaCloud) => {
-                footer_actions.push(("Open usage", PanelAction::OpenOllamaUsage));
+                footer_actions.push(("Open usage".to_string(), PanelAction::OpenOllamaUsage));
             }
             Some(Provider::Kimi) => {
-                footer_actions.push(("Open console", PanelAction::OpenKimiConsole));
+                footer_actions.push(("Open console".to_string(), PanelAction::OpenKimiConsole));
             }
             Some(Provider::OpenCodeGo) => {
-                footer_actions.push(("Reset times…", PanelAction::ConfigureOpenCodeResets));
+                footer_actions.push((
+                    "Reset times…".to_string(),
+                    PanelAction::ConfigureOpenCodeResets,
+                ));
             }
             _ => {}
         }
@@ -2760,7 +2992,7 @@ mod windows_shell {
                     right: state.layout.width - PANEL_MARGIN,
                     bottom: 52,
                 },
-                "Click a row or its dot to choose the bar timeframe · boxes show/hide · drag headers",
+                "Click a row or its dot to choose the bar timeframe · provider checks hide + disable · drag headers",
                 12,
                 FW_NORMAL,
                 COLOR_MUTED,
@@ -3175,6 +3407,7 @@ mod windows_shell {
                                 .layout
                                 .cards
                                 .iter()
+                                .filter(|card| card.visible)
                                 .map(|card| card.provider.clone())
                                 .collect();
                             let origin_cards = state.layout.cards.clone();
@@ -3293,7 +3526,8 @@ mod windows_shell {
                 set_focus_window(hwnd, &window);
             }
             PanelAction::None => {}
-            PanelAction::ToggleProvider(provider) => toggle_provider_visibility(hwnd, provider),
+            PanelAction::ToggleProvider(provider) => toggle_provider_control(hwnd, provider),
+            PanelAction::ToggleDisabledProviders => toggle_disabled_providers_visibility(hwnd),
             PanelAction::ToggleWindow(provider, window) => {
                 toggle_window_visibility(hwnd, provider, window)
             }
@@ -3463,6 +3697,27 @@ mod windows_shell {
                 MENU_TOGGLE_STARTUP,
                 w!("Run on Windows startup"),
             );
+            let known_providers = app_state_ref(hwnd)
+                .map(|state| state.known_providers.clone())
+                .unwrap_or_default();
+            let resolved_view = app_state_ref(hwnd)
+                .map(|state| state.config.resolved_view(&known_providers))
+                .unwrap_or_default();
+            let disabled_flags = if resolved_view.show_disabled_providers {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            let _ = AppendMenuW(
+                menu,
+                disabled_flags,
+                MENU_TOGGLE_DISABLED,
+                if resolved_view.show_disabled_providers {
+                    w!("Hide disabled providers")
+                } else {
+                    w!("Show disabled providers")
+                },
+            );
 
             // Keep wide strings alive until TrackPopupMenu returns.
             let mut provider_labels: Vec<Vec<u16>> = Vec::new();
@@ -3496,16 +3751,24 @@ mod windows_shell {
                 }
             }
 
-            // Display visibility is deliberately separate from the focus
-            // selectors above and from provider enablement in AppConfig.
+            // Provider controls below use the same hide-and-disable behavior
+            // as the expanded panel. Window and metric controls remain
+            // display-only.
             let all_providers = app_state_ref(hwnd)
-                .map(|state| switchable_providers_for_snapshots(&state.snapshots))
-                .unwrap_or_default();
-            let resolved_view = app_state_ref(hwnd)
-                .map(|state| state.config.resolved_view(&all_providers))
+                .map(|state| {
+                    known_providers
+                        .iter()
+                        .filter(|provider| {
+                            provider_is_active(state, provider, &resolved_view)
+                                || resolved_view.show_disabled_providers
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
 
-            // All visibility controls live in one top-level "Show/hide"
+            // All provider/window/metric controls live in one top-level
+            // "Show/hide" submenu.
             // submenu. Provider visibility is global; window and optional
             // metric visibility are nested under the provider they affect so
             // labels such as "Show 5-hour" cannot be mistaken for a global
@@ -3553,7 +3816,15 @@ mod windows_shell {
                             break;
                         }
                         let checked = visible_windows
-                            .map(|windows| windows.iter().any(|candidate| candidate == window))
+                            .map(|windows| {
+                                forced_window_for_provider(
+                                    app_state_ref(hwnd)
+                                        .map(|state| state.snapshots.as_slice())
+                                        .unwrap_or_default(),
+                                    provider,
+                                ) == Some(window.as_str())
+                                    || windows.iter().any(|candidate| candidate == window)
+                            })
                             .unwrap_or(true);
                         let flags = if checked {
                             MF_STRING | MF_CHECKED
@@ -3683,7 +3954,14 @@ mod windows_shell {
                     .enumerate()
                 {
                     let checked = selected_window.as_str() == window.as_str();
-                    let flags = if checked {
+                    let selectable = focused.as_ref().is_none_or(|provider| {
+                        app_state_ref(hwnd).is_none_or(|state| {
+                            window_is_selectable(&state.snapshots, provider, window)
+                        })
+                    });
+                    let flags = if !selectable {
+                        MF_STRING | MF_GRAYED
+                    } else if checked {
                         MF_STRING | MF_CHECKED
                     } else {
                         MF_STRING
@@ -3803,6 +4081,7 @@ mod windows_shell {
                 MENU_OPEN_KIMI_CONSOLE => open_kimi_console(hwnd),
                 MENU_CONFIG_OPENCODE_RESETS => open_opencode_reset_dialog(hwnd),
                 MENU_TOGGLE_STARTUP => toggle_startup_registration(hwnd),
+                MENU_TOGGLE_DISABLED => toggle_disabled_providers_visibility(hwnd),
                 MENU_COPY_DETAILS => copy_details_to_clipboard(hwnd),
                 MENU_QUIT => {
                     let _ = DestroyWindow(hwnd);
@@ -3828,7 +4107,7 @@ mod windows_shell {
                     .contains(&id) =>
                 {
                     if let Some(provider) = all_providers.get(id - MENU_VISIBLE_PROVIDER_BASE) {
-                        toggle_provider_visibility(hwnd, provider.clone());
+                        toggle_provider_control(hwnd, provider.clone());
                     }
                 }
                 id if (MENU_VISIBLE_WINDOW_BASE
@@ -3864,22 +4143,34 @@ mod windows_shell {
     ) -> LRESULT {
         match msg {
             WM_PAINT => {
-                let (used_percent, refreshing, status) = app_state_ref(hwnd)
+                let (used_percent, refreshing, status, marker) = app_state_ref(hwnd)
                     .map(|state| {
-                        // Pill text is only the provider name (or "…" while refreshing).
+                        // Keep the provider name and its window marker in
+                        // separate slots so the marker cannot be clipped.
                         let label = if state.refresh_in_flight {
-                            "…"
+                            "…".to_string()
                         } else {
-                            state.pill_status.as_str()
+                            state.pill_status.clone()
+                        };
+                        let marker = if state.refresh_in_flight {
+                            None
+                        } else {
+                            state.focus_provider.as_ref().and_then(|provider| {
+                                state
+                                    .focus_window
+                                    .as_deref()
+                                    .and_then(|window| compact_window_marker(provider, window))
+                            })
                         };
                         (
                             state.used_percent,
                             state.refresh_in_flight,
-                            Some(label.to_string()),
+                            Some(label),
+                            marker,
                         )
                     })
-                    .unwrap_or((None, false, None));
-                paint_widget(hwnd, used_percent, refreshing, status.as_deref());
+                    .unwrap_or((None, false, None, None));
+                paint_widget(hwnd, used_percent, refreshing, status.as_deref(), marker);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -4062,11 +4353,13 @@ mod windows_shell {
                 }
             };
 
+            let known_providers = registry.registered_providers();
             let refresh_service = Arc::new(RefreshService::new(registry, RefreshPolicy::default()));
             let state_ptr = Box::into_raw(Box::new(AppState::loading(
                 refresh_service,
                 config,
                 config_path,
+                known_providers,
             )));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
             create_tooltip(hwnd, hinst, &mut *state_ptr);
@@ -4121,6 +4414,10 @@ mod windows_shell {
         #[test]
         fn canonical_weekly_aliases_cover_codex_and_grok_cards() {
             assert_eq!(
+                canonical_window_key(&Provider::Codex, "5-hour"),
+                Some("5-hour")
+            );
+            assert_eq!(
                 canonical_window_key(&Provider::Codex, "primary"),
                 Some("primary")
             );
@@ -4132,6 +4429,32 @@ mod windows_shell {
                 canonical_window_key(&Provider::GrokApi, "weekly"),
                 Some("primary")
             );
+        }
+
+        #[test]
+        fn compact_window_markers_identify_supported_quota_windows() {
+            assert_eq!(
+                compact_window_marker(&Provider::OpenCodeGo, "5-hour"),
+                Some("5h")
+            );
+            assert_eq!(
+                compact_window_marker(&Provider::OpenCodeGo, "weekly"),
+                Some("W")
+            );
+            assert_eq!(
+                compact_window_marker(&Provider::OpenCodeGo, "monthly"),
+                Some("M")
+            );
+            assert_eq!(
+                compact_window_marker(&Provider::Codex, "primary"),
+                Some("W")
+            );
+            assert_eq!(
+                compact_window_marker(&Provider::OllamaCloud, "session"),
+                Some("5h")
+            );
+            assert_eq!(compact_window_marker(&Provider::Kimi, "total"), Some("T"));
+            assert_eq!(compact_window_marker(&Provider::GrokApi, "secondary"), None);
         }
 
         #[test]
