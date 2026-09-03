@@ -350,6 +350,28 @@ impl RefreshService {
         self.cache.clone()
     }
 
+    /// Return the providers known to this service, including disabled and
+    /// not-configured entries so a UI can offer a complete provider picker.
+    pub fn registered_providers(&self) -> Vec<Provider> {
+        self.registry.registered_providers()
+    }
+
+    /// Update one provider's refresh enablement without rebuilding the
+    /// service. The registry is shared with in-flight refresh work, so future
+    /// refreshes observe the new setting immediately.
+    pub fn set_provider_enabled(
+        &self,
+        provider: &Provider,
+        enabled: bool,
+    ) -> Result<(), RegistryError> {
+        self.registry.set_enabled(provider, enabled)
+    }
+
+    /// Return whether a provider is currently enabled for refresh.
+    pub fn provider_enabled(&self, provider: &Provider) -> Result<bool, RegistryError> {
+        self.registry.is_enabled(provider)
+    }
+
     pub fn refresh_all(&self) -> Vec<UsageSnapshot> {
         self.refresh_all_with_report().snapshots
     }
@@ -1068,6 +1090,29 @@ mod tests {
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].freshness, Freshness::Cached);
         assert_eq!(cached[0].observed_at, first);
+    }
+
+    #[test]
+    fn refresh_service_exposes_provider_controls() {
+        let registry = ProviderRegistry::new();
+        registry.register_not_configured(Provider::Kimi).unwrap();
+        let service = RefreshService::new(registry, RefreshPolicy::default());
+
+        assert_eq!(service.registered_providers(), vec![Provider::Kimi]);
+        assert!(service.provider_enabled(&Provider::Kimi).unwrap());
+
+        service
+            .set_provider_enabled(&Provider::Kimi, false)
+            .unwrap();
+        assert!(!service.provider_enabled(&Provider::Kimi).unwrap());
+        assert_eq!(
+            service.provider_enabled(&Provider::Codex),
+            Err(RegistryError::UnknownProvider(Provider::Codex))
+        );
+        assert_eq!(
+            service.set_provider_enabled(&Provider::Codex, true),
+            Err(RegistryError::UnknownProvider(Provider::Codex))
+        );
     }
 
     #[test]
