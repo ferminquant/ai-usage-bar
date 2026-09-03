@@ -2259,6 +2259,8 @@ mod windows_shell {
             action: PanelAction::None,
             focus_action: None,
             focused: false,
+            quota: false,
+            progress: None,
         }
     }
 
