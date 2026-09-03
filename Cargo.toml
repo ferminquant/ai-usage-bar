@@ -2,6 +2,8 @@
 name = "ai-usage-bar"
 version = "0.1.5"
 edition = "2021"
+# shell.rs uses `slice::is_multiple_of` (1.87) and `slice::as_chunks` (1.88).
+rust-version = "1.88"
 description = "Desktop usage widget for hosted AI subscriptions"
 license = "MIT OR Apache-2.0"
 

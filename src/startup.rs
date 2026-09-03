@@ -8,6 +8,13 @@ use std::path::Path;
 
 pub const STARTUP_VALUE_NAME: &str = "AI Usage Bar";
 
+/// Registry value used to remember the user's startup preference separately
+/// from the executable command. Windows or another cleanup tool can remove a
+/// `Run` value; keeping the preference in our own key lets the installer
+/// restore that command without silently re-enabling a user who deliberately
+/// turned startup off.
+pub const STARTUP_PREFERENCE_VALUE_NAME: &str = "StartupEnabled";
+
 /// Extract the executable path from a Windows `Run` command value.
 ///
 /// AI Usage Bar writes a quoted path with no arguments. The small amount of
@@ -32,6 +39,20 @@ pub fn startup_value_matches_executable(value: &str, executable: &Path) -> bool 
     startup_path.eq_ignore_ascii_case(executable.to_string_lossy().as_ref())
 }
 
+/// Interpret a `REG_DWORD` startup-preference value.
+///
+/// Values outside {0, 1} are not values this app wrote and are treated as "no
+/// preference recorded" so a single corrupted DWORD cannot wedge the toggle.
+/// This mirrors `Get-StartupPreference` in the installer.
+#[cfg(windows)]
+fn dword_to_startup_preference(value: u32) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 #[cfg(windows)]
 mod windows_registry {
     use super::{startup_value_matches_executable, STARTUP_VALUE_NAME};
@@ -42,11 +63,12 @@ mod windows_registry {
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
-        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ, REG_NONE,
-        REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_EXPAND_SZ,
+        REG_NONE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
     const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    const PREFERENCE_KEY: windows::core::PCWSTR = w!("Software\\AI Usage Bar");
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum StartupError {
@@ -64,8 +86,10 @@ mod windows_registry {
                     write!(formatter, "could not determine the current executable")
                 }
                 Self::Registry(code) => write!(formatter, "Windows registry error {code}"),
-                Self::InvalidValueType => write!(formatter, "startup value is not a string"),
-                Self::InvalidValue => write!(formatter, "startup value is malformed"),
+                Self::InvalidValueType => {
+                    write!(formatter, "startup registry value has an invalid type")
+                }
+                Self::InvalidValue => write!(formatter, "startup registry value is malformed"),
                 Self::OwnedByAnotherExecutable => write!(
                     formatter,
                     "startup entry is owned by another executable; reinstall or repair it first"
@@ -201,6 +225,141 @@ mod windows_registry {
         STARTUP_VALUE_NAME.encode_utf16().chain(Some(0)).collect()
     }
 
+    fn preference_value_name() -> Vec<u16> {
+        super::STARTUP_PREFERENCE_VALUE_NAME
+            .encode_utf16()
+            .chain(Some(0))
+            .collect()
+    }
+
+    fn read_startup_preference() -> Result<Option<bool>, StartupError> {
+        let key = match open_preference_key(KEY_READ) {
+            Ok(key) => key,
+            Err(StartupError::Registry(code)) if code == ERROR_FILE_NOT_FOUND.0 => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let value_name_units = preference_value_name();
+        let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
+        let mut value_type = REG_NONE;
+        let mut byte_count = 0u32;
+        let status = unsafe {
+            RegQueryValueExW(
+                key.0,
+                value_name,
+                None,
+                Some(&mut value_type),
+                None,
+                Some(&mut byte_count),
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        if value_type != REG_DWORD || byte_count != std::mem::size_of::<u32>() as u32 {
+            return Err(StartupError::InvalidValueType);
+        }
+
+        let mut value = 0u32;
+        let mut actual_byte_count = byte_count;
+        let status = unsafe {
+            RegQueryValueExW(
+                key.0,
+                value_name,
+                None,
+                Some(&mut value_type),
+                Some((&mut value as *mut u32).cast()),
+                Some(&mut actual_byte_count),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        // Re-validate the value type against the buffer we just read into so a
+        // concurrent writer cannot smuggle a non-REG_DWORD value past us.
+        if value_type != REG_DWORD || actual_byte_count != std::mem::size_of::<u32>() as u32 {
+            return Err(StartupError::InvalidValue);
+        }
+        Ok(super::dword_to_startup_preference(value))
+    }
+
+    fn open_preference_key(
+        access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    ) -> Result<RegistryKey, StartupError> {
+        let mut key = HKEY::default();
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PREFERENCE_KEY, None, access, &mut key) };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        Ok(RegistryKey(key))
+    }
+
+    fn create_preference_key(
+        access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    ) -> Result<RegistryKey, StartupError> {
+        let mut key = HKEY::default();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PREFERENCE_KEY,
+                None,
+                w!(""),
+                REG_OPTION_NON_VOLATILE,
+                access,
+                None,
+                &mut key,
+                None,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        Ok(RegistryKey(key))
+    }
+
+    fn write_startup_preference(enabled: bool) -> Result<(), StartupError> {
+        let key = create_preference_key(KEY_SET_VALUE)?;
+        let value_name_units = preference_value_name();
+        let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
+        // REG_DWORD is defined as little-endian, so write it explicitly rather
+        // than relying on the host byte order.
+        let value = u32::from(enabled).to_le_bytes();
+        let status = unsafe { RegSetValueExW(key.0, value_name, None, REG_DWORD, Some(&value)) };
+        if status != ERROR_SUCCESS {
+            return Err(registry_error(status));
+        }
+        Ok(())
+    }
+
+    fn delete_startup_preference() -> Result<(), StartupError> {
+        let key = match open_preference_key(KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(StartupError::Registry(code)) if code == ERROR_FILE_NOT_FOUND.0 => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let value_name_units = preference_value_name();
+        let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
+        let status = unsafe { RegDeleteValueW(key.0, value_name) };
+        if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
+            return Err(registry_error(status));
+        }
+        Ok(())
+    }
+
+    fn restore_startup_preference(previous: Option<bool>) {
+        match previous {
+            Some(enabled) => {
+                let _ = write_startup_preference(enabled);
+            }
+            None => {
+                let _ = delete_startup_preference();
+            }
+        }
+    }
+
     pub fn auto_start_enabled() -> Result<bool, StartupError> {
         let Some(value) = read_startup_value()? else {
             return Ok(false);
@@ -214,33 +373,61 @@ mod windows_registry {
     pub fn set_auto_start_enabled(enabled: bool) -> Result<(), StartupError> {
         let executable = current_executable()?;
         let existing = read_startup_value()?;
+        // A corrupt or externally-cleaned preference value should not make the
+        // startup toggle unusable. Treat an unreadable preference as "no
+        // previous preference": the write below (or the restore path) then
+        // overwrites the bad value, which is self-healing and matches the
+        // lenient PowerShell reader.
+        let previous_preference = read_startup_preference().unwrap_or(None);
         let value_name_units = value_name();
         let value_name = windows::core::PCWSTR::from_raw(value_name_units.as_ptr());
-
-        if !enabled {
-            let Some(existing) = existing.as_ref() else {
-                return Ok(());
-            };
-            if !startup_value_matches_executable(existing, &executable) {
-                return Err(StartupError::OwnedByAnotherExecutable);
-            }
-            let key = open_run_key(KEY_SET_VALUE)?;
-            let status = unsafe { RegDeleteValueW(key.0, value_name) };
-            if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
-                return Err(registry_error(status));
-            }
-            return Ok(());
-        }
 
         if let Some(existing) = existing.as_ref() {
             if !startup_value_matches_executable(existing, &executable) {
                 return Err(StartupError::OwnedByAnotherExecutable);
             }
         }
-        let key = create_run_key(KEY_SET_VALUE)?;
-        let command = command_for(&executable)?;
+
+        // Update the preference first. If the Run-key operation fails, put the
+        // previous preference back so the two records cannot drift apart.
+        write_startup_preference(enabled)?;
+
+        if !enabled {
+            if existing.is_none() {
+                return Ok(());
+            }
+            let key = match open_run_key(KEY_SET_VALUE) {
+                Ok(key) => key,
+                Err(error) => {
+                    restore_startup_preference(previous_preference);
+                    return Err(error);
+                }
+            };
+            let status = unsafe { RegDeleteValueW(key.0, value_name) };
+            if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
+                restore_startup_preference(previous_preference);
+                return Err(registry_error(status));
+            }
+            return Ok(());
+        }
+
+        let key = match create_run_key(KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(error) => {
+                restore_startup_preference(previous_preference);
+                return Err(error);
+            }
+        };
+        let command = match command_for(&executable) {
+            Ok(command) => command,
+            Err(error) => {
+                restore_startup_preference(previous_preference);
+                return Err(error);
+            }
+        };
         let status = unsafe { RegSetValueExW(key.0, value_name, None, REG_SZ, Some(&command)) };
         if status != ERROR_SUCCESS {
+            restore_startup_preference(previous_preference);
             return Err(registry_error(status));
         }
         Ok(())
@@ -254,6 +441,9 @@ pub use windows_registry::{auto_start_enabled, set_auto_start_enabled, StartupEr
 mod tests {
     use super::{startup_command_path, startup_value_matches_executable};
     use std::path::Path;
+
+    #[cfg(windows)]
+    use super::dword_to_startup_preference;
 
     #[test]
     fn parses_quoted_and_unquoted_run_commands() {
@@ -279,5 +469,17 @@ mod tests {
             r#""C:\Other\ai-usage-bar-shell.exe""#,
             executable,
         ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn startup_preference_dword_mapping() {
+        assert_eq!(dword_to_startup_preference(0), Some(false));
+        assert_eq!(dword_to_startup_preference(1), Some(true));
+        // Anything outside {0, 1} means "no preference recorded", matching
+        // Get-StartupPreference in the installer, so a corrupted DWORD cannot
+        // wedge the startup toggle.
+        assert_eq!(dword_to_startup_preference(2), None);
+        assert_eq!(dword_to_startup_preference(u32::MAX), None);
     }
 }
