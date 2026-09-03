@@ -1093,6 +1093,29 @@ mod tests {
     }
 
     #[test]
+    fn refresh_service_exposes_provider_controls() {
+        let registry = ProviderRegistry::new();
+        registry.register_not_configured(Provider::Kimi).unwrap();
+        let service = RefreshService::new(registry, RefreshPolicy::default());
+
+        assert_eq!(service.registered_providers(), vec![Provider::Kimi]);
+        assert!(service.provider_enabled(&Provider::Kimi).unwrap());
+
+        service
+            .set_provider_enabled(&Provider::Kimi, false)
+            .unwrap();
+        assert!(!service.provider_enabled(&Provider::Kimi).unwrap());
+        assert_eq!(
+            service.provider_enabled(&Provider::Codex),
+            Err(RegistryError::UnknownProvider(Provider::Codex))
+        );
+        assert_eq!(
+            service.set_provider_enabled(&Provider::Codex, true),
+            Err(RegistryError::UnknownProvider(Provider::Codex))
+        );
+    }
+
+    #[test]
     fn cache_expiry_turns_a_failed_refresh_into_unavailable() {
         let first = instant();
         let clock = FixedClock::new(first);
