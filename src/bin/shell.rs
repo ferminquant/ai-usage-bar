@@ -3673,7 +3673,9 @@ mod windows_shell {
                     .take(MENU_VISIBLE_PROVIDER_MAX)
                     .enumerate()
                 {
-                    let flags = if !resolved_view.is_provider_hidden(provider) {
+                    let active = app_state_ref(hwnd)
+                        .is_some_and(|state| provider_is_active(state, provider, &resolved_view));
+                    let flags = if active {
                         MF_STRING | MF_CHECKED
                     } else {
                         MF_STRING
