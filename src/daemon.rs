@@ -350,13 +350,15 @@ impl RefreshService {
         self.cache.clone()
     }
 
-    /// Return every provider known to this service, including disabled and
-    /// not-configured entries so the shell can offer a complete control panel.
+    /// Return the providers known to this service, including disabled and
+    /// not-configured entries so a UI can offer a complete provider picker.
     pub fn registered_providers(&self) -> Vec<Provider> {
         self.registry.registered_providers()
     }
 
-    /// Update one provider's refresh enablement without rebuilding the service.
+    /// Update one provider's refresh enablement without rebuilding the
+    /// service. The registry is shared with in-flight refresh work, so future
+    /// refreshes observe the new setting immediately.
     pub fn set_provider_enabled(
         &self,
         provider: &Provider,

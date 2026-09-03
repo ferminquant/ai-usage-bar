@@ -42,7 +42,7 @@ fn default_provider_enabled() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSettings {
     /// Whether this provider should be scheduled for refresh. The shell keeps
-    /// this in sync with the provider-level control in [`AppConfig::view`].
+    /// this in sync with the provider-level hide control in [`AppConfig::view`].
     #[serde(default = "default_provider_enabled")]
     pub enabled: bool,
     /// Optional next weekly reset anchor for OpenCode Go, in UTC.
@@ -84,12 +84,13 @@ pub struct ProviderViewSettings {
 }
 
 /// Versioned view and provider-control preferences persisted in
-/// [`AppConfig::view`].
+/// [`AppConfig::view`]. Provider-level visibility is paired with enablement by
+/// the shell so a hidden or disabled provider is not refreshed in the
+/// background.
 ///
-/// Provider-level visibility and `enabled` are paired by the shell so a
-/// disabled provider stops refresh work. Unknown provider/window/metric
-/// identifiers are ignored during resolution, and an unsupported `version`
-/// falls back to defaults instead of failing the whole configuration.
+/// Unknown provider/window/metric identifiers are ignored during resolution,
+/// and an unsupported `version` falls back to defaults instead of failing the
+/// whole configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewSettings {
     #[serde(default = "default_view_version")]
@@ -103,7 +104,8 @@ pub struct ViewSettings {
     /// providers so hiding a provider stops its refresh work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_providers: Vec<String>,
-    /// Whether disabled providers should be shown in the expanded view.
+    /// Whether disabled providers should be shown in the expanded view. The
+    /// default keeps the panel focused on providers that are enabled.
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_disabled_providers: bool,
     /// Per-provider window/metric visibility, keyed by provider identifier.
@@ -132,7 +134,8 @@ impl Default for ViewSettings {
     }
 }
 
-/// Display preferences resolved against the compiled provider model.
+/// Display and provider-control preferences resolved against the compiled
+/// provider model.
 ///
 /// Resolution is deterministic: unknown identifiers are dropped, duplicates
 /// are collapsed, and contradictions fall back (a hidden or unknown default
@@ -322,8 +325,9 @@ pub struct AppConfig {
     pub version: u32,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderSettings>,
-    /// Display-only preferences. Absent keeps the current display behavior;
-    /// never stored when unset so existing config files stay compatible.
+    /// View and provider-control preferences. Absent keeps the current
+    /// display behavior; never stored when unset so existing config files stay
+    /// compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<ViewSettings>,
 }
@@ -457,9 +461,10 @@ impl AppConfig {
             .collect();
     }
 
-    /// Replace the persisted set of providers hidden from display. The shell
-    /// pairs this with provider enablement when a provider control is clicked.
-    /// Pass an empty slice to show every provider again.
+    /// Replace the persisted set of providers hidden from display.
+    ///
+    /// The shell pairs this with provider enablement when the user clicks a
+    /// provider control. Pass an empty slice to show every provider again.
     pub fn set_view_hidden_providers(&mut self, hidden: &[Provider]) {
         self.ensure_view().hidden_providers = hidden
             .iter()
@@ -707,9 +712,9 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
         Provider::Kimi,
         Provider::OpenCodeGo,
     ];
-    // Older builds stored provider-level hiding separately from enablement.
-    // Treat a persisted hidden provider as disabled at bootstrap so a hidden
-    // adapter cannot continue refreshing in the background.
+    // A persisted hidden provider may come from an older build where hiding
+    // was display-only. Treat it as disabled at bootstrap so the new control
+    // never leaves a hidden adapter refreshing in the background.
     let resolved_view = config.resolved_view(&providers);
     for provider in &providers {
         let enabled =
@@ -908,6 +913,17 @@ mod tests {
     }
 
     #[test]
+    fn hidden_provider_is_disabled_at_registry_bootstrap() {
+        let mut config = AppConfig::default();
+        config.set_view_hidden_providers(&[Provider::Codex, Provider::Kimi]);
+
+        let registry = build_registry(&config).unwrap();
+
+        assert!(!registry.is_enabled(&Provider::Codex).unwrap());
+        assert!(!registry.is_enabled(&Provider::Kimi).unwrap());
+    }
+
+    #[test]
     fn malformed_and_future_configs_fail_closed() {
         assert!(matches!(
             AppConfig::parse("not json"),
@@ -1004,14 +1020,5 @@ mod tests {
         assert!(!registry.is_enabled(&Provider::Codex).unwrap());
         assert!(registry.is_enabled(&Provider::GrokConsumer).unwrap());
         assert!(!registry.is_enabled(&Provider::OllamaCloud).unwrap());
-    }
-
-    #[test]
-    fn hidden_provider_is_disabled_at_registry_bootstrap() {
-        let mut config = AppConfig::default();
-        config.set_view_hidden_providers(&[Provider::Kimi]);
-        let registry = build_registry(&config).unwrap();
-
-        assert!(!registry.is_enabled(&Provider::Kimi).unwrap());
     }
 }

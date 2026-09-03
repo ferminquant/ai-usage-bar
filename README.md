@@ -31,9 +31,11 @@ Typical interactions:
 
 - **Click** the pill to cycle the focused provider.
 - **Hover** to see live, cached, stale, unavailable, and not-configured states.
-- **Right-click** to choose a provider or quota window, refresh, copy details,
-  show or hide providers and rows, open a provider's usage page, edit OpenCode
+- **Right-click** to choose a provider or quota window, refresh, show or hide
+  providers and rows, copy details, open a provider's usage page, edit OpenCode
   reset anchors, or enable/disable running automatically when Windows starts.
+  Unchecking a provider hides and disables it together; the compact **Disabled**
+  toggle reveals disabled cards so they can be restored without editing JSON.
 
 ## Supported providers
 

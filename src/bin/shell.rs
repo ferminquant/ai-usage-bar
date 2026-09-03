@@ -1244,14 +1244,15 @@ mod windows_shell {
         // Resolve against every compiled provider, not only providers with a
         // current usable quota. This keeps unavailable providers addressable
         // by the panel and ensures a hidden Kimi error row cannot leak into
-        // the tooltip.
+        // the tooltip. `available` remains the narrower set used for
+        // focus/cycling.
         let all_providers = state.known_providers.clone();
         let available = switchable_providers_for_snapshots(&state.snapshots);
         let resolved = state.config.resolved_view(&all_providers);
         let filtered = filter_snapshots_for_view(&state.snapshots, &resolved);
         // Keep every active provider in the selector even when a row filter
         // removes some (or all) of its snapshots. Disabled providers are
-        // available through the panel's Disabled toggle instead.
+        // available through the panel's `Disabled` toggle instead.
         let visible_candidates: Vec<Provider> = available
             .iter()
             .filter(|provider| provider_is_active(state, provider, &resolved))
@@ -1420,7 +1421,7 @@ mod windows_shell {
     /// Toggle a provider as one user-facing control: checking it makes the
     /// provider visible and enabled; unchecking it hides the provider and
     /// disables refresh scheduling. Disabled providers can be revealed with
-    /// the panel's Disabled toggle and restored from their card.
+    /// the panel's compact `Disabled` toggle and restored from their card.
     fn toggle_provider_control(hwnd: HWND, provider: Provider) {
         let Some(state) = app_state(hwnd) else {
             return;
@@ -1472,8 +1473,8 @@ mod windows_shell {
         }
 
         if !next_enabled {
-            // Drop any live result already held by the shell so disabling a
-            // provider takes effect immediately in the UI.
+            // Drop any live or in-flight result already held by the shell so
+            // disabling a provider takes effect immediately in the UI.
             state
                 .snapshots
                 .retain(|snapshot| snapshot.provider != provider);
@@ -3829,7 +3830,9 @@ mod windows_shell {
                     .take(MENU_VISIBLE_PROVIDER_MAX)
                     .enumerate()
                 {
-                    let flags = if !resolved_view.is_provider_hidden(provider) {
+                    let active = app_state_ref(hwnd)
+                        .is_some_and(|state| provider_is_active(state, provider, &resolved_view));
+                    let flags = if active {
                         MF_STRING | MF_CHECKED
                     } else {
                         MF_STRING

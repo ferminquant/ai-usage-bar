@@ -326,9 +326,12 @@ pub fn filter_snapshots_for_view(
 }
 
 /// Providers represented by the refresh report, including providers whose
-/// latest row is unavailable or not configured. Such a provider cannot drive
-/// the compact pill, but it must remain addressable by the control panel so a
-/// user can hide or re-enable it.
+/// latest row is unavailable or not configured.
+///
+/// This is intentionally broader than [`switchable_providers_for_snapshots`]:
+/// a provider with no usable quota cannot drive the compact pill, but it still
+/// needs to be addressable by display preferences so an authentication or
+/// subscription failure can be hidden from the tooltip and control panel.
 pub fn providers_for_snapshots(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
     let mut providers = Vec::new();
     for snapshot in snapshots {
@@ -339,9 +342,10 @@ pub fn providers_for_snapshots(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
     providers
 }
 
-/// Providers that currently expose at least one compact percentage row.
+/// Providers that currently expose at least one usable compact percentage row.
 /// Unlike the resolved display view, this intentionally ignores visibility so
-/// the shell can offer a way to unhide a provider that is currently hidden.
+/// the shell can keep hidden-but-usable providers available for restoration.
+/// Diagnostic-only providers use [`providers_for_snapshots`] instead.
 pub fn switchable_providers_for_snapshots(snapshots: &[UsageSnapshot]) -> Vec<Provider> {
     let mut providers = Vec::new();
     for snapshot in snapshots
@@ -1091,6 +1095,31 @@ mod tests {
         assert_eq!(filtered, vec![codex]);
         // Visibility filtering never mutates provider enablement.
         assert_eq!(view.hidden_providers, vec![Provider::OllamaCloud]);
+    }
+
+    #[test]
+    fn unavailable_provider_is_addressable_and_can_be_hidden() {
+        let mut unavailable = make_snapshot(None, Freshness::Unavailable, None);
+        unavailable.provider = Provider::Kimi;
+        unavailable.account_id = "kimi-test".into();
+        unavailable.error = Some(AdapterError {
+            code: ErrorCode::AuthExpired,
+            message: None,
+        });
+
+        // An unavailable row cannot drive the compact pill, but it must still
+        // be represented so the shell can persist a hide preference for it.
+        assert!(switchable_providers_for_snapshots(&[unavailable.clone()]).is_empty());
+        assert_eq!(
+            providers_for_snapshots(&[unavailable.clone()]),
+            vec![Provider::Kimi]
+        );
+
+        let view = ResolvedView {
+            hidden_providers: vec![Provider::Kimi],
+            ..ResolvedView::default()
+        };
+        assert!(filter_snapshots_for_view(&[unavailable], &view).is_empty());
     }
 
     #[test]
