@@ -277,9 +277,9 @@ fn quota_window_exhausted(snapshots: &[UsageSnapshot], window: &str) -> bool {
 /// Hides providers listed in [`ResolvedView::hidden_providers`], restricts
 /// quota rows to each provider's `visible_windows`, and applies optional
 /// metric preferences. An absent per-provider preference uses the provider's
-/// defaults; an explicit empty list hides all optional metrics. This never
-/// touches provider `enabled`, so scheduling stays independent of display
-/// visibility.
+/// defaults; an explicit empty list hides all optional metrics. This pure
+/// filter never mutates provider enablement; the Windows shell pairs the
+/// provider control's display and scheduling changes before calling it.
 pub fn filter_snapshots_for_view(
     snapshots: &[UsageSnapshot],
     view: &ResolvedView,

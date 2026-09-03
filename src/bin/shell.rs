@@ -1077,11 +1077,21 @@ mod windows_shell {
         let Some(state) = app_state(hwnd) else {
             return;
         };
+        let resolved = state.config.resolved_view(&state.known_providers);
+        if !state.known_providers.contains(&provider)
+            || !provider_is_active(state, &provider, &resolved)
+        {
+            return;
+        }
         // Clear any transient status so the pill only shows the provider name.
         clear_status_for_window(hwnd, state);
         let same_provider = state.focus_provider.as_ref() == Some(&provider);
         let forced_gate_active =
             same_provider && forced_window_for_provider(&state.snapshots, &provider).is_some();
+        let previous_config = state.config.clone();
+        let previous_focus_provider = state.focus_provider.clone();
+        let previous_focus_window = state.focus_window.clone();
+        let previous_forced_focus_window = state.forced_focus_window.clone();
         state.focus_provider = Some(provider);
         if !same_provider {
             // A provider switch starts at the provider's default window.
@@ -1091,7 +1101,6 @@ mod windows_shell {
             state.focus_window = None;
             state.forced_focus_window = None;
         }
-        let previous_config = state.config.clone();
         let focused = state.focus_provider.clone();
         let window = state.focus_window.clone();
         // A forced OpenCode gate is a temporary safety override. Reselecting
@@ -1102,10 +1111,15 @@ mod windows_shell {
                 .config
                 .set_view_defaults(focused.as_ref(), window.as_deref());
         }
-        if let Err(error) = state.config.save(&state.config_path) {
-            eprintln!("could not persist display default: {error}");
-            state.config = previous_config;
-            set_status(hwnd, state, "Could not save display preference");
+        if state.config != previous_config {
+            if let Err(error) = state.config.save(&state.config_path) {
+                eprintln!("could not persist display default: {error}");
+                state.config = previous_config;
+                state.focus_provider = previous_focus_provider;
+                state.focus_window = previous_focus_window;
+                state.forced_focus_window = previous_forced_focus_window;
+                set_status(hwnd, state, "Could not save display preference");
+            }
         }
         recompute_view(state);
         update_tooltip(hwnd, state);
@@ -1124,7 +1138,19 @@ mod windows_shell {
         let Some(provider) = state.focus_provider.clone() else {
             return;
         };
-        if !window_is_selectable(&state.snapshots, &provider, window) {
+        let Some(canonical_window) = canonical_window_key(&provider, window) else {
+            set_status(hwnd, state, "That quota window is not supported");
+            return;
+        };
+        let available = available_windows(&state.snapshots, &provider);
+        if !available
+            .iter()
+            .any(|candidate| candidate == canonical_window)
+        {
+            set_status(hwnd, state, "That quota window is no longer available");
+            return;
+        }
+        if !window_is_selectable(&state.snapshots, &provider, canonical_window) {
             let forced = forced_window_for_provider(&state.snapshots, &provider)
                 .expect("an unselectable window must have a forced gate");
             state.focus_window = Some(forced.to_string());
@@ -1143,16 +1169,22 @@ mod windows_shell {
             return;
         }
 
-        state.focus_window = Some(window.to_string());
         let previous_config = state.config.clone();
-        let focused = state.focus_provider.clone();
-        state
-            .config
-            .set_view_defaults(focused.as_ref(), Some(window));
-        if let Err(error) = state.config.save(&state.config_path) {
-            eprintln!("could not persist display default: {error}");
-            state.config = previous_config;
-            set_status(hwnd, state, "Could not save display preference");
+        let previous_focus_window = state.focus_window.clone();
+        state.focus_window = Some(canonical_window.to_string());
+        persist_focus_window_if_unforced(
+            &mut state.config,
+            &state.snapshots,
+            &provider,
+            canonical_window,
+        );
+        if state.config != previous_config {
+            if let Err(error) = state.config.save(&state.config_path) {
+                eprintln!("could not persist display default: {error}");
+                state.config = previous_config;
+                state.focus_window = previous_focus_window;
+                set_status(hwnd, state, "Could not save display preference");
+            }
         }
         recompute_view(state);
         update_tooltip(hwnd, state);
@@ -1160,6 +1192,20 @@ mod windows_shell {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
         request_panel_rebuild(hwnd);
+    }
+
+    /// Persist an explicit window only when no temporary OpenCode gate is
+    /// active. The exhausted outer window drives the pill until reset, but it
+    /// must not replace the user's configured preference.
+    fn persist_focus_window_if_unforced(
+        config: &mut AppConfig,
+        snapshots: &[UsageSnapshot],
+        provider: &Provider,
+        window: &str,
+    ) {
+        if forced_window_for_provider(snapshots, provider).is_none() {
+            config.set_view_defaults(Some(provider), Some(window));
+        }
     }
 
     fn cycle_focus_provider(hwnd: HWND) {
@@ -1439,17 +1485,21 @@ mod windows_shell {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
         request_panel_rebuild(hwnd);
-        set_status(
-            hwnd,
-            state,
-            if next_enabled {
-                "Provider enabled"
-            } else {
-                "Provider disabled"
-            },
-        );
+        let status_message = if next_enabled {
+            "Provider enabled"
+        } else {
+            "Provider disabled"
+        };
         if next_enabled {
+            // Starting a refresh clears transient status text. Kick it off
+            // first, then publish the provider result so the confirmation
+            // remains visible while the asynchronous refresh runs.
             begin_refresh(hwnd);
+            if let Some(state) = app_state(hwnd) {
+                set_status(hwnd, state, status_message);
+            }
+        } else {
+            set_status(hwnd, state, status_message);
         }
     }
 
@@ -3768,8 +3818,7 @@ mod windows_shell {
                 .unwrap_or_default();
 
             // All provider/window/metric controls live in one top-level
-            // "Show/hide" submenu.
-            // submenu. Provider visibility is global; window and optional
+            // "Show/hide" submenu. Provider visibility is global; window and optional
             // metric visibility are nested under the provider they affect so
             // labels such as "Show 5-hour" cannot be mistaken for a global
             // setting.
@@ -3901,34 +3950,13 @@ mod windows_shell {
                 }
             }
 
-            let available_windows = focused
+            let focus_windows = focused
                 .as_ref()
                 .and_then(|provider| {
-                    app_state_ref(hwnd).map(|state| {
-                        let mut labels = Vec::new();
-                        for snapshot in &state.snapshots {
-                            if &snapshot.provider != provider
-                                || snapshot.unit != "percent"
-                                || snapshot.used.is_none()
-                            {
-                                continue;
-                            }
-                            let Some(label) = snapshot.window_label.as_deref() else {
-                                continue;
-                            };
-                            let Some(canonical) = canonical_window_key(provider, label) else {
-                                continue;
-                            };
-                            if !labels.iter().any(|existing| existing == canonical) {
-                                labels.push(canonical.to_string());
-                            }
-                        }
-                        labels.sort_by_key(|label| window_sort_key(label));
-                        labels
-                    })
+                    app_state_ref(hwnd).map(|state| available_windows(&state.snapshots, provider))
                 })
                 .unwrap_or_default();
-            if !available_windows.is_empty() {
+            if !focus_windows.is_empty() {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
                 let selected_window = focused
                     .as_ref()
@@ -3948,11 +3976,7 @@ mod windows_shell {
                             "session".to_string()
                         }
                     });
-                for (index, window) in available_windows
-                    .iter()
-                    .take(MENU_SHOW_WINDOW_MAX)
-                    .enumerate()
-                {
+                for (index, window) in focus_windows.iter().take(MENU_SHOW_WINDOW_MAX).enumerate() {
                     let checked = selected_window.as_str() == window.as_str();
                     let selectable = focused.as_ref().is_none_or(|provider| {
                         app_state_ref(hwnd).is_none_or(|state| {
@@ -4098,7 +4122,7 @@ mod windows_shell {
                 id if (MENU_SHOW_WINDOW_BASE..MENU_SHOW_WINDOW_BASE + MENU_SHOW_WINDOW_MAX)
                     .contains(&id) =>
                 {
-                    if let Some(window) = available_windows.get(id - MENU_SHOW_WINDOW_BASE) {
+                    if let Some(window) = focus_windows.get(id - MENU_SHOW_WINDOW_BASE) {
                         set_focus_window(hwnd, window);
                     }
                 }
@@ -4395,6 +4419,7 @@ mod windows_shell {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use ai_usage_bar::WindowKind;
 
         #[test]
         fn percent_and_color_maps_normalized_usage_to_widget_colors() {
@@ -4455,6 +4480,43 @@ mod windows_shell {
             );
             assert_eq!(compact_window_marker(&Provider::Kimi, "total"), Some("T"));
             assert_eq!(compact_window_marker(&Provider::GrokApi, "secondary"), None);
+        }
+
+        #[test]
+        fn exhausted_opencode_window_does_not_replace_saved_focus_preference() {
+            let weekly = UsageSnapshot {
+                provider: Provider::OpenCodeGo,
+                account_id: "opencode-test".to_string(),
+                metric_kind: MetricKind::Quota,
+                window_kind: WindowKind::Weekly,
+                unit: "percent".to_string(),
+                observed_at: Utc::now(),
+                source: ai_usage_bar::Source::Fixture,
+                freshness: Freshness::Live,
+                confidence: ai_usage_bar::Confidence::Exact,
+                used: Some(100.0),
+                remaining: Some(0.0),
+                limit: Some(100.0),
+                unlimited: false,
+                resets_at: None,
+                window_label: Some("weekly".to_string()),
+                error: None,
+            };
+            let mut config = AppConfig::default();
+            config.set_view_defaults(Some(&Provider::OpenCodeGo), Some("5-hour"));
+            persist_focus_window_if_unforced(
+                &mut config,
+                &[weekly],
+                &Provider::OpenCodeGo,
+                "weekly",
+            );
+            assert_eq!(
+                config
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.default_window.as_deref()),
+                Some("5-hour")
+            );
         }
 
         #[test]
