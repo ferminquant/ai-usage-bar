@@ -4,10 +4,11 @@
 //! deliberately contains no credentials: each hosted adapter discovers its
 //! own local login/session surface.
 
+use crate::zai::zai_api_key_available;
 use crate::{
     opencode_data_available, session_available, CodexAdapter, GrokConsumerAdapter, KimiAdapter,
     MetricKind, OllamaCloudAdapter, OpenCodeGoAdapter, OpenCodeResetSettings, Provider,
-    ProviderRegistry, RegistryError,
+    ProviderRegistry, RegistryError, ZaiAdapter,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -704,6 +705,14 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
     } else {
         registry.register_not_configured(Provider::Kimi)?;
     }
+    // z.ai uses an API key supplied by the provider-owned CLI/tool setup. Do
+    // not call the monitor endpoint when no key is available; the registry
+    // still exposes a not-configured card so the user can enable it later.
+    if zai_api_key_available() {
+        registry.register(ZaiAdapter)?;
+    } else {
+        registry.register_not_configured(Provider::Zai)?;
+    }
 
     let providers = [
         Provider::Codex,
@@ -711,6 +720,7 @@ pub fn build_registry(config: &AppConfig) -> Result<ProviderRegistry, RegistryEr
         Provider::OllamaCloud,
         Provider::Kimi,
         Provider::OpenCodeGo,
+        Provider::Zai,
     ];
     // A persisted hidden provider may come from an older build where hiding
     // was display-only. Treat it as disabled at bootstrap so the new control
@@ -760,6 +770,7 @@ mod tests {
         assert!(config.provider_enabled(&Provider::OpenCodeGo));
         assert!(!config.provider_enabled(&Provider::Kimi));
         assert!(!config.provider_enabled(&Provider::OllamaCloud));
+        assert!(!config.provider_enabled(&Provider::Zai));
     }
 
     #[test]
@@ -1006,7 +1017,8 @@ mod tests {
                 Provider::GrokConsumer,
                 Provider::OllamaCloud,
                 Provider::OpenCodeGo,
-                Provider::Kimi
+                Provider::Kimi,
+                Provider::Zai
             ]
         );
     }

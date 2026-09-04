@@ -15,6 +15,9 @@
     },
     "ollama_cloud": {
       "enabled": false
+    },
+    "zai": {
+      "enabled": false
     }
   }
 }

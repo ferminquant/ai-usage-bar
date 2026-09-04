@@ -61,6 +61,9 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
 - [xAI API rate limits](https://docs.x.ai/developers/rate-limits)
 - [xAI console usage](https://docs.x.ai/console/usage)
 - Spike evidence: [grok-spike.md](spikes/grok-spike.md)
+- [Z.AI developer documentation](https://docs.z.ai/devpack/overview) — GLM Coding Plan setup, supported tools, and quota semantics.
+- [Z.AI official coding-plan plugins](https://github.com/zai-org/zai-coding-plugins) — usage-query tooling that calls the monitor endpoint.
+- [Z.AI usage spike](spikes/zai-spike.md) — endpoint evidence, response variants, and adapter limitations.
 
 Provider interfaces and plan semantics can change. The links are evidence
 starting points, not a guarantee of a stable integration contract.

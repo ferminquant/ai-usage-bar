@@ -10,6 +10,7 @@ pub mod opencode;
 pub mod security;
 pub mod startup;
 pub mod viewmodel;
+pub mod zai;
 
 pub use browser::{is_allowed_browser_url, KIMI_CONSOLE_URL, OLLAMA_USAGE_URL};
 
@@ -50,4 +51,9 @@ pub use viewmodel::{
     filter_snapshots_for_view, forced_window_for_provider, format_reset_label,
     provider_display_name, providers_for_snapshots, switchable_providers_for_snapshots,
     window_display_name, window_is_selectable, MetricCard, ProviderCard, TrayViewModel,
+};
+pub use zai::{
+    account_id_from_api_key as zai_account_id_from_api_key, error_snapshot as zai_error_snapshot,
+    fetch_zai_snapshots, parse_usage_response as parse_zai_usage_response, zai_api_key_available,
+    ZaiAdapter, ZaiAdapterError,
 };

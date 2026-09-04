@@ -46,6 +46,7 @@ Typical interactions:
 | Kimi | Five-hour and weekly windows, plus an optional total/credits view | Requires `kimi login`; some plan fields may be absent upstream. |
 | Ollama Pro | Hosted five-hour and weekly totals | Reset timestamps are not exposed by Ollama yet; the menu opens the usage page. |
 | OpenCode Go | Account-authoritative five-hour, weekly, and monthly percentages plus reset times when the local Go key is available | Reads the existing OpenCode Go key and calls the provider usage endpoint; falls back to an explicitly inferred local estimate when no key is available. |
+| Z.AI | GLM Coding Plan five-hour and weekly quota percentages, reset times, and an optional monthly MCP request allowance | Reads `ZAI_API_KEY` (or `GLM_API_KEY`; Claude-compatible setups may use `ANTHROPIC_AUTH_TOKEN` with a z.ai base URL) and calls z.ai's coding-plan monitor endpoint, an internal dashboard surface that may change. |
 
 OpenCode Go uses nested quota gates: when Monthly is exhausted, the compact
 bar is locked to Monthly; when Weekly is exhausted, it is locked to Weekly and
@@ -94,6 +95,9 @@ uncheck a provider to hide it and stop its refreshes, then turn on **Disabled**
 to restore it later. Advanced users can still set `enabled` to `false` in
 `%APPDATA%\AI Usage Bar\config.json`. Provider credentials remain in each
 provider's own local CLI/session store.
+For Z.AI, set `ZAI_API_KEY` (or `GLM_API_KEY`) in the environment and enable
+the `zai` provider in the JSON configuration. Claude-compatible setups can
+use `ANTHROPIC_AUTH_TOKEN` when `ANTHROPIC_BASE_URL` points at `api.z.ai`.
 
 ### Build from source
 

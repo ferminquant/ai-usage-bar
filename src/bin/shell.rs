@@ -116,8 +116,8 @@ mod windows_shell {
         /// Which provider drives the compact pill (None = auto first).
         focus_provider: Option<Provider>,
         /// Optional quota window for the focused provider. Ollama exposes
-        /// `session`/`weekly`; Kimi exposes `5-hour`/`weekly` and an optional
-        /// `total` when the managed endpoint reports it.
+        /// `session`/`weekly`; Kimi and Z.AI expose `5-hour`/`weekly`; Kimi
+        /// may also report an optional `total` from its managed endpoint.
         focus_window: Option<String>,
         /// Temporary OpenCode safety override while an outer quota is
         /// exhausted. This is not persisted as the user's preference.
@@ -2198,6 +2198,11 @@ mod windows_shell {
                 "primary" | "weekly" => Some("primary"),
                 _ => None,
             },
+            Provider::Zai => match label {
+                "5-hour" => Some("5-hour"),
+                "weekly" | "primary" => Some("weekly"),
+                _ => None,
+            },
             Provider::GrokConsumer | Provider::GrokApi => match label {
                 "primary" | "weekly" => Some("primary"),
                 _ => None,
@@ -3972,7 +3977,10 @@ mod windows_shell {
                     })
                     .unwrap_or_else(|| {
                         if focused.as_ref().is_some_and(|provider| {
-                            matches!(provider, Provider::Kimi | Provider::OpenCodeGo)
+                            matches!(
+                                provider,
+                                Provider::Kimi | Provider::OpenCodeGo | Provider::Zai
+                            )
                         }) {
                             "5-hour".to_string()
                         } else {

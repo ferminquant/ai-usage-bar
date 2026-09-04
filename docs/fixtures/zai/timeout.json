@@ -1,0 +1,7 @@
+{
+  "_description": "Redacted fixture: the z.ai monitor request exceeded the adapter deadline.",
+  "_source": "GET https://api.z.ai/api/monitor/usage/quota/limit",
+  "_error": {
+    "code": "timeout"
+  }
+}

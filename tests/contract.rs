@@ -1,9 +1,9 @@
 mod common;
 
 use ai_usage_bar::{
-    parse_usage_response, parse_usages_response, AdapterError, Confidence, ErrorCode, Freshness,
-    KimiAdapterError, MetricKind, Provider, SnapshotValidationError, Source, UsageSnapshot,
-    WindowKind,
+    parse_usage_response, parse_usages_response, parse_zai_usage_response, AdapterError,
+    Confidence, ErrorCode, Freshness, KimiAdapterError, MetricKind, Provider,
+    SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
 use chrono::{Duration, TimeZone, Utc};
 use common::{instant, metric_snapshot};
@@ -130,6 +130,30 @@ fn contract_kimi_fixture_normalizes_weekly_rolling_and_credits() {
     assert_eq!(credits.unit, "cents");
 
     assert!(snapshots.iter().all(|snapshot| snapshot.validate().is_ok()));
+}
+
+#[test]
+fn contract_zai_fixture_normalizes_credit_windows_and_resets() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/fixtures/zai/normal.json");
+    let raw: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("Z.AI fixture should be readable"),
+    )
+    .expect("Z.AI fixture should be JSON");
+
+    let snapshots = parse_zai_usage_response(&raw, instant(), "zai-contract")
+        .expect("Z.AI credit limits should satisfy the adapter contract");
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots.iter().all(|snapshot| {
+        snapshot.provider == Provider::Zai
+            && snapshot.metric_kind == MetricKind::Quota
+            && snapshot.unit == "percent"
+            && snapshot.source == Source::Api
+            && snapshot.resets_at.is_some()
+            && snapshot.validate().is_ok()
+    }));
+    assert_eq!(snapshots[0].window_kind, WindowKind::Rolling);
+    assert_eq!(snapshots[1].window_kind, WindowKind::Weekly);
 }
 
 #[test]

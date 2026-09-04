@@ -7,7 +7,7 @@ AI Usage Bar
 ## Problem
 
 Hosted AI services expose usage limits in different places and with different
-semantics. Codex, Kimi, Grok, and future hosted Ollama services may use rolling
+semantics. Codex, Kimi, Grok, Z.AI, and hosted Ollama services may use rolling
 windows, weekly pools, credits, or spend. The user has to open several apps or
 dashboards to understand what is available.
 
@@ -23,7 +23,7 @@ small desktop indicator instead of several open dashboards.
 
 - As a user, I can see whether each provider is healthy, stale, unavailable,
   or not configured.
-- As a user, I can see the active Codex/Kimi/Grok quota window and reset time
+- As a user, I can see the active Codex/Kimi/Grok/Z.AI quota window and reset time
   without opening a browser.
 - As a user, I can see each supported online provider independently without
   confusing unrelated quota, credit, and spend metrics.
@@ -39,7 +39,7 @@ small desktop indicator instead of several open dashboards.
 
 - Windows-first compact taskbar/tray experience.
 - Local daemon with cached snapshots.
-- Provider adapter boundary for Codex, Kimi, hosted Ollama, and Grok.
+- Provider adapter boundary for Codex, Kimi, hosted Ollama, Grok, and Z.AI.
 - Explicit freshness, confidence, and source labels.
 - Offline fixture tests before live provider calls.
 
