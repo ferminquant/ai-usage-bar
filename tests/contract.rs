@@ -2,8 +2,8 @@ mod common;
 
 use ai_usage_bar::{
     parse_usage_response, parse_usages_response, parse_zai_usage_response, AdapterError,
-    Confidence, ErrorCode, Freshness, KimiAdapterError, MetricKind, Provider,
-    SnapshotValidationError, Source, UsageSnapshot, WindowKind,
+    Confidence, ErrorCode, Freshness, KimiAdapterError, MetricKind, Provider, RefreshDiagnostic,
+    RefreshReport, SnapshotValidationError, Source, UsageSnapshot, WindowKind,
 };
 use chrono::{Duration, TimeZone, Utc};
 use common::{instant, metric_snapshot};
@@ -449,4 +449,89 @@ fn contract_rejects_impossible_values_with_actionable_errors() {
         unlimited_over_limit.validate().is_ok(),
         "contract: unlimited may exceed a reported limit field"
     );
+}
+
+#[test]
+fn contract_refresh_report_serialization_defines_snake_case_and_null_semantics() {
+    let observed_at = instant();
+    let report = RefreshReport {
+        snapshots: vec![metric_snapshot(
+            Provider::Codex,
+            observed_at,
+            MetricKind::Quota,
+            WindowKind::Weekly,
+            "percent",
+            Some(20.0),
+            Some(80.0),
+            Some(100.0),
+            Freshness::Live,
+            Some("primary"),
+        )],
+        diagnostics: vec![RefreshDiagnostic {
+            provider: Provider::Codex,
+            freshness: Freshness::Stale,
+            error_code: Some(ErrorCode::Timeout),
+            last_attempt_at: Some(observed_at),
+            last_success_at: None,
+        }],
+        cycle_started_at: Some(observed_at),
+        cycle_finished_at: Some(observed_at + Duration::seconds(30)),
+        next_scheduled_refresh: None,
+    };
+
+    let encoded = serde_json::to_value(&report).expect("contract serialization should work");
+    let object = encoded
+        .as_object()
+        .expect("report should encode as an object");
+    for key in [
+        "snapshots",
+        "diagnostics",
+        "cycle_started_at",
+        "cycle_finished_at",
+        "next_scheduled_refresh",
+    ] {
+        assert!(object.contains_key(key), "missing report key {key}");
+    }
+    assert_eq!(
+        object["next_scheduled_refresh"],
+        serde_json::Value::Null,
+        "on-demand refreshes encode a null next-scheduled time"
+    );
+    let diagnostic = object["diagnostics"][0]
+        .as_object()
+        .expect("diagnostic should encode as an object");
+    for key in [
+        "provider",
+        "freshness",
+        "error_code",
+        "last_attempt_at",
+        "last_success_at",
+    ] {
+        assert!(diagnostic.contains_key(key), "missing diagnostic key {key}");
+    }
+    assert_eq!(
+        diagnostic["last_success_at"],
+        serde_json::Value::Null,
+        "absent success metadata encodes as null"
+    );
+
+    let decoded: RefreshReport = serde_json::from_value(encoded).expect("round trip should work");
+    assert_eq!(decoded, report);
+
+    let empty = serde_json::to_value(RefreshReport::default()).expect("default should encode");
+    let empty_object = empty
+        .as_object()
+        .expect("default should encode as an object");
+    for key in [
+        "cycle_started_at",
+        "cycle_finished_at",
+        "next_scheduled_refresh",
+    ] {
+        assert_eq!(
+            empty_object[key],
+            serde_json::Value::Null,
+            "{key} should default to null"
+        );
+    }
+    assert!(empty_object["snapshots"].as_array().unwrap().is_empty());
 }

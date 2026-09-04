@@ -2,7 +2,8 @@ use crate::model::{
     AdapterError, ErrorCode, Freshness, MetricKind, Provider, ProviderAdapter, Source,
     UsageSnapshot, WindowKind,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{
     mpsc::{self, RecvTimeoutError},
@@ -307,17 +308,53 @@ impl SnapshotCache {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Per-provider outcome of one refresh cycle.
+///
+/// `last_attempt_at` is set whenever the cycle actually tried to fetch the
+/// provider; a provider that was skipped (for example, not configured) keeps
+/// it `None`. `last_success_at` records when the provider last produced usable
+/// data: the current cycle's time after a successful fetch, the retained
+/// cached observation time after a failed fetch, or `None` when no usable
+/// observation exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct RefreshDiagnostic {
     pub provider: Provider,
     pub freshness: Freshness,
     pub error_code: Option<ErrorCode>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Outcome of one full refresh cycle across every enabled provider.
+///
+/// Cycle metadata is `None` when unavailable so existing consumers keep
+/// compiling and receive safe defaults; `next_scheduled_refresh` is supplied
+/// by callers that own a refresh schedule and stays `None` for on-demand
+/// refreshes.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct RefreshReport {
     pub snapshots: Vec<UsageSnapshot>,
     pub diagnostics: Vec<RefreshDiagnostic>,
+    pub cycle_started_at: Option<DateTime<Utc>>,
+    pub cycle_finished_at: Option<DateTime<Utc>>,
+    pub next_scheduled_refresh: Option<DateTime<Utc>>,
+}
+
+impl RefreshReport {
+    /// Wall-clock duration of the refresh cycle. A clock stepping backwards
+    /// between cycle start and finish is clamped to zero so a slow or failed
+    /// adapter can never produce a negative duration.
+    pub fn cycle_elapsed(&self) -> Option<ChronoDuration> {
+        let started_at = self.cycle_started_at?;
+        let finished_at = self.cycle_finished_at?;
+        Some(if finished_at > started_at {
+            finished_at - started_at
+        } else {
+            ChronoDuration::zero()
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -377,7 +414,20 @@ impl RefreshService {
     }
 
     pub fn refresh_all_with_report(&self) -> RefreshReport {
-        let now = self.clock.now();
+        self.refresh_cycle_with_report(None)
+    }
+
+    /// Refresh every enabled provider and report cycle timing metadata.
+    ///
+    /// Callers that own a refresh schedule (for example, the shell's refresh
+    /// timer) pass the expected time of the next cycle so surfaces can explain
+    /// data age; on-demand callers pass `None`.
+    pub fn refresh_cycle_with_report(
+        &self,
+        next_scheduled_refresh: Option<DateTime<Utc>>,
+    ) -> RefreshReport {
+        let cycle_started_at = self.clock.now();
+        let now = cycle_started_at;
         let entries = self.registry.enabled_entries();
         let mut runs = Vec::new();
 
@@ -408,6 +458,8 @@ impl RefreshService {
                             .clone(),
                         freshness: Freshness::Unavailable,
                         error_code: Some(ErrorCode::Unknown),
+                        last_attempt_at: Some(now),
+                        last_success_at: None,
                     },
                 });
                 runs.push((
@@ -424,9 +476,13 @@ impl RefreshService {
             snapshots.extend(run.snapshots);
             diagnostics.push(run.diagnostic);
         }
+        let cycle_finished_at = self.clock.now();
         RefreshReport {
             snapshots,
             diagnostics,
+            cycle_started_at: Some(cycle_started_at),
+            cycle_finished_at: Some(cycle_finished_at),
+            next_scheduled_refresh,
         }
     }
 
@@ -466,6 +522,8 @@ fn run_provider(
                 provider,
                 freshness: Freshness::NotConfigured,
                 error_code: None,
+                last_attempt_at: None,
+                last_success_at: None,
             },
         };
     };
@@ -594,6 +652,8 @@ fn successful_refresh(
             provider: provider.clone(),
             freshness,
             error_code: saw_schema_drift.then_some(ErrorCode::SchemaDrift),
+            last_attempt_at: Some(now),
+            last_success_at: Some(now),
         },
     }
 }
@@ -701,15 +761,20 @@ fn fallback(
                 provider: provider.clone(),
                 freshness: Freshness::Unavailable,
                 error_code: Some(error.code),
+                last_attempt_at: Some(now),
+                last_success_at: None,
             },
         }
     } else {
+        let last_success_at = previous.iter().map(|snapshot| snapshot.observed_at).max();
         ProviderRun {
             snapshots: previous,
             diagnostic: RefreshDiagnostic {
                 provider: provider.clone(),
                 freshness: Freshness::Stale,
                 error_code: Some(error.code),
+                last_attempt_at: Some(now),
+                last_success_at,
             },
         }
     }
@@ -851,6 +916,31 @@ mod tests {
     impl Clock for FixedClock {
         fn now(&self) -> DateTime<Utc> {
             *self.now.lock().unwrap()
+        }
+    }
+
+    /// Clock that steps by a fixed offset on every read, including negative
+    /// offsets, so cycle timing can be exercised deterministically.
+    struct SteppedClock {
+        base: DateTime<Utc>,
+        step: ChronoDuration,
+        calls: AtomicUsize,
+    }
+
+    impl SteppedClock {
+        fn new(base: DateTime<Utc>, step: ChronoDuration) -> Self {
+            Self {
+                base,
+                step,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Clock for SteppedClock {
+        fn now(&self) -> DateTime<Utc> {
+            let calls = self.calls.fetch_add(1, Ordering::SeqCst) as i32;
+            self.base + self.step * calls
         }
     }
 
@@ -1315,5 +1405,132 @@ mod tests {
 
         assert_eq!(report.snapshots.len(), 3);
         assert!(maximum.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[test]
+    fn refresh_report_carries_cycle_timing_and_next_schedule() {
+        let start = instant();
+        let clock = SteppedClock::new(start, ChronoDuration::seconds(2));
+        let registry = ProviderRegistry::new();
+        let (adapter, _) = SequenceAdapter::new(
+            Provider::Codex,
+            vec![Ok(vec![snapshot(
+                Provider::Codex,
+                start,
+                MetricKind::Quota,
+                WindowKind::Weekly,
+                25.0,
+            )])],
+        );
+        registry.register(adapter).unwrap();
+
+        let next = start + ChronoDuration::minutes(1);
+        let service =
+            RefreshService::with_clock(registry, RefreshPolicy::default(), Arc::new(clock));
+        let report = service.refresh_cycle_with_report(Some(next));
+
+        assert_eq!(report.cycle_started_at, Some(start));
+        assert_eq!(
+            report.cycle_finished_at,
+            Some(start + ChronoDuration::seconds(2))
+        );
+        assert_eq!(report.cycle_elapsed(), Some(ChronoDuration::seconds(2)));
+        assert_eq!(report.next_scheduled_refresh, Some(next));
+        assert_eq!(report.diagnostics[0].last_attempt_at, Some(start));
+        assert_eq!(report.diagnostics[0].last_success_at, Some(start));
+    }
+
+    #[test]
+    fn cycle_elapsed_clamps_a_backwards_clock_to_zero() {
+        let start = instant();
+        let clock = SteppedClock::new(start, -ChronoDuration::minutes(5));
+        let registry = ProviderRegistry::new();
+        let (adapter, _) = SequenceAdapter::new(Provider::Codex, vec![Ok(Vec::new())]);
+        registry.register(adapter).unwrap();
+
+        let service =
+            RefreshService::with_clock(registry, RefreshPolicy::default(), Arc::new(clock));
+        let report = service.refresh_all_with_report();
+
+        assert_eq!(report.cycle_started_at, Some(start));
+        assert_eq!(
+            report.cycle_finished_at,
+            Some(start - ChronoDuration::minutes(5))
+        );
+        assert_eq!(report.cycle_elapsed(), Some(ChronoDuration::zero()));
+        assert_eq!(report.next_scheduled_refresh, None);
+    }
+
+    #[test]
+    fn failed_attempt_reports_attempt_time_and_keeps_cached_observation_time() {
+        let first = instant();
+        let second = first + ChronoDuration::minutes(2);
+        let clock = FixedClock::new(first);
+        let registry = ProviderRegistry::new();
+        let (adapter, _) = SequenceAdapter::new(
+            Provider::Codex,
+            vec![
+                Ok(vec![snapshot(
+                    Provider::Codex,
+                    first,
+                    MetricKind::Quota,
+                    WindowKind::Weekly,
+                    25.0,
+                )]),
+                Err(AdapterError {
+                    code: ErrorCode::Timeout,
+                    message: None,
+                }),
+            ],
+        );
+        registry.register(adapter).unwrap();
+        let service = service(registry, &clock, RefreshPolicy::default());
+
+        service.refresh_all();
+        clock.set(second);
+        let report = service.refresh_all_with_report();
+
+        assert_eq!(report.diagnostics[0].freshness, Freshness::Stale);
+        assert_eq!(report.diagnostics[0].last_attempt_at, Some(second));
+        assert_eq!(report.diagnostics[0].last_success_at, Some(first));
+        assert_eq!(report.snapshots[0].observed_at, first);
+    }
+
+    #[test]
+    fn failed_attempt_without_usable_history_reports_no_success_time() {
+        let first = instant();
+        let clock = FixedClock::new(first);
+        let registry = ProviderRegistry::new();
+        let (adapter, _) = SequenceAdapter::new(
+            Provider::Codex,
+            vec![Err(AdapterError {
+                code: ErrorCode::Timeout,
+                message: None,
+            })],
+        );
+        registry.register(adapter).unwrap();
+
+        let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
+
+        assert_eq!(report.diagnostics[0].freshness, Freshness::Unavailable);
+        assert_eq!(report.diagnostics[0].last_attempt_at, Some(first));
+        assert_eq!(report.diagnostics[0].last_success_at, None);
+    }
+
+    #[test]
+    fn not_configured_provider_reports_no_attempt() {
+        let first = instant();
+        let clock = FixedClock::new(first);
+        let registry = ProviderRegistry::new();
+        registry.register_not_configured(Provider::Kimi).unwrap();
+
+        let report = service(registry, &clock, RefreshPolicy::default()).refresh_all_with_report();
+
+        assert_eq!(report.diagnostics[0].freshness, Freshness::NotConfigured);
+        assert_eq!(report.diagnostics[0].last_attempt_at, None);
+        assert_eq!(report.diagnostics[0].last_success_at, None);
+        assert_eq!(report.cycle_started_at, Some(first));
+        assert_eq!(report.cycle_finished_at, Some(first));
+        assert_eq!(report.next_scheduled_refresh, None);
     }
 }
