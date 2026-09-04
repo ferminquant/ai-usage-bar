@@ -207,8 +207,12 @@ does not install or alter any provider CLI or browser session.
 The repository's release workflow is deliberately tag-driven. To publish a
 versioned package:
 
-1. Update the package version in `Cargo.toml`.
-2. Create an annotated tag with the same version, for example
+1. On a branch, update the package version in `Cargo.toml` and its matching
+   `Cargo.lock` entry, and refresh the example package name in this document.
+   Open a pull request with the bump: `main` is protected, so the change must
+   pass the required status checks and be merged through review.
+2. After the pull request merges, update local `main` and create an annotated
+   tag with the same version, for example
    `git tag -a v0.2.0 -m "AI Usage Bar v0.2.0"`.
 3. Push the tag with `git push origin v0.2.0`.
 
