@@ -318,6 +318,73 @@ pub(crate) fn render_detail_text(snapshots: &[UsageSnapshot]) -> String {
     lines.join("\n")
 }
 
+/// What the shell knows about the per-user startup registration, in the shape
+/// the panel and menu need for honest labels and feedback.
+///
+/// "Disabled" means no Run entry points at the running executable; a Run
+/// entry owned by a *different* executable is reported separately so the
+/// control can explain why toggling from this copy will refuse, instead of
+/// silently looking like an unused feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartupRegistrationState {
+    EnabledForCurrentExecutable,
+    Disabled,
+    RegisteredToOtherExecutable { command_path: String },
+    Unknown,
+}
+
+pub(crate) fn startup_button_label(state: &StartupRegistrationState) -> String {
+    match state {
+        StartupRegistrationState::EnabledForCurrentExecutable => "Startup ✓".to_string(),
+        StartupRegistrationState::Disabled => "Startup".to_string(),
+        StartupRegistrationState::RegisteredToOtherExecutable { .. } => {
+            "Startup (other)".to_string()
+        }
+        StartupRegistrationState::Unknown => "Startup ?".to_string(),
+    }
+}
+
+/// Decide what clicking the startup control should do for a registration
+/// state. A foreign registration is never rewritten; it is explained instead,
+/// matching the registry module's rule against deleting another
+/// executable's entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartupTogglePlan {
+    Write { enable: bool },
+    ExplainConflict { command_path: String },
+    ReportUnreadable,
+}
+
+pub(crate) fn startup_toggle_plan(state: &StartupRegistrationState) -> StartupTogglePlan {
+    match state {
+        StartupRegistrationState::EnabledForCurrentExecutable => {
+            StartupTogglePlan::Write { enable: false }
+        }
+        StartupRegistrationState::Disabled => StartupTogglePlan::Write { enable: true },
+        StartupRegistrationState::RegisteredToOtherExecutable { command_path } => {
+            StartupTogglePlan::ExplainConflict {
+                command_path: command_path.clone(),
+            }
+        }
+        StartupRegistrationState::Unknown => StartupTogglePlan::ReportUnreadable,
+    }
+}
+
+pub(crate) fn startup_enabled_message(enable: bool) -> String {
+    if enable {
+        "Run on Windows startup enabled".to_string()
+    } else {
+        "Run on Windows startup disabled".to_string()
+    }
+}
+
+pub(crate) fn startup_conflict_message(command_path: &str) -> String {
+    format!("Startup is registered to another copy: {command_path}. Manage it from that copy.")
+}
+
+pub(crate) const STARTUP_UNREADABLE_MESSAGE: &str = "Could not read the startup setting";
+pub(crate) const STARTUP_WRITE_FAILED_MESSAGE: &str = "Could not update the startup setting";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +814,80 @@ mod tests {
         assert_eq!(release_route(None), ReleaseRoute::Click);
         assert_eq!(release_route(Some(false)), ReleaseRoute::HeaderClick);
         assert_eq!(release_route(Some(true)), ReleaseRoute::Reorder);
+    }
+
+    #[test]
+    fn startup_labels_distinguish_on_off_foreign_and_unreadable() {
+        // A foreign registration must not render like a plain "off", which is
+        // what made the startup control look dead: startup could be enabled
+        // for the installed copy while this button showed no checkmark.
+        let enabled = StartupRegistrationState::EnabledForCurrentExecutable;
+        let disabled = StartupRegistrationState::Disabled;
+        let foreign = StartupRegistrationState::RegisteredToOtherExecutable {
+            command_path: r"C:\App\ai-usage-bar-shell.exe".into(),
+        };
+        let unknown = StartupRegistrationState::Unknown;
+
+        assert_eq!(startup_button_label(&enabled), "Startup ✓");
+        assert_eq!(startup_button_label(&disabled), "Startup");
+        assert_eq!(startup_button_label(&foreign), "Startup (other)");
+        assert_eq!(startup_button_label(&unknown), "Startup ?");
+        assert_ne!(
+            startup_button_label(&enabled),
+            startup_button_label(&disabled)
+        );
+    }
+
+    #[test]
+    fn startup_toggle_plan_writes_only_its_own_registration() {
+        let enabled = StartupRegistrationState::EnabledForCurrentExecutable;
+        let disabled = StartupRegistrationState::Disabled;
+        let foreign = StartupRegistrationState::RegisteredToOtherExecutable {
+            command_path: r"C:\App\ai-usage-bar-shell.exe".into(),
+        };
+        let unknown = StartupRegistrationState::Unknown;
+
+        assert_eq!(
+            startup_toggle_plan(&enabled),
+            StartupTogglePlan::Write { enable: false }
+        );
+        assert_eq!(
+            startup_toggle_plan(&disabled),
+            StartupTogglePlan::Write { enable: true }
+        );
+        // Never rewrite a foreign registration; explain it instead.
+        assert_eq!(
+            startup_toggle_plan(&foreign),
+            StartupTogglePlan::ExplainConflict {
+                command_path: r"C:\App\ai-usage-bar-shell.exe".into(),
+            }
+        );
+        assert_eq!(
+            startup_toggle_plan(&unknown),
+            StartupTogglePlan::ReportUnreadable
+        );
+    }
+
+    #[test]
+    fn startup_feedback_messages_name_the_conflicting_copy() {
+        assert_eq!(
+            startup_enabled_message(true),
+            "Run on Windows startup enabled"
+        );
+        assert_eq!(
+            startup_enabled_message(false),
+            "Run on Windows startup disabled"
+        );
+        let conflict = startup_conflict_message(r"C:\App\ai-usage-bar-shell.exe");
+        assert!(conflict.contains(r"C:\App\ai-usage-bar-shell.exe"));
+        assert!(conflict.contains("another copy"));
+        assert_eq!(
+            STARTUP_UNREADABLE_MESSAGE,
+            "Could not read the startup setting"
+        );
+        assert_eq!(
+            STARTUP_WRITE_FAILED_MESSAGE,
+            "Could not update the startup setting"
+        );
     }
 }
