@@ -15,6 +15,7 @@ fn provider_strategy() -> impl Strategy<Value = Provider> {
         Just(Provider::OllamaCloud),
         Just(Provider::GrokConsumer),
         Just(Provider::GrokApi),
+        Just(Provider::Zai),
     ]
 }
 fn metric_strategy() -> impl Strategy<Value = MetricKind> {

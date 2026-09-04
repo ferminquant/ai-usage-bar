@@ -1,0 +1,9 @@
+{
+  "_description": "Redacted fixture: the API returned no usable limits for the current account.",
+  "_source": "GET https://api.z.ai/api/monitor/usage/quota/limit",
+  "data": {
+    "limits": []
+  },
+  "success": true,
+  "code": 200
+}

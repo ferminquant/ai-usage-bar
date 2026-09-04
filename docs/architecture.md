@@ -7,6 +7,7 @@ Provider surfaces
   ├─ Codex app-server / local auth
   ├─ Kimi CLI or Console
   ├─ Ollama Pro/cloud supported surface
+  ├─ Z.AI GLM Coding Plan monitor endpoint
   └─ Grok supported usage surface / optional browser bridge
              │
              ▼

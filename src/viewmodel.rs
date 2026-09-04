@@ -112,6 +112,8 @@ fn metric_sort_priority(provider: &str, metric: &MetricCard) -> u8 {
         "OpenCode" if label == "5-hour" => 0,
         "OpenCode" if label == "weekly" => 1,
         "OpenCode" if matches!(label.as_str(), "monthly" | "total") => 2,
+        "Z.AI" if label == "5-hour" => 0,
+        "Z.AI" if label == "weekly" => 1,
         _ if matches!(label.as_str(), "primary" | "weekly") => 2,
         _ if metric.metric_kind == MetricKind::Credits => 10,
         _ => 5,
@@ -153,7 +155,7 @@ fn tooltip_metric_name(provider: &str, metric: &MetricCard) -> String {
     // Keep provider-specific aliases out of the UI. In particular, Ollama's
     // `session` and Kimi's unnamed rolling row both mean the same 5-hour
     // window, while `primary` is the provider-neutral weekly summary used by
-    // Codex/Grok/Kimi.
+    // Codex/Grok/Kimi. Z.AI uses the same five-hour/weekly vocabulary as Kimi.
     if label.eq_ignore_ascii_case("session") || label.eq_ignore_ascii_case("5-hour") {
         return "5-hour".to_string();
     }
@@ -214,6 +216,11 @@ pub fn snapshot_window_key(snapshot: &UsageSnapshot) -> Option<&'static str> {
         Provider::Codex => match label {
             "5-hour" => Some("5-hour"),
             "primary" | "weekly" => Some("primary"),
+            _ => None,
+        },
+        Provider::Zai => match label {
+            "5-hour" => Some("5-hour"),
+            "weekly" | "primary" => Some("weekly"),
             _ => None,
         },
         _ => match label {
@@ -413,6 +420,7 @@ pub fn provider_display_name(provider: &Provider) -> &'static str {
         Provider::GrokConsumer => "Grok",
         Provider::GrokApi => "Grok API",
         Provider::OpenCodeGo => "OpenCode",
+        Provider::Zai => "Z.AI",
     }
 }
 
@@ -440,6 +448,7 @@ fn is_compact_candidate(s: &UsageSnapshot) -> bool {
                 s.window_label.as_deref(),
                 Some("5-hour" | "primary" | "weekly")
             ),
+            Provider::Zai => matches!(s.window_label.as_deref(), Some("5-hour" | "weekly")),
             _ => s.window_label.as_deref() == Some("primary"),
         }
         && s.used.is_some()
@@ -484,6 +493,11 @@ fn window_matches_snapshot(snapshot: &UsageSnapshot, window: &str) -> bool {
             }
             _ => false,
         },
+        Provider::Zai => match window {
+            "5-hour" => snapshot.window_label.as_deref() == Some("5-hour"),
+            "weekly" => matches!(snapshot.window_label.as_deref(), Some("weekly" | "primary")),
+            _ => false,
+        },
         _ => window == "primary" && snapshot.window_label.as_deref() == Some("primary"),
     }
 }
@@ -494,6 +508,7 @@ fn compact_priority(snapshot: &UsageSnapshot) -> u8 {
         Provider::OllamaCloud if snapshot.window_label.as_deref() == Some("session") => 0,
         Provider::Kimi if snapshot.window_label.as_deref() == Some("5-hour") => 0,
         Provider::OpenCodeGo if snapshot.window_label.as_deref() == Some("5-hour") => 0,
+        Provider::Zai if snapshot.window_label.as_deref() == Some("5-hour") => 0,
         _ => 1,
     }
 }
@@ -510,7 +525,7 @@ fn first_compact_candidate<'a>(
         candidates.min_by_key(|snapshot| compact_priority(snapshot))
     } else {
         // Preserve registry/adapter order for the global auto-selected pill.
-        // Provider-specific defaults (Kimi/Ollama 5-hour) apply only after a
+        // Provider-specific defaults (Kimi/Ollama/Z.AI 5-hour) apply only after a
         // user focuses that provider.
         candidates.next()
     }

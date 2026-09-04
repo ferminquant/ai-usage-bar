@@ -56,7 +56,7 @@ Ollama Pro totals are verified in spike #4.
   "properties": {
     "provider": {
       "type": "string",
-      "description": "Stable provider identifier, e.g. codex, kimi, ollama_cloud, grok_consumer, grok_api."
+      "description": "Stable provider identifier, e.g. codex, kimi, ollama_cloud, grok_consumer, grok_api, zai."
     },
     "account_id": {
       "type": "string",
@@ -251,6 +251,15 @@ the evidence spikes (#2-#6) and then folded back here.
 - **Grok API**: separate adapter/account type from consumer. API RPS/TPM and
   console spend are not conflated with the consumer weekly pool; deferred
   until a dedicated API-key story.
+- **Z.AI GLM Coding Plan**: the official coding-plan usage tooling calls the
+  monitor endpoint `GET https://api.z.ai/api/monitor/usage/quota/limit` with
+  the API key in `Authorization`. Legacy `TOKENS_LIMIT` and current
+  `CREDIT_LIMIT` rows map to rolling five-hour and weekly `quota` snapshots
+  normalized to `unit="percent"`; optional `TIME_LIMIT` MCP/tool rows remain
+  separate `requests` snapshots. `nextResetTime` is epoch milliseconds when
+  present. The endpoint is an internal dashboard surface, so unknown types,
+  missing fields, and reset metadata are handled conservatively; see
+  [zai-spike.md](spikes/zai-spike.md).
 
 ## Fixture shape
 

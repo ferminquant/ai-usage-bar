@@ -7,6 +7,7 @@ const PROVIDER_OLLAMA_CLOUD: &str = "ollama_cloud";
 const PROVIDER_GROK_CONSUMER: &str = "grok_consumer";
 const PROVIDER_GROK_API: &str = "grok_api";
 const PROVIDER_OPENCODE_GO: &str = "opencode_go";
+const PROVIDER_ZAI: &str = "zai";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,6 +18,7 @@ pub enum Provider {
     GrokConsumer,
     GrokApi,
     OpenCodeGo,
+    Zai,
 }
 
 impl Provider {
@@ -30,6 +32,7 @@ impl Provider {
             PROVIDER_GROK_CONSUMER => Some(Self::GrokConsumer),
             PROVIDER_GROK_API => Some(Self::GrokApi),
             PROVIDER_OPENCODE_GO => Some(Self::OpenCodeGo),
+            PROVIDER_ZAI => Some(Self::Zai),
             _ => None,
         }
     }
@@ -42,6 +45,7 @@ impl Provider {
             Self::GrokConsumer => PROVIDER_GROK_CONSUMER,
             Self::GrokApi => PROVIDER_GROK_API,
             Self::OpenCodeGo => PROVIDER_OPENCODE_GO,
+            Self::Zai => PROVIDER_ZAI,
         }
     }
 }
@@ -59,9 +63,9 @@ impl Provider {
     /// `view` configuration section. Provider-native aliases are normalized to
     /// canonical keys: Ollama exposes `session`/`weekly`, Kimi
     /// `5-hour`/`weekly`/`total`, OpenCode `5-hour`/`weekly`/`monthly`, and
-    /// Codex now exposes `5-hour` plus its canonical weekly key `primary`.
-    /// The remaining single-window providers expose their primary weekly
-    /// quota as `primary`.
+    /// Codex now exposes `5-hour` plus its canonical weekly key `primary`,
+    /// Z.AI exposes `5-hour`/`weekly`, and the remaining single-window
+    /// providers expose their primary weekly quota as `primary`.
     ///
     /// Window identifiers outside this set are unknown for the provider and
     /// are ignored safely when resolving display preferences.
@@ -72,6 +76,7 @@ impl Provider {
             Self::Kimi => &["5-hour", "weekly", "total"],
             Self::OllamaCloud => &["session", "weekly"],
             Self::OpenCodeGo => &["5-hour", "weekly", "monthly"],
+            Self::Zai => &["5-hour", "weekly"],
         }
     }
 }
@@ -329,6 +334,7 @@ mod tests {
                 Provider::OpenCodeGo,
                 &["5-hour", "weekly", "monthly"][..],
             ),
+            ("zai", Provider::Zai, &["5-hour", "weekly"][..]),
         ];
         for (identifier, provider, windows) in providers {
             assert_eq!(
