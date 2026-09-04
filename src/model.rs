@@ -58,14 +58,17 @@ impl Provider {
     /// These are the persisted, menu-selectable window vocabulary used by the
     /// `view` configuration section. Provider-native aliases are normalized to
     /// canonical keys: Ollama exposes `session`/`weekly`, Kimi
-    /// `5-hour`/`weekly`/`total`, OpenCode `5-hour`/`weekly`/`monthly`, and the
-    /// remaining providers expose their primary weekly quota as `primary`.
+    /// `5-hour`/`weekly`/`total`, OpenCode `5-hour`/`weekly`/`monthly`, and
+    /// Codex now exposes `5-hour` plus its canonical weekly key `primary`.
+    /// The remaining single-window providers expose their primary weekly
+    /// quota as `primary`.
     ///
     /// Window identifiers outside this set are unknown for the provider and
     /// are ignored safely when resolving display preferences.
     pub fn canonical_window_keys(&self) -> &'static [&'static str] {
         match self {
-            Self::Codex | Self::GrokConsumer | Self::GrokApi => &["primary"],
+            Self::Codex => &["5-hour", "primary"],
+            Self::GrokConsumer | Self::GrokApi => &["primary"],
             Self::Kimi => &["5-hour", "weekly", "total"],
             Self::OllamaCloud => &["session", "weekly"],
             Self::OpenCodeGo => &["5-hour", "weekly", "monthly"],
@@ -312,7 +315,7 @@ mod tests {
     #[test]
     fn persisted_identifiers_cover_all_supported_view_values() {
         let providers = [
-            ("codex", Provider::Codex, &["primary"][..]),
+            ("codex", Provider::Codex, &["5-hour", "primary"][..]),
             ("kimi", Provider::Kimi, &["5-hour", "weekly", "total"][..]),
             (
                 "ollama_cloud",

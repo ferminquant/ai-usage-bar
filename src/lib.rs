@@ -47,7 +47,7 @@ pub use opencode::{opencode_data_available, OpenCodeGoAdapter, OpenCodeResetSett
 pub use security::{redact_sensitive_text, safe_identifier};
 pub use viewmodel::{
     build_tray_view, build_tray_view_focused, build_tray_view_focused_window,
-    filter_snapshots_for_view, format_reset_label, provider_display_name, providers_for_snapshots,
-    switchable_providers_for_snapshots, window_display_name, MetricCard, ProviderCard,
-    TrayViewModel,
+    filter_snapshots_for_view, forced_window_for_provider, format_reset_label,
+    provider_display_name, providers_for_snapshots, switchable_providers_for_snapshots,
+    window_display_name, window_is_selectable, MetricCard, ProviderCard, TrayViewModel,
 };

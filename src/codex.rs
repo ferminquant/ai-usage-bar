@@ -166,6 +166,15 @@ fn parse_window(
     observed_at: DateTime<Utc>,
 ) -> Result<UsageSnapshot, String> {
     window.validate()?;
+    // Codex has started returning the rolling five-hour limit in `primary`
+    // and the weekly limit in `secondary`. The field names are positional,
+    // not semantic, so derive the user-facing label from the reported window
+    // duration instead of calling both rows "Weekly".
+    let window_label = match window.window_duration_mins {
+        Some(300) => "5-hour",
+        Some(10080) => "primary",
+        _ => label,
+    };
     Ok(UsageSnapshot {
         provider: CODEX_PROVIDER,
         account_id: account_id.to_string(),
@@ -181,7 +190,7 @@ fn parse_window(
         limit: Some(100.0),
         unlimited: false,
         resets_at: window.resets_at.map(epoch_to_datetime),
-        window_label: Some(label.to_string()),
+        window_label: Some(window_label.to_string()),
         error: None,
     })
 }
@@ -583,6 +592,35 @@ mod tests {
         assert_eq!(primary.window_kind, WindowKind::Weekly);
         assert_eq!(secondary.used, Some(80.0));
         assert_eq!(secondary.window_kind, WindowKind::Daily);
+    }
+
+    #[test]
+    fn labels_codex_five_hour_and_weekly_windows_by_duration() {
+        let raw = serde_json::json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 7,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1786036566
+                },
+                "secondary": {
+                    "usedPercent": 2,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 1786036566
+                }
+            }
+        });
+        let snapshots = parse_rate_limits_response(&raw, fixture_time(), "codex-test").unwrap();
+        let quotas: Vec<_> = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.metric_kind == MetricKind::Quota)
+            .collect();
+        assert_eq!(quotas.len(), 2);
+        assert_eq!(quotas[0].window_label.as_deref(), Some("5-hour"));
+        assert_eq!(quotas[0].window_kind, WindowKind::Rolling);
+        assert_eq!(quotas[1].window_label.as_deref(), Some("primary"));
+        assert_eq!(quotas[1].window_kind, WindowKind::Weekly);
     }
 
     #[test]

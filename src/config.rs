@@ -83,14 +83,14 @@ pub struct ProviderViewSettings {
     pub metric_kinds: Option<Vec<String>>,
 }
 
-/// Versioned view preferences persisted in [`AppConfig::view`]. Provider-level
-/// visibility is paired with enablement by the shell so a hidden provider is
-/// not refreshed in the background.
+/// Versioned view and provider-control preferences persisted in
+/// [`AppConfig::view`]. Provider-level visibility is paired with enablement by
+/// the shell so a hidden or disabled provider is not refreshed in the
+/// background.
 ///
-/// The shell uses provider visibility and `enabled` together so a hidden
-/// provider is not refreshed. Unknown provider/window/metric identifiers are
-/// ignored during resolution, and an unsupported `version` falls back to
-/// defaults instead of failing the whole configuration.
+/// Unknown provider/window/metric identifiers are ignored during resolution,
+/// and an unsupported `version` falls back to defaults instead of failing the
+/// whole configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewSettings {
     #[serde(default = "default_view_version")]
@@ -915,11 +915,12 @@ mod tests {
     #[test]
     fn hidden_provider_is_disabled_at_registry_bootstrap() {
         let mut config = AppConfig::default();
-        config.set_view_hidden_providers(&[Provider::Codex]);
+        config.set_view_hidden_providers(&[Provider::Codex, Provider::Kimi]);
 
         let registry = build_registry(&config).unwrap();
 
         assert!(!registry.is_enabled(&Provider::Codex).unwrap());
+        assert!(!registry.is_enabled(&Provider::Kimi).unwrap());
     }
 
     #[test]

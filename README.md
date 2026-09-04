@@ -23,26 +23,33 @@ The bar is deliberately small, but it has three useful levels of detail:
 These screenshots are from the Windows shell; usage values and reset countdowns
 change as providers refresh.
 
+The compact pill appends a short marker for the focused quota window: `5h` for
+five-hour/session usage, `W` for weekly usage, and `M` for OpenCode monthly
+usage (Kimi's optional total window is marked `T`).
+
 Typical interactions:
 
 - **Click** the pill to cycle the focused provider.
 - **Hover** to see live, cached, stale, unavailable, and not-configured states.
 - **Right-click** to choose a provider or quota window, refresh, show or hide
-  providers and rows, copy details, open a provider's usage page,
-  edit OpenCode reset anchors, or enable/disable running automatically when
-  Windows starts. Unchecking a provider hides and disables it together; the
-  compact **Disabled** toggle reveals disabled cards so they can be restored
-  without editing JSON.
+  providers and rows, copy details, open a provider's usage page, edit OpenCode
+  reset anchors, or enable/disable running automatically when Windows starts.
+  Unchecking a provider hides and disables it together; the compact **Disabled**
+  toggle reveals disabled cards so they can be restored without editing JSON.
 
 ## Supported providers
 
 | Provider | What the bar reports | Important limitation |
 | --- | --- | --- |
-| Codex | CLI-reported usage windows and reset times | Uses the existing Codex CLI session. |
+| Codex | CLI-reported five-hour and weekly usage windows and reset times | Uses the existing Codex CLI session. |
 | Grok | SuperGrok weekly usage and reset time | Uses the Grok Build CLI session. |
 | Kimi | Five-hour and weekly windows, plus an optional total/credits view | Requires `kimi login`; some plan fields may be absent upstream. |
 | Ollama Pro | Hosted five-hour and weekly totals | Reset timestamps are not exposed by Ollama yet; the menu opens the usage page. |
 | OpenCode Go | Account-authoritative five-hour, weekly, and monthly percentages plus reset times when the local Go key is available | Reads the existing OpenCode Go key and calls the provider usage endpoint; falls back to an explicitly inferred local estimate when no key is available. |
+
+OpenCode Go uses nested quota gates: when Monthly is exhausted, the compact
+bar is locked to Monthly; when Weekly is exhausted, it is locked to Weekly and
+the 5-hour window cannot be selected until the outer limit resets.
 
 The widget does not scrape dashboards, import browser cookies, or combine
 unrelated provider limits into a misleading “total” percentage. See the
@@ -84,8 +91,9 @@ manifest say so. The package and upgrade process are documented in
 
 The provider panel is the preferred way to enable or disable hosted providers:
 uncheck a provider to hide it and stop its refreshes, then turn on **Disabled**
-to restore it later. Provider credentials remain in the provider's own local
-CLI/session store. The JSON file is still available for advanced configuration.
+to restore it later. Advanced users can still set `enabled` to `false` in
+`%APPDATA%\AI Usage Bar\config.json`. Provider credentials remain in each
+provider's own local CLI/session store.
 
 ### Build from source
 

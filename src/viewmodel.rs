@@ -104,6 +104,8 @@ impl ProviderCard {
 fn metric_sort_priority(provider: &str, metric: &MetricCard) -> u8 {
     let label = metric.label.to_ascii_lowercase();
     match provider {
+        "Codex" if label == "5-hour" => 0,
+        "Codex" if matches!(label.as_str(), "primary" | "weekly") => 1,
         "Ollama" if label == "session" => 0,
         "Kimi" if label == "5-hour" => 0,
         "Kimi" if matches!(label.as_str(), "total" | "monthly") => 1,
@@ -209,6 +211,11 @@ pub fn snapshot_window_key(snapshot: &UsageSnapshot) -> Option<&'static str> {
             "monthly" | "total" => Some("monthly"),
             _ => None,
         },
+        Provider::Codex => match label {
+            "5-hour" => Some("5-hour"),
+            "primary" | "weekly" => Some("primary"),
+            _ => None,
+        },
         _ => match label {
             "primary" => Some("primary"),
             _ => None,
@@ -216,18 +223,68 @@ pub fn snapshot_window_key(snapshot: &UsageSnapshot) -> Option<&'static str> {
     }
 }
 
+/// Return the OpenCode Go quota window that currently gates all shorter
+/// windows. A fully used monthly allowance blocks both weekly and rolling
+/// usage; otherwise a fully used weekly allowance blocks the 5-hour window.
+/// `None` means the compact bar may use the user's selected window.
+pub fn forced_window_for_provider(
+    snapshots: &[UsageSnapshot],
+    provider: &Provider,
+) -> Option<&'static str> {
+    if *provider != Provider::OpenCodeGo {
+        return None;
+    }
+
+    if quota_window_exhausted(snapshots, "monthly") {
+        Some("monthly")
+    } else if quota_window_exhausted(snapshots, "weekly") {
+        Some("weekly")
+    } else {
+        None
+    }
+}
+
+/// Whether a quota window may drive the compact OpenCode bar right now.
+/// When an outer quota is exhausted, only that gating window remains
+/// selectable; all shorter windows would falsely suggest usable capacity.
+pub fn window_is_selectable(
+    snapshots: &[UsageSnapshot],
+    provider: &Provider,
+    window: &str,
+) -> bool {
+    forced_window_for_provider(snapshots, provider).is_none_or(|forced| forced == window)
+}
+
+fn quota_window_exhausted(snapshots: &[UsageSnapshot], window: &str) -> bool {
+    snapshots.iter().any(|snapshot| {
+        snapshot.metric_kind == MetricKind::Quota
+            && snapshot.provider == Provider::OpenCodeGo
+            && snapshot.unit == "percent"
+            && snapshot.window_label.as_deref() == Some(window)
+            && matches!(
+                snapshot.freshness,
+                Freshness::Live | Freshness::Cached | Freshness::Stale
+            )
+            && snapshot
+                .remaining
+                .or_else(|| snapshot.used.map(|used| 100.0 - used))
+                .is_some_and(|remaining| remaining <= 0.0)
+    })
+}
+
 /// Filter snapshots down to those exposed by resolved display preferences.
 ///
 /// Hides providers listed in [`ResolvedView::hidden_providers`], restricts
 /// quota rows to each provider's `visible_windows`, and applies optional
 /// metric preferences. An absent per-provider preference uses the provider's
-/// defaults; an explicit empty list hides all optional metrics. This never
-/// touches provider `enabled`, so scheduling stays independent of display
-/// visibility.
+/// defaults; an explicit empty list hides all optional metrics. This pure
+/// filter never mutates provider enablement; the Windows shell pairs the
+/// provider control's display and scheduling changes before calling it.
 pub fn filter_snapshots_for_view(
     snapshots: &[UsageSnapshot],
     view: &ResolvedView,
 ) -> Vec<UsageSnapshot> {
+    let forced_opencode_window = forced_window_for_provider(snapshots, &Provider::OpenCodeGo);
     snapshots
         .iter()
         .filter(|snapshot| !view.is_provider_hidden(&snapshot.provider))
@@ -243,6 +300,14 @@ pub fn filter_snapshots_for_view(
             // counters have their own metric preference and may not carry a
             // canonical quota-window label at all.
             if snapshot.metric_kind != MetricKind::Quota {
+                return true;
+            }
+            // Never let a display preference hide the exhausted OpenCode
+            // gate: the compact bar must remain able to show the window that
+            // blocks all shorter windows.
+            if snapshot.provider == Provider::OpenCodeGo
+                && snapshot_window_key(snapshot) == forced_opencode_window
+            {
                 return true;
             }
             view.windows_for(&snapshot.provider).is_none_or(|windows| {
@@ -371,6 +436,10 @@ fn is_compact_candidate(s: &UsageSnapshot) -> bool {
                 s.window_label.as_deref(),
                 Some("5-hour" | "weekly" | "monthly")
             ),
+            Provider::Codex => matches!(
+                s.window_label.as_deref(),
+                Some("5-hour" | "primary" | "weekly")
+            ),
             _ => s.window_label.as_deref() == Some("primary"),
         }
         && s.used.is_some()
@@ -408,12 +477,20 @@ fn window_matches_snapshot(snapshot: &UsageSnapshot, window: &str) -> bool {
             }
             _ => false,
         },
+        Provider::Codex => match window {
+            "5-hour" => snapshot.window_label.as_deref() == Some("5-hour"),
+            "primary" | "weekly" => {
+                matches!(snapshot.window_label.as_deref(), Some("primary" | "weekly"))
+            }
+            _ => false,
+        },
         _ => window == "primary" && snapshot.window_label.as_deref() == Some("primary"),
     }
 }
 
 fn compact_priority(snapshot: &UsageSnapshot) -> u8 {
     match snapshot.provider {
+        Provider::Codex if snapshot.window_label.as_deref() == Some("5-hour") => 0,
         Provider::OllamaCloud if snapshot.window_label.as_deref() == Some("session") => 0,
         Provider::Kimi if snapshot.window_label.as_deref() == Some("5-hour") => 0,
         Provider::OpenCodeGo if snapshot.window_label.as_deref() == Some("5-hour") => 0,
@@ -458,7 +535,9 @@ pub fn build_tray_view_focused(
 /// Ollama's 5-hour session and Kimi's 5-hour rolling window are the default
 /// candidates; callers can pass a canonical window label such as `weekly` or
 /// `total` to select another reported quota without changing the
-/// provider-neutral snapshot model.
+/// provider-neutral snapshot model. OpenCode's exhausted monthly/weekly gate
+/// overrides a shorter requested window so the bar never implies capacity
+/// that the outer quota has already blocked.
 pub fn build_tray_view_focused_window(
     snapshots: &[UsageSnapshot],
     focus: Option<&Provider>,
@@ -483,16 +562,26 @@ pub fn build_tray_view_focused_window(
 
     let switchable = switchable_providers_for_snapshots(snapshots);
 
-    let primary = focus
-        .and_then(|wanted| {
-            focus_window.and_then(|window| {
-                snapshots
-                    .iter()
-                    .find(|s| is_window_candidate(s, window) && &s.provider == wanted)
-            })
+    let forced_window = focus.and_then(|wanted| forced_window_for_provider(snapshots, wanted));
+
+    let primary = forced_window
+        .and_then(|window| {
+            snapshots
+                .iter()
+                .find(|s| is_window_candidate(s, window) && focus == Some(&s.provider))
         })
-        .or_else(|| first_compact_candidate(snapshots, focus))
-        .or_else(|| first_compact_candidate(snapshots, None));
+        .or_else(|| {
+            focus
+                .and_then(|wanted| {
+                    focus_window.and_then(|window| {
+                        snapshots
+                            .iter()
+                            .find(|s| is_window_candidate(s, window) && &s.provider == wanted)
+                    })
+                })
+                .or_else(|| first_compact_candidate(snapshots, focus))
+                .or_else(|| first_compact_candidate(snapshots, None))
+        });
 
     let (icon_text, used_percent, status_label, focus_provider) = match primary {
         Some(s) => {
@@ -848,6 +937,103 @@ mod tests {
     }
 
     #[test]
+    fn opencode_exhausted_windows_force_the_outer_gate() {
+        let mut five_hour = make_snapshot(Some(0.0), Freshness::Live, Some("5-hour"));
+        five_hour.provider = Provider::OpenCodeGo;
+        five_hour.account_id = "opencode-gate".into();
+        five_hour.window_kind = WindowKind::Rolling;
+
+        let mut weekly = five_hour.clone();
+        weekly.used = Some(100.0);
+        weekly.remaining = Some(0.0);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("weekly".into());
+
+        let mut monthly = five_hour.clone();
+        monthly.used = Some(20.0);
+        monthly.remaining = Some(80.0);
+        monthly.window_kind = WindowKind::Monthly;
+        monthly.window_label = Some("monthly".into());
+
+        let snapshots = vec![five_hour, weekly, monthly];
+        assert_eq!(
+            forced_window_for_provider(&snapshots, &Provider::OpenCodeGo),
+            Some("weekly")
+        );
+        assert!(!window_is_selectable(
+            &snapshots,
+            &Provider::OpenCodeGo,
+            "5-hour"
+        ));
+        assert!(window_is_selectable(
+            &snapshots,
+            &Provider::OpenCodeGo,
+            "weekly"
+        ));
+
+        let weekly_view = build_tray_view_focused_window(
+            &snapshots,
+            Some(&Provider::OpenCodeGo),
+            Some("5-hour"),
+            Utc::now(),
+        );
+        assert_eq!(weekly_view.used_percent, Some(100.0));
+
+        let mut exhausted_monthly = snapshots[2].clone();
+        exhausted_monthly.used = Some(100.0);
+        exhausted_monthly.remaining = Some(0.0);
+        let snapshots = vec![
+            snapshots[0].clone(),
+            snapshots[1].clone(),
+            exhausted_monthly,
+        ];
+        assert_eq!(
+            forced_window_for_provider(&snapshots, &Provider::OpenCodeGo),
+            Some("monthly")
+        );
+        assert!(!window_is_selectable(
+            &snapshots,
+            &Provider::OpenCodeGo,
+            "weekly"
+        ));
+        let monthly_view = build_tray_view_focused_window(
+            &snapshots,
+            Some(&Provider::OpenCodeGo),
+            Some("5-hour"),
+            Utc::now(),
+        );
+        assert_eq!(monthly_view.used_percent, Some(100.0));
+    }
+
+    #[test]
+    fn opencode_exhausted_gate_survives_window_visibility_filter() {
+        let mut five_hour = make_snapshot(Some(0.0), Freshness::Live, Some("5-hour"));
+        five_hour.provider = Provider::OpenCodeGo;
+        five_hour.account_id = "opencode-filter".into();
+        five_hour.window_kind = WindowKind::Rolling;
+        let mut weekly = five_hour.clone();
+        weekly.used = Some(100.0);
+        weekly.remaining = Some(0.0);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("weekly".into());
+
+        let view = ResolvedView {
+            visible_windows: [(Provider::OpenCodeGo, vec!["5-hour".to_string()])]
+                .into_iter()
+                .collect(),
+            ..ResolvedView::default()
+        };
+        let filtered = filter_snapshots_for_view(&[five_hour, weekly], &view);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|snapshot| snapshot.window_label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("5-hour"), Some("weekly")]
+        );
+    }
+
+    #[test]
     fn tooltip_keeps_later_provider_cards_visible() {
         let codex = make_snapshot(Some(20.0), Freshness::Live, Some("primary"));
         let mut codex_secondary = codex.clone();
@@ -1051,6 +1237,43 @@ mod tests {
 
         let filtered = filter_snapshots_for_view(&[unavailable.clone()], &view);
         assert_eq!(filtered, vec![unavailable]);
+    }
+
+    #[test]
+    fn unavailable_hidden_provider_is_removed_from_tooltip() {
+        let mut unavailable = make_snapshot(None, Freshness::Unavailable, None);
+        unavailable.provider = Provider::Kimi;
+        unavailable.account_id = "kimi-test".into();
+        unavailable.error = Some(AdapterError {
+            code: ErrorCode::RateLimited,
+            message: None,
+        });
+
+        let available = providers_for_snapshots(&[unavailable.clone()]);
+        assert_eq!(available, vec![Provider::Kimi]);
+        let view = ResolvedView {
+            hidden_providers: vec![Provider::Kimi],
+            ..ResolvedView::default()
+        };
+        let filtered = filter_snapshots_for_view(&[unavailable], &view);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn codex_five_hour_and_weekly_labels_render_distinctly() {
+        let mut five_hour = make_snapshot(Some(7.0), Freshness::Live, Some("5-hour"));
+        five_hour.provider = Provider::Codex;
+        five_hour.window_kind = WindowKind::Rolling;
+        let mut weekly = five_hour.clone();
+        weekly.used = Some(2.0);
+        weekly.remaining = Some(98.0);
+        weekly.window_kind = WindowKind::Weekly;
+        weekly.window_label = Some("primary".into());
+
+        let view = build_tray_view(&[five_hour, weekly]);
+        assert!(view.tooltip.contains("5-hour: 93% left"));
+        assert!(view.tooltip.contains("Weekly: 98% left"));
+        assert_eq!(view.tooltip.matches("Weekly:").count(), 1);
     }
 
     #[test]
