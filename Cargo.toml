@@ -1,6 +1,6 @@
 [package]
 name = "ai-usage-bar"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 # shell.rs uses `slice::is_multiple_of` (1.87) and `slice::as_chunks` (1.88).
 rust-version = "1.88"
