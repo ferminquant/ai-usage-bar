@@ -29,8 +29,11 @@ mod windows_shell {
 
     use super::shell_logic::{
         apply_drop, normalize_used_percent, progress_fill_width, quota_progress, release_route,
-        render_detail_text, swap_drop, usage_band, DropCard, DropGrid, QuotaProgress, ReleaseRoute,
-        SlotRect, UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS,
+        render_detail_text, startup_button_label, startup_conflict_message,
+        startup_enabled_message, startup_toggle_plan, swap_drop, usage_band, DropCard, DropGrid,
+        QuotaProgress, ReleaseRoute, SlotRect, StartupRegistrationState, StartupTogglePlan,
+        UsageBand, DRAG_THRESHOLD_PX, GRID_COLUMNS, STARTUP_UNREADABLE_MESSAGE,
+        STARTUP_WRITE_FAILED_MESSAGE,
     };
 
     use windows::core::*;
@@ -129,6 +132,9 @@ mod windows_shell {
         tooltip_visible: bool,
         refresh_in_flight: bool,
         status: Option<String>,
+        /// Transient feedback mirrored onto the open control panel so action
+        /// results are visible where the user is looking, not only on the pill.
+        panel_status: Option<String>,
         panel_hwnd: Option<HWND>,
     }
 
@@ -161,6 +167,7 @@ mod windows_shell {
                 tooltip_visible: false,
                 refresh_in_flight: false,
                 status: None,
+                panel_status: None,
                 panel_hwnd: None,
             }
         }
@@ -929,9 +936,13 @@ mod windows_shell {
 
     fn set_status(hwnd: HWND, state: &mut AppState, message: &str) {
         state.status = Some(message.to_string());
+        state.panel_status = Some(message.to_string());
         unsafe {
             let _ = SetTimer(Some(hwnd), STATUS_TIMER_ID, STATUS_INTERVAL_MS, None);
             let _ = InvalidateRect(Some(hwnd), None, false);
+            if let Some(panel) = state.panel_hwnd {
+                let _ = InvalidateRect(Some(panel), None, false);
+            }
         }
     }
 
@@ -951,37 +962,53 @@ mod windows_shell {
         }
     }
 
+    /// Map the registry's startup inspection onto the UI-facing state used
+    /// for the panel button label and toggle feedback.
+    fn startup_registration_state() -> StartupRegistrationState {
+        use ai_usage_bar::startup::RegistrationInspection;
+        match ai_usage_bar::startup::inspect_startup_registration() {
+            Ok(RegistrationInspection::MatchesExecutable) => {
+                StartupRegistrationState::EnabledForCurrentExecutable
+            }
+            Ok(RegistrationInspection::NoRegistration) => StartupRegistrationState::Disabled,
+            Ok(RegistrationInspection::OtherExecutable { command }) => {
+                let command_path = ai_usage_bar::startup::startup_command_path(&command)
+                    .unwrap_or(&command)
+                    .to_string();
+                StartupRegistrationState::RegisteredToOtherExecutable { command_path }
+            }
+            Err(_) => StartupRegistrationState::Unknown,
+        }
+    }
+
     fn toggle_startup_registration(hwnd: HWND) {
-        let enabled = match ai_usage_bar::startup::auto_start_enabled() {
-            Ok(enabled) => enabled,
-            Err(error) => {
-                eprintln!("could not read startup registration: {error}");
+        match startup_toggle_plan(&startup_registration_state()) {
+            StartupTogglePlan::ExplainConflict { command_path } => {
+                // Never rewrite a registration owned by another executable;
+                // say so where the user is looking instead of failing quietly.
                 if let Some(state) = app_state(hwnd) {
-                    set_status(hwnd, state, "Could not read startup setting");
+                    set_status(hwnd, state, &startup_conflict_message(&command_path));
                 }
-                return;
             }
-        };
-        let next_enabled = !enabled;
-        match ai_usage_bar::startup::set_auto_start_enabled(next_enabled) {
-            Ok(()) => {
+            StartupTogglePlan::ReportUnreadable => {
                 if let Some(state) = app_state(hwnd) {
-                    set_status(
-                        hwnd,
-                        state,
-                        if next_enabled {
-                            "Run on Windows startup enabled"
-                        } else {
-                            "Run on Windows startup disabled"
-                        },
-                    );
+                    set_status(hwnd, state, STARTUP_UNREADABLE_MESSAGE);
                 }
-                request_panel_rebuild(hwnd);
             }
-            Err(error) => {
-                eprintln!("could not update startup registration: {error}");
-                if let Some(state) = app_state(hwnd) {
-                    set_status(hwnd, state, "Could not update startup setting");
+            StartupTogglePlan::Write { enable } => {
+                match ai_usage_bar::startup::set_auto_start_enabled(enable) {
+                    Ok(()) => {
+                        if let Some(state) = app_state(hwnd) {
+                            set_status(hwnd, state, &startup_enabled_message(enable));
+                        }
+                        request_panel_rebuild(hwnd);
+                    }
+                    Err(error) => {
+                        eprintln!("could not update startup registration: {error}");
+                        if let Some(state) = app_state(hwnd) {
+                            set_status(hwnd, state, STARTUP_WRITE_FAILED_MESSAGE);
+                        }
+                    }
                 }
             }
         }
@@ -1397,8 +1424,12 @@ mod windows_shell {
 
     fn clear_status_for_window(hwnd: HWND, state: &mut AppState) {
         state.status = None;
+        state.panel_status = None;
         unsafe {
             let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
+            if let Some(panel) = state.panel_hwnd {
+                let _ = InvalidateRect(Some(panel), None, false);
+            }
         }
     }
 
@@ -2239,6 +2270,10 @@ mod windows_shell {
     const PANEL_ROW_HEIGHT: i32 = 34;
     const PANEL_HEADER_HEIGHT: i32 = 64;
     const PANEL_CARD_PADDING: i32 = 14;
+    /// Reserved strip under the footer buttons for transient action feedback
+    /// ("Copied!", startup state changes, errors) so results are visible in
+    /// the panel instead of only on the pill behind it.
+    const PANEL_STATUS_HEIGHT: i32 = 22;
 
     #[derive(Clone, Debug, PartialEq)]
     enum PanelAction {
@@ -2588,6 +2623,7 @@ mod windows_shell {
         layout.height = footer_y
             + footer_rows.max(1) as i32 * 32
             + footer_rows.saturating_sub(1) as i32 * PANEL_GAP
+            + PANEL_STATUS_HEIGHT
             + PANEL_MARGIN;
     }
 
@@ -2648,11 +2684,12 @@ mod windows_shell {
             ),
             ("Refresh".to_string(), PanelAction::Refresh),
             (
-                if ai_usage_bar::startup::auto_start_enabled().unwrap_or(false) {
-                    "Startup ✓".to_string()
-                } else {
-                    "Startup".to_string()
-                },
+                // Four states, not a binary checkmark: enabled here, plain
+                // off, registered to another copy, or unreadable. The old
+                // unwrap_or(false) rendered all three non-enabled states
+                // identically, so a foreign registration looked like a dead
+                // control.
+                startup_button_label(&startup_registration_state()),
                 PanelAction::ToggleStartup,
             ),
             ("Copy".to_string(), PanelAction::CopyDetails),
@@ -3083,6 +3120,28 @@ mod windows_shell {
                     FW_NORMAL,
                     COLOR_TEXT,
                     DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+                );
+            }
+
+            // Transient action feedback, mirrored from the pill status so it
+            // is readable while the panel covers the user's attention.
+            if let Some(message) =
+                app_state_ref(state.parent).and_then(|app| app.panel_status.clone())
+            {
+                let status_rect = RECT {
+                    left: PANEL_MARGIN,
+                    top: state.layout.height - PANEL_MARGIN - PANEL_STATUS_HEIGHT,
+                    right: state.layout.width - PANEL_MARGIN,
+                    bottom: state.layout.height - PANEL_MARGIN,
+                };
+                draw_text(
+                    paint_hdc,
+                    status_rect,
+                    &message,
+                    12,
+                    FW_NORMAL,
+                    COLOR_TEXT,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
                 );
             }
 
@@ -4268,8 +4327,13 @@ mod windows_shell {
             WM_TIMER if wparam.0 == STATUS_TIMER_ID => {
                 if let Some(state) = app_state(hwnd) {
                     state.status = None;
+                    state.panel_status = None;
+                    let panel = state.panel_hwnd;
                     let _ = KillTimer(Some(hwnd), STATUS_TIMER_ID);
                     let _ = InvalidateRect(Some(hwnd), None, false);
+                    if let Some(panel) = panel {
+                        let _ = InvalidateRect(Some(panel), None, false);
+                    }
                 }
                 LRESULT(0)
             }
