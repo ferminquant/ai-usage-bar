@@ -270,7 +270,7 @@ fn apply_ranges(input: &str, mut ranges: Vec<(usize, usize)>) -> String {
     output
 }
 
-fn stable_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn stable_hash(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in bytes {
         hash ^= u64::from(*byte);

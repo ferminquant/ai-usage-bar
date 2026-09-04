@@ -7,7 +7,7 @@
 //! `TOKENS_LIMIT` response and the current credit-based `CREDIT_LIMIT`
 //! response are supported.
 
-use crate::model::*;
+use crate::{model::*, security::stable_hash};
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 use std::time::Duration;
@@ -17,7 +17,6 @@ const ZAI_SOURCE: Source = Source::Api;
 const ZAI_CONFIDENCE: Confidence = Confidence::Exact;
 const DEFAULT_USAGE_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 const USAGE_URL_ENV: &str = "ZAI_USAGE_URL";
-const API_URL_ENV: &str = "ZAI_API_URL";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 const FIVE_HOUR_LABEL: &str = "5-hour";
@@ -82,7 +81,7 @@ pub fn zai_api_key_available() -> bool {
 
 /// Return a stable, non-secret account identifier derived from an API key.
 pub fn account_id_from_api_key(api_key: &str) -> String {
-    format!("zai-api-{:016x}", simple_hash(api_key.trim().as_bytes()))
+    format!("zai-api-{:016x}", stable_hash(api_key.trim().as_bytes()))
 }
 
 /// Fetch live z.ai coding-plan usage using the local API-key environment.
@@ -122,15 +121,11 @@ pub fn parse_usage_response(
         let Some(object) = row.as_object() else {
             continue;
         };
-        let kind = object
-            .get("type")
-            .and_then(Value::as_str)
-            .map(|value| value.to_ascii_uppercase());
-        let Some(kind) = kind else {
+        let Some(kind) = object.get("type").and_then(Value::as_str) else {
             continue;
         };
 
-        let parsed = match kind.as_str() {
+        let parsed = match kind {
             "TOKENS_LIMIT" | "CREDIT_LIMIT" => parse_quota_row(object, observed_at, account_id),
             "TIME_LIMIT" => parse_request_row(object, observed_at, account_id),
             // New server-side limit types should not be guessed at.  Sibling
@@ -140,10 +135,7 @@ pub fn parse_usage_response(
         // A malformed sibling must not hide valid windows from the same
         // refresh. If every supported row is malformed, the empty result
         // below becomes one redacted schema-drift failure for the provider.
-        let Ok(parsed) = parsed else {
-            continue;
-        };
-        if let Some(snapshot) = parsed {
+        if let Ok(Some(snapshot)) = parsed {
             snapshots.push(snapshot);
         }
     }
@@ -157,32 +149,6 @@ pub fn parse_usage_response(
     Ok(snapshots)
 }
 
-/// Convert an adapter failure into a valid unavailable snapshot.
-pub fn error_snapshot(
-    account_id: &str,
-    observed_at: DateTime<Utc>,
-    error: ZaiAdapterError,
-) -> UsageSnapshot {
-    UsageSnapshot {
-        provider: ZAI_PROVIDER,
-        account_id: account_id.to_string(),
-        metric_kind: MetricKind::Quota,
-        window_kind: WindowKind::None,
-        unit: "percent".to_string(),
-        observed_at,
-        source: ZAI_SOURCE,
-        freshness: Freshness::Unavailable,
-        confidence: Confidence::Unknown,
-        used: None,
-        remaining: None,
-        limit: None,
-        unlimited: false,
-        resets_at: None,
-        window_label: None,
-        error: Some(AdapterError::from(error)),
-    }
-}
-
 fn parse_quota_row(
     row: &serde_json::Map<String, Value>,
     observed_at: DateTime<Utc>,
@@ -193,7 +159,6 @@ fn parse_quota_row(
     };
 
     let percentage = percentage_used(row)?;
-    let resets_at = parse_reset_time(row.get("nextResetTime"));
     let snapshot = UsageSnapshot {
         provider: ZAI_PROVIDER,
         account_id: account_id.to_string(),
@@ -208,7 +173,7 @@ fn parse_quota_row(
         remaining: Some(100.0 - percentage),
         limit: Some(100.0),
         unlimited: false,
-        resets_at,
+        resets_at: parse_reset_time(row.get("nextResetTime")),
         window_label: Some(label.to_string()),
         error: None,
     };
@@ -226,7 +191,7 @@ fn parse_request_row(
     let Some((window_kind, _)) = classify_window(row, true) else {
         return Ok(None);
     };
-    let Some(limit) = number_from(row, &["usage", "limit", "total", "totol"]) else {
+    let Some(limit) = number_from(row, "usage") else {
         return Ok(None);
     };
     if !limit.is_finite() || limit < 0.0 {
@@ -235,7 +200,7 @@ fn parse_request_row(
         ));
     }
 
-    let percentage = number_from(row, &["percentage"]);
+    let percentage = number_from(row, "percentage");
     if let Some(percentage) = percentage {
         if !percentage.is_finite() || !(0.0..=100.0).contains(&percentage) {
             return Err(ZaiAdapterError::SchemaDrift(
@@ -243,15 +208,12 @@ fn parse_request_row(
             ));
         }
     }
-    let used = number_from(row, &["currentValue", "currentUsage", "used"])
-        .or_else(|| percentage.map(|value| limit * value / 100.0));
+    let used =
+        number_from(row, "currentValue").or_else(|| percentage.map(|value| limit * value / 100.0));
     let Some(used) = used else {
         return Ok(None);
     };
-    let remaining = number_from(row, &["remaining"]).or(Some(limit - used));
-    let Some(remaining) = remaining else {
-        return Ok(None);
-    };
+    let remaining = number_from(row, "remaining").unwrap_or(limit - used);
     if !used.is_finite()
         || used < 0.0
         || !remaining.is_finite()
@@ -292,48 +254,30 @@ fn parse_request_row(
 ///
 /// `unit=3, number=5` is the rolling five-hour window and `unit=6,
 /// number=1|7` is the weekly window.  `TIME_LIMIT` currently uses `unit=5,
-/// number=1` for the monthly MCP allowance.  A textual period is accepted as
-/// a forward-compatible fallback for proxy-normalized responses.
+/// number=1` for the monthly MCP allowance.
 fn classify_window(
     row: &serde_json::Map<String, Value>,
     time_limit: bool,
 ) -> Option<(WindowKind, &'static str)> {
-    let unit = integer_from(row, &["unit"]);
-    let number = integer_from(row, &["number"]);
+    let unit = row.get("unit").and_then(Value::as_i64);
+    let number = row.get("number").and_then(Value::as_i64);
     match (unit, number) {
-        (Some(3), Some(5)) => return Some((WindowKind::Rolling, FIVE_HOUR_LABEL)),
-        (Some(6), Some(1 | 7)) => return Some((WindowKind::Weekly, WEEKLY_LABEL)),
-        (Some(5), Some(1)) if time_limit => return Some((WindowKind::Monthly, MCP_LABEL)),
-        _ => {}
+        (Some(3), Some(5)) => Some((WindowKind::Rolling, FIVE_HOUR_LABEL)),
+        (Some(6), Some(1 | 7)) => Some((WindowKind::Weekly, WEEKLY_LABEL)),
+        (Some(5), Some(1)) if time_limit => Some((WindowKind::Monthly, MCP_LABEL)),
+        _ => None,
     }
-
-    let text = ["window", "period", "name", "label", "unit", "number"]
-        .iter()
-        .filter_map(|key| row.get(*key).and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    if text.contains("5-hour") || text.contains("5 hour") || text.contains("5h") {
-        return Some((WindowKind::Rolling, FIVE_HOUR_LABEL));
-    }
-    if text.contains("week") || text.contains("7-day") || text.contains("7 day") {
-        return Some((WindowKind::Weekly, WEEKLY_LABEL));
-    }
-    if time_limit && (text.contains("month") || text.contains("mcp")) {
-        return Some((WindowKind::Monthly, MCP_LABEL));
-    }
-    None
 }
 
 fn percentage_used(row: &serde_json::Map<String, Value>) -> Result<f64, ZaiAdapterError> {
-    let percentage = if let Some(percentage) = number_from(row, &["percentage"]) {
+    let percentage = if let Some(percentage) = number_from(row, "percentage") {
         percentage
     } else {
-        let total = number_from(row, &["usage", "limit", "total", "totol"]).ok_or_else(|| {
+        let total = number_from(row, "usage").ok_or_else(|| {
             ZaiAdapterError::SchemaDrift("quota row is missing percentage and usable totals".into())
         })?;
-        let used = number_from(row, &["currentValue", "currentUsage", "used"])
-            .or_else(|| number_from(row, &["remaining"]).map(|remaining| total - remaining))
+        let used = number_from(row, "currentValue")
+            .or_else(|| number_from(row, "remaining").map(|remaining| total - remaining))
             .ok_or_else(|| {
                 ZaiAdapterError::SchemaDrift(
                     "quota row is missing percentage and usable totals".into(),
@@ -364,112 +308,32 @@ fn percentage_used(row: &serde_json::Map<String, Value>) -> Result<f64, ZaiAdapt
     Ok(percentage)
 }
 
-fn number_from(row: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|key| match row.get(*key) {
-        Some(Value::Number(value)) => value.as_f64(),
-        Some(Value::String(value)) => value.trim().parse::<f64>().ok(),
-        _ => None,
-    })
-}
-
-fn integer_from(row: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<i64> {
-    let value = number_from(row, keys)?;
-    if !value.is_finite()
-        || value.fract() != 0.0
-        || value < i64::MIN as f64
-        || value > i64::MAX as f64
-    {
-        return None;
-    }
-    Some(value as i64)
+fn number_from(row: &serde_json::Map<String, Value>, key: &str) -> Option<f64> {
+    row.get(key).and_then(Value::as_f64)
 }
 
 fn parse_reset_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
-    let value = value?;
-    let raw = match value {
-        Value::Number(value) => value.as_f64(),
-        Value::String(value) => value.trim().parse::<f64>().ok(),
-        _ => return None,
-    };
-    let Some(raw) = raw else {
-        // A proxy may normalize the monitor timestamp to an RFC3339 string.
-        return value
-            .as_str()
-            .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
-            .map(|date| date.with_timezone(&Utc));
-    };
-    if !raw.is_finite() || raw <= 0.0 {
-        return None;
-    }
-    // The monitor API uses epoch milliseconds.  Accept seconds as well for
-    // old captures/proxies, while keeping the conversion bounded and safe.
-    let seconds = if raw >= 100_000_000_000.0 {
-        raw / 1_000.0
-    } else {
-        raw
-    };
-    if !seconds.is_finite() || seconds < i64::MIN as f64 || seconds > i64::MAX as f64 {
-        return None;
-    }
-    let whole = seconds.trunc() as i64;
-    let nanos = ((seconds - whole as f64) * 1_000_000_000.0).round();
-    Utc.timestamp_opt(whole, nanos.clamp(0.0, 999_999_999.0) as u32)
-        .single()
+    value
+        .and_then(Value::as_i64)
+        .filter(|millis| *millis > 0)
+        .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
 }
 
 fn response_error(raw: &Value) -> Option<ZaiAdapterError> {
     let success = raw.get("success").and_then(Value::as_bool);
-    let code = raw.get("code").and_then(parse_code);
-    let raw_error_code = raw
-        .pointer("/error/code")
-        .or_else(|| raw.pointer("/_error/code"));
-    let error_code = raw_error_code.and_then(parse_code).or(code);
+    let error_code = raw.get("code").and_then(parse_code);
     let explicit_failure = success == Some(false);
     let code_failure = error_code.is_some_and(|value| value != 0 && value != 200);
-    let nested_text = raw
-        .pointer("/error/message")
-        .or_else(|| raw.pointer("/_error/message"))
-        .and_then(Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .or_else(|| {
-            raw.get("error")
-                .and_then(Value::as_str)
-                .map(str::to_ascii_lowercase)
-        })
-        .or_else(|| {
-            raw.get("_error")
-                .and_then(Value::as_str)
-                .map(str::to_ascii_lowercase)
-        })
-        // Redacted fixtures may preserve a textual `_error.code` such as
-        // `timeout`; numeric business codes are classified below instead.
-        .or_else(|| {
-            raw_error_code
-                .filter(|value| parse_code(value).is_none())
-                .and_then(Value::as_str)
-                .map(str::to_ascii_lowercase)
-        });
-    let text_error = if explicit_failure || code_failure {
-        nested_text
-            .or_else(|| {
-                raw.get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_ascii_lowercase)
-            })
-            .or_else(|| {
-                raw.get("msg")
-                    .and_then(Value::as_str)
-                    .map(str::to_ascii_lowercase)
-            })
-    } else {
-        nested_text
-    };
-    let failed = explicit_failure || code_failure || text_error.is_some();
-    if !failed {
+    if !explicit_failure && !code_failure {
         return None;
     }
 
-    if let Some(text) = text_error {
+    if let Some(text) = raw
+        .get("message")
+        .or_else(|| raw.get("msg"))
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+    {
         if text.contains("timeout") {
             return Some(ZaiAdapterError::Timeout);
         }
@@ -528,9 +392,7 @@ fn normalize_api_key(value: String) -> Option<String> {
 }
 
 fn http_get_usage(api_key: &str) -> Result<Value, ZaiAdapterError> {
-    let url = std::env::var(USAGE_URL_ENV)
-        .or_else(|_| std::env::var(API_URL_ENV))
-        .unwrap_or_else(|_| DEFAULT_USAGE_URL.to_string());
+    let url = std::env::var(USAGE_URL_ENV).unwrap_or_else(|_| DEFAULT_USAGE_URL.to_string());
     let response = ureq::get(&url)
         // z.ai's official usage-query plugin sends the raw API key in this
         // header. The monitor service also accepts Bearer keys, but raw is
@@ -564,15 +426,6 @@ fn map_ureq_error(error: ureq::Error) -> ZaiAdapterError {
             }
         }
     }
-}
-
-fn simple_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 #[cfg(test)]
@@ -696,28 +549,6 @@ mod tests {
             Err(ZaiAdapterError::AuthExpired)
         ));
         let limited = serde_json::json!({"code": 1310, "success": false});
-        assert!(matches!(
-            parse_usage_response(&limited, fixture_time(), "zai-test"),
-            Err(ZaiAdapterError::RateLimited)
-        ));
-    }
-
-    #[test]
-    fn official_nested_error_shape_is_classified_by_business_code() {
-        let auth = serde_json::json!({
-            "error": {
-                "code": "1001",
-                "message": "Authentication parameter not received"
-            }
-        });
-        assert!(matches!(
-            parse_usage_response(&auth, fixture_time(), "zai-test"),
-            Err(ZaiAdapterError::AuthExpired)
-        ));
-
-        let limited = serde_json::json!({
-            "error": {"code": "1308", "message": "Usage limit reached"}
-        });
         assert!(matches!(
             parse_usage_response(&limited, fixture_time(), "zai-test"),
             Err(ZaiAdapterError::RateLimited)
