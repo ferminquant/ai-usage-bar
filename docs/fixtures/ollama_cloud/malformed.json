@@ -1,7 +1,7 @@
 {
-  "limits": {
+  "included": {
     "session": {
-      "usage": "not-a-fraction"
+      "remaining_percent": "not-a-number"
     }
   }
 }

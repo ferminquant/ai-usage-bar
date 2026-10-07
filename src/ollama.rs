@@ -1,10 +1,11 @@
-//! Ollama Pro/cloud usage adapter.
+//! Ollama Pro/cloud balance adapter.
 //!
-//! The cloud usage endpoint is the primary source for the two account-level
-//! totals. Ollama does not currently include reset timestamps in that JSON, so
-//! the adapter leaves `resets_at` empty. The Windows shell offers a direct link
-//! to the authenticated settings page as the low-friction fallback until
-//! Ollama exposes reset metadata through a supported API. On Windows, a
+//! `GET https://ollama.com/api/balance` is the documented source for both
+//! account shapes: legacy plans report `included.session`/`included.weekly`
+//! remaining percentages with server reset timestamps, and credit plans report
+//! a monthly included allowance plus purchased credits. Ollama retired the
+//! undocumented `/api/usage` limits payload on 2026-10-07; that route now serves
+//! request-count history, which this adapter does not consume. On Windows, a
 //! signed-in Ollama daemon may be running inside WSL while the tray process is
 //! native Windows; if the native key is rejected, the adapter retries with the
 //! default WSL Ollama key without changing either session.
@@ -26,7 +27,7 @@ use std::time::Duration;
 const OLLAMA_PROVIDER: Provider = Provider::OllamaCloud;
 const OLLAMA_SOURCE: Source = Source::Api;
 const OLLAMA_CONFIDENCE: Confidence = Confidence::Exact;
-const DEFAULT_USAGE_URL: &str = "https://ollama.com/api/usage";
+const DEFAULT_BALANCE_URL: &str = "https://ollama.com/api/balance";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_LABEL: &str = "session";
 const WEEKLY_LABEL: &str = "weekly";
@@ -80,23 +81,64 @@ impl ProviderAdapter for OllamaCloudAdapter {
 }
 
 #[derive(Debug, Deserialize)]
-struct UsageResponse {
+struct BalanceResponse {
     #[serde(default)]
-    limits: Option<UsageLimits>,
+    included: Option<IncludedBalance>,
+    #[serde(default)]
+    purchased: Option<PurchasedBalance>,
 }
 
 #[derive(Debug, Deserialize)]
-struct UsageLimits {
+struct IncludedBalance {
     #[serde(default)]
-    session: Option<UsageWindow>,
+    session: Option<LegacyWindow>,
     #[serde(default)]
-    weekly: Option<UsageWindow>,
+    weekly: Option<LegacyWindow>,
+    #[serde(default, deserialize_with = "deserialize_optional_usd")]
+    balance_usd: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_usd")]
+    allowance_usd: Option<f64>,
+    #[serde(default)]
+    period: Option<BalancePeriod>,
 }
 
 #[derive(Debug, Deserialize)]
-struct UsageWindow {
+struct LegacyWindow {
+    remaining_percent: f64,
     #[serde(default)]
-    usage: Option<f64>,
+    resets_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BalancePeriod {
+    #[serde(default)]
+    until: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PurchasedBalance {
+    #[serde(default, deserialize_with = "deserialize_optional_usd")]
+    balance_usd: Option<f64>,
+}
+
+/// Dollar amounts are documented as JSON numbers but arrive as strings on
+/// some account shapes; accept both rather than dropping the balance.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum UsdValue {
+    Number(f64),
+    Text(String),
+}
+
+fn deserialize_optional_usd<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<UsdValue>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        UsdValue::Number(number) => Some(number),
+        UsdValue::Text(text) => text.trim().parse().ok(),
+    }))
 }
 
 enum OllamaAuth {
@@ -126,7 +168,7 @@ impl OllamaAuth {
                 public_key_authorization,
                 ..
             } => {
-                let challenge = format!("GET,/api/usage?ts={timestamp}");
+                let challenge = format!("GET,/api/balance?ts={timestamp}");
                 let signature = private_key
                     .key_data()
                     .ed25519()
@@ -154,24 +196,28 @@ pub fn fetch_ollama_cloud_snapshots() -> Result<Vec<UsageSnapshot>, OllamaAdapte
         }
         Err(error) => return Err(error),
     };
-    let body = match http_get_usage(&auth, timestamp) {
+    let body = match http_get_balance(&auth, timestamp) {
         Ok(body) => body,
         Err(OllamaAdapterError::AuthExpired) if wsl_auth_fallback_allowed() => {
             let wsl_auth = load_wsl_auth().ok_or(OllamaAdapterError::AuthExpired)?;
-            let body = http_get_usage(&wsl_auth, timestamp)?;
-            return parse_usage_response(&body, observed_at, wsl_auth.account_id());
+            let body = http_get_balance(&wsl_auth, timestamp)?;
+            return parse_balance_response(&body, observed_at, wsl_auth.account_id());
         }
         Err(error) => return Err(error),
     };
 
-    parse_usage_response(&body, observed_at, auth.account_id())
+    parse_balance_response(&body, observed_at, auth.account_id())
 }
 
-/// Parse the guarded `/api/usage` response into provider-neutral snapshots.
+/// Parse the documented `/api/balance` response into provider-neutral snapshots.
 ///
-/// `usage` is a fraction in the range 0..=1.  Model rows are intentionally
-/// ignored; this adapter reports only the account-level totals.
-pub fn parse_usage_response(
+/// Legacy plans return `included.session`/`included.weekly` as remaining
+/// percentages (`remaining_percent` is 0..=100) with server reset timestamps.
+/// Credit plans return a monthly included allowance and an optional purchased
+/// balance. Whichever documented shape arrives is mapped; model rows are
+/// intentionally ignored because this adapter reports only account-level
+/// totals.
+pub fn parse_balance_response(
     raw: &serde_json::Value,
     observed_at: DateTime<Utc>,
     account_id: &str,
@@ -184,28 +230,28 @@ pub fn parse_usage_response(
         return Err(match code {
             "auth_expired" | "unauthorized" | "forbidden" => OllamaAdapterError::AuthExpired,
             "timeout" => OllamaAdapterError::Timeout,
-            _ => OllamaAdapterError::SchemaDrift("usage response contains an error".into()),
+            _ => OllamaAdapterError::SchemaDrift("balance response contains an error".into()),
         });
     }
-    let response: UsageResponse = serde_json::from_value(raw.clone())
+    let response: BalanceResponse = serde_json::from_value(raw.clone())
         .map_err(|error| OllamaAdapterError::SchemaDrift(error.to_string()))?;
-    let limits = response
-        .limits
-        .ok_or_else(|| OllamaAdapterError::SchemaDrift("missing limits".into()))?;
+    let included = response
+        .included
+        .ok_or_else(|| OllamaAdapterError::SchemaDrift("missing included balance".into()))?;
 
     let mut snapshots = Vec::new();
-    if let Some(session) = limits.session {
-        snapshots.push(parse_window(
-            session.usage,
+    if let Some(session) = included.session {
+        snapshots.push(parse_legacy_window(
+            session,
             SESSION_LABEL,
             WindowKind::Rolling,
             observed_at,
             account_id,
         )?);
     }
-    if let Some(weekly) = limits.weekly {
-        snapshots.push(parse_window(
-            weekly.usage,
+    if let Some(weekly) = included.weekly {
+        snapshots.push(parse_legacy_window(
+            weekly,
             WEEKLY_LABEL,
             WindowKind::Weekly,
             observed_at,
@@ -213,32 +259,62 @@ pub fn parse_usage_response(
         )?);
     }
 
+    if let Some(balance) = included.balance_usd {
+        // Only carry an allowance limit that the balance cannot contradict;
+        // `validate` rejects a balance greater than its stated limit.
+        let limit = included
+            .allowance_usd
+            .filter(|allowance| *allowance >= balance);
+        snapshots.push(parse_credit_balance(
+            balance,
+            limit,
+            included.period.and_then(|period| period.until).as_deref(),
+            "included",
+            WindowKind::Monthly,
+            observed_at,
+            account_id,
+        )?);
+    }
+
+    if let Some(purchased) = response
+        .purchased
+        .and_then(|purchased| purchased.balance_usd)
+        .filter(|balance| *balance > 0.0)
+    {
+        snapshots.push(parse_credit_balance(
+            purchased,
+            None,
+            None,
+            "purchased",
+            WindowKind::None,
+            observed_at,
+            account_id,
+        )?);
+    }
+
     if snapshots.is_empty() {
         return Err(OllamaAdapterError::SchemaDrift(
-            "limits contains no session or weekly window".into(),
+            "balance response contains no recognized balances".into(),
         ));
     }
 
     Ok(snapshots)
 }
 
-fn parse_window(
-    usage: Option<f64>,
+fn parse_legacy_window(
+    window: LegacyWindow,
     label: &str,
     window_kind: WindowKind,
     observed_at: DateTime<Utc>,
     account_id: &str,
 ) -> Result<UsageSnapshot, OllamaAdapterError> {
-    let usage = usage.ok_or_else(|| {
-        OllamaAdapterError::SchemaDrift(format!("{label} window is missing usage"))
-    })?;
-    if !usage.is_finite() || !(0.0..=1.0).contains(&usage) {
+    let remaining = window.remaining_percent;
+    if !remaining.is_finite() || !(0.0..=100.0).contains(&remaining) {
         return Err(OllamaAdapterError::SchemaDrift(format!(
-            "{label} usage {usage} is outside [0, 1]"
+            "{label} remaining_percent {remaining} is outside [0, 100]"
         )));
     }
 
-    let used = usage * 100.0;
     let snapshot = UsageSnapshot {
         provider: OLLAMA_PROVIDER,
         account_id: account_id.to_string(),
@@ -249,11 +325,11 @@ fn parse_window(
         source: OLLAMA_SOURCE,
         freshness: Freshness::Live,
         confidence: OLLAMA_CONFIDENCE,
-        used: Some(used),
-        remaining: Some(100.0 - used),
+        used: Some(100.0 - remaining),
+        remaining: Some(remaining),
         limit: Some(100.0),
         unlimited: false,
-        resets_at: None,
+        resets_at: window.resets_at.as_deref().and_then(parse_timestamp),
         window_label: Some(label.to_string()),
         error: None,
     };
@@ -261,6 +337,53 @@ fn parse_window(
         .validate()
         .map_err(|error| OllamaAdapterError::SchemaDrift(error.to_string()))?;
     Ok(snapshot)
+}
+
+/// Credit balances render with `used` carrying the remaining balance, matching
+/// the existing Codex credits convention.
+fn parse_credit_balance(
+    balance: f64,
+    limit: Option<f64>,
+    resets_at: Option<&str>,
+    label: &str,
+    window_kind: WindowKind,
+    observed_at: DateTime<Utc>,
+    account_id: &str,
+) -> Result<UsageSnapshot, OllamaAdapterError> {
+    if !balance.is_finite() || balance < 0.0 {
+        return Err(OllamaAdapterError::SchemaDrift(format!(
+            "{label} balance {balance} is not a non-negative dollar amount"
+        )));
+    }
+
+    let snapshot = UsageSnapshot {
+        provider: OLLAMA_PROVIDER,
+        account_id: account_id.to_string(),
+        metric_kind: MetricKind::Credits,
+        window_kind,
+        unit: "USD".to_string(),
+        observed_at,
+        source: OLLAMA_SOURCE,
+        freshness: Freshness::Live,
+        confidence: OLLAMA_CONFIDENCE,
+        used: Some(balance),
+        remaining: Some(balance),
+        limit,
+        unlimited: false,
+        resets_at: resets_at.and_then(parse_timestamp),
+        window_label: Some(label.to_string()),
+        error: None,
+    };
+    snapshot
+        .validate()
+        .map_err(|error| OllamaAdapterError::SchemaDrift(error.to_string()))?;
+    Ok(snapshot)
+}
+
+fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
 pub fn error_snapshot(
@@ -401,11 +524,11 @@ fn env_value(names: &[&str]) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn http_get_usage(
+fn http_get_balance(
     auth: &OllamaAuth,
     timestamp: i64,
 ) -> Result<serde_json::Value, OllamaAdapterError> {
-    let url = format!("{DEFAULT_USAGE_URL}?ts={timestamp}");
+    let url = format!("{DEFAULT_BALANCE_URL}?ts={timestamp}");
     let authorization = auth.authorization_header(timestamp)?;
     let response = ureq::get(&url)
         .set("Authorization", &authorization)
@@ -481,53 +604,90 @@ mod tests {
     #[test]
     fn parse_normal_fixture_emits_session_and_weekly_totals() {
         let raw = load_fixture("normal.json");
-        let snapshots = parse_usage_response(&raw, fixture_time(), "ollama-test").unwrap();
+        let snapshots = parse_balance_response(&raw, fixture_time(), "ollama-test").unwrap();
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].window_kind, WindowKind::Rolling);
         assert_eq!(snapshots[0].window_label.as_deref(), Some(SESSION_LABEL));
         assert_eq!(snapshots[0].used, Some(37.0));
         assert_eq!(snapshots[0].remaining, Some(63.0));
-        assert!(snapshots[0].resets_at.is_none());
+        assert_eq!(
+            snapshots[0].resets_at,
+            Some(Utc.with_ymd_and_hms(2026, 10, 7, 18, 0, 0).unwrap())
+        );
         assert_eq!(snapshots[1].window_kind, WindowKind::Weekly);
-        assert_eq!(snapshots[1].used, Some(18.4));
+        assert!((snapshots[1].used.unwrap() - 18.4).abs() < 1e-9);
         assert_eq!(snapshots[1].remaining, Some(81.6));
-        assert!(snapshots[1].resets_at.is_none());
+        assert_eq!(
+            snapshots[1].resets_at,
+            Some(Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap())
+        );
         assert!(snapshots.iter().all(|snapshot| snapshot.validate().is_ok()));
     }
 
     #[test]
-    fn reset_metadata_remains_absent_until_ollama_exposes_it() {
+    fn server_reset_timestamps_pass_through_unchanged() {
         let raw = load_fixture("normal.json");
-        let snapshots = parse_usage_response(&raw, fixture_time(), "ollama-test").unwrap();
+        let snapshots = parse_balance_response(&raw, fixture_time(), "ollama-test").unwrap();
         assert_eq!(snapshots.len(), 2);
         assert!(snapshots
             .iter()
-            .all(|snapshot| snapshot.resets_at.is_none()));
+            .all(|snapshot| snapshot.resets_at.is_some()));
     }
 
     #[test]
-    fn malformed_usage_is_schema_drift() {
+    fn malformed_balance_is_schema_drift() {
         let raw = load_fixture("malformed.json");
-        let error = parse_usage_response(&raw, fixture_time(), "ollama-test").unwrap_err();
+        let error = parse_balance_response(&raw, fixture_time(), "ollama-test").unwrap_err();
         assert!(matches!(error, OllamaAdapterError::SchemaDrift(_)));
     }
 
     #[test]
     fn auth_failure_fixture_maps_to_auth_expired() {
         let raw = load_fixture("auth_failure.json");
-        let error = parse_usage_response(&raw, fixture_time(), "ollama-test").unwrap_err();
+        let error = parse_balance_response(&raw, fixture_time(), "ollama-test").unwrap_err();
         assert!(matches!(error, OllamaAdapterError::AuthExpired));
     }
 
     #[test]
-    fn missing_limits_is_schema_drift() {
-        let error = parse_usage_response(
-            &serde_json::json!({"activity": {}}),
+    fn missing_included_balance_is_schema_drift() {
+        let error = parse_balance_response(
+            &serde_json::json!({"purchased": {"balance_usd": 0}}),
             fixture_time(),
             "ollama-test",
         )
         .unwrap_err();
         assert!(matches!(error, OllamaAdapterError::SchemaDrift(_)));
+    }
+
+    #[test]
+    fn credits_plan_emits_included_and_purchased_balances() {
+        let raw = load_fixture("credits.json");
+        let snapshots = parse_balance_response(&raw, fixture_time(), "ollama-test").unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].metric_kind, MetricKind::Credits);
+        assert_eq!(snapshots[0].unit, "USD");
+        assert_eq!(snapshots[0].window_kind, WindowKind::Monthly);
+        assert_eq!(snapshots[0].used, Some(72.5));
+        assert_eq!(snapshots[0].limit, Some(100.0));
+        assert_eq!(
+            snapshots[0].resets_at,
+            Some(Utc.with_ymd_and_hms(2026, 10, 15, 9, 30, 0).unwrap())
+        );
+        assert_eq!(snapshots[1].window_label.as_deref(), Some("purchased"));
+        assert_eq!(snapshots[1].used, Some(25.0));
+        assert!(snapshots.iter().all(|snapshot| snapshot.validate().is_ok()));
+    }
+
+    #[test]
+    fn string_dollar_amounts_are_accepted() {
+        let raw = serde_json::json!({
+            "included": {"balance_usd": "12.5", "allowance_usd": "100"},
+            "purchased": {"balance_usd": "0"}
+        });
+        let snapshots = parse_balance_response(&raw, fixture_time(), "ollama-test").unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].used, Some(12.5));
+        assert_eq!(snapshots[0].limit, Some(100.0));
     }
 
     #[test]

@@ -1,12 +1,15 @@
 {
-  "limits": {
+  "included": {
     "session": {
-      "usage": 0.37,
-      "models": []
+      "remaining_percent": 63.0,
+      "resets_at": "2026-10-07T18:00:00Z"
     },
     "weekly": {
-      "usage": 0.184,
-      "models": []
+      "remaining_percent": 81.6,
+      "resets_at": "2026-10-12T00:00:00Z"
     }
+  },
+  "purchased": {
+    "balance_usd": 0
   }
 }
