@@ -39,6 +39,35 @@ pub fn startup_value_matches_executable(value: &str, executable: &Path) -> bool 
     startup_path.eq_ignore_ascii_case(executable.to_string_lossy().as_ref())
 }
 
+/// Result of reading the per-user startup registration without modifying it.
+///
+/// The shell uses this to render an honest startup control: a Run entry owned
+/// by a different executable is distinct from "disabled", because toggling
+/// from this copy will refuse rather than rewrite the foreign entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationInspection {
+    /// No startup value is registered.
+    NoRegistration,
+    /// The registered command points at the supplied executable.
+    MatchesExecutable,
+    /// A registration exists and points at another executable.
+    OtherExecutable { command: String },
+}
+
+/// Pure classification of a Run value against an executable path, so the
+/// shell can label the startup control without touching the registry.
+pub fn classify_registration(value: Option<&str>, executable: &Path) -> RegistrationInspection {
+    match value {
+        None => RegistrationInspection::NoRegistration,
+        Some(value) if startup_value_matches_executable(value, executable) => {
+            RegistrationInspection::MatchesExecutable
+        }
+        Some(value) => RegistrationInspection::OtherExecutable {
+            command: value.to_string(),
+        },
+    }
+}
+
 /// Interpret a `REG_DWORD` startup-preference value.
 ///
 /// Values outside {0, 1} are not values this app wrote and are treated as "no
@@ -55,7 +84,10 @@ fn dword_to_startup_preference(value: u32) -> Option<bool> {
 
 #[cfg(windows)]
 mod windows_registry {
-    use super::{startup_value_matches_executable, STARTUP_VALUE_NAME};
+    use super::{
+        classify_registration, startup_value_matches_executable, RegistrationInspection,
+        STARTUP_VALUE_NAME,
+    };
     use std::fmt;
     use std::path::{Path, PathBuf};
 
@@ -360,6 +392,13 @@ mod windows_registry {
         }
     }
 
+    /// Read the current startup registration without changing anything.
+    pub fn inspect_startup_registration() -> Result<RegistrationInspection, StartupError> {
+        let value = read_startup_value()?;
+        let executable = current_executable()?;
+        Ok(classify_registration(value.as_deref(), &executable))
+    }
+
     pub fn auto_start_enabled() -> Result<bool, StartupError> {
         let Some(value) = read_startup_value()? else {
             return Ok(false);
@@ -435,15 +474,55 @@ mod windows_registry {
 }
 
 #[cfg(windows)]
-pub use windows_registry::{auto_start_enabled, set_auto_start_enabled, StartupError};
+pub use windows_registry::{
+    auto_start_enabled, inspect_startup_registration, set_auto_start_enabled, StartupError,
+};
 
 #[cfg(test)]
 mod tests {
-    use super::{startup_command_path, startup_value_matches_executable};
+    use super::{
+        classify_registration, startup_command_path, startup_value_matches_executable,
+        RegistrationInspection,
+    };
     use std::path::Path;
 
     #[cfg(windows)]
     use super::dword_to_startup_preference;
+
+    #[test]
+    fn classification_separates_absent_matching_and_foreign_registrations() {
+        let this_exe = Path::new(r"C:\App\ai-usage-bar-shell.exe");
+        let foreign_command = r#""C:\Other\ai-usage-bar-shell.exe""#;
+
+        assert_eq!(
+            classify_registration(None, this_exe),
+            RegistrationInspection::NoRegistration
+        );
+        assert_eq!(
+            classify_registration(Some(r#""C:\App\ai-usage-bar-shell.exe""#), this_exe),
+            RegistrationInspection::MatchesExecutable
+        );
+        assert_eq!(
+            classify_registration(Some(foreign_command), this_exe),
+            RegistrationInspection::OtherExecutable {
+                command: foreign_command.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn foreign_registration_command_yields_its_display_path() {
+        let foreign_command = r#""C:\Program Files\AI Usage Bar\ai-usage-bar-shell.exe" --hidden"#;
+        let inspection =
+            classify_registration(Some(foreign_command), Path::new(r"C:\App\this.exe"));
+        let RegistrationInspection::OtherExecutable { command } = inspection else {
+            panic!("a foreign registration must classify as OtherExecutable");
+        };
+        assert_eq!(
+            startup_command_path(&command),
+            Some(r"C:\Program Files\AI Usage Bar\ai-usage-bar-shell.exe")
+        );
+    }
 
     #[test]
     fn parses_quoted_and_unquoted_run_commands() {

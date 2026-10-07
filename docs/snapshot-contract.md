@@ -233,13 +233,15 @@ the evidence spikes (#2-#6) and then folded back here.
   Values arrive as decimal strings and the weekly window is 7 days from the
   subscription date (`resetTime` is authoritative; never a calendar-week
   boundary). See [kimi-spike.md](spikes/kimi-spike.md).
-- **Ollama Pro/cloud**: authenticated `GET /api/usage` is the primary source
-  for separate session and weekly hosted quota fractions. Map them to separate
-  `quota` snapshots (`rolling`/`session` and `weekly`/`weekly`) for one
-  provider/account, scaling the reported fraction by 100. The response
-  currently omits reset metadata, so leave `resets_at` absent and never infer
-  it from the documented five-hour/seven-day durations. The shell offers a
-  direct settings-page link as a manual fallback. Session is the default UI
+- **Ollama Pro/cloud**: authenticated `GET /api/balance` is the documented
+  source for account balances. Legacy plans return `included.session` and
+  `included.weekly` as `remaining_percent` (0..=100) with server-provided
+  `resets_at`; map them to separate `quota` snapshots
+  (`rolling`/`session` and `weekly`/`weekly`) for one provider/account, with
+  `used = 100 - remaining_percent`. Credit plans return
+  `included.balance_usd`/`allowance_usd`/`period.until` plus an optional
+  `purchased.balance_usd`; map those to `credits` snapshots in USD. Never
+  infer reset times when the server omits them. Session is the default UI
   focus; model-level request rows are detail-only and deferred. See
   [ollama-spike.md](spikes/ollama-spike.md).
 - **Grok consumer**: shared weekly SuperGrok pool across products.

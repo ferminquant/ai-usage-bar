@@ -157,3 +157,44 @@ the following are true:
 The totals implementation is complete. Until the upstream contract changes,
 the shell's **Open Ollama usage page** action is the supported reset-time
 workaround; no extension, cookie import, or HTML parser is part of the product.
+
+## 2026-10-07 update: endpoint migration (`/api/usage` → `/api/balance`)
+
+Ollama retired the undocumented limits payload this spike was built on. On
+2026-10-07 the live `GET /api/usage` returns request-count history only
+(`range`/`scope`/`granularity`/`totals.request_count`/`buckets`), and the
+account quota moved to a documented endpoint:
+
+```text
+GET https://ollama.com/api/balance      (no query parameters; `?ts=` is accepted)
+Authorization: <Ollama self-signed key token>
+```
+
+Live-validated response for this account (legacy plan shape):
+
+```json
+{
+  "included": {
+    "session": { "remaining_percent": 89.98, "resets_at": "2026-10-07T18:00:00Z" },
+    "weekly":  { "remaining_percent": 80.69, "resets_at": "2026-10-12T00:00:00Z" }
+  },
+  "purchased": { "balance_usd": 0 }
+}
+```
+
+Credit-plan accounts return `included.balance_usd` / `included.allowance_usd` /
+`included.period.until` and an optional `purchased.balance_usd` instead
+([docs](https://docs.ollama.com/api/balance)).
+
+What this changes for the adapter:
+
+- `session`/`weekly` `remaining_percent` is 0..=100; `used = 100 -
+  remaining_percent`, so the quota semantics from the original spike are
+  preserved.
+- `resets_at` is now server-authoritative passthrough; the deferred
+  reset-enrichment workarounds (settings-page parser, cookie import) are
+  unnecessary and remain out of scope.
+- The credit-plan shape maps to `credits` (USD) snapshots with the monthly
+  period reset; model-level request rows remain deferred.
+- The old `/api/usage` limits parser and fixtures were replaced with
+  `parse_balance_response` and [balance fixtures](../fixtures/ollama_cloud/).

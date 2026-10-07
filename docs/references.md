@@ -35,8 +35,12 @@ Codex + Kimi + hosted Ollama + Grok, Windows-first scope:
 - [Ollama pricing and cloud limits](https://ollama.com/pricing)
 - [Ollama cloud](https://docs.ollama.com/cloud) (future hosted-provider
   evidence only)
+- [Ollama balance endpoint](https://docs.ollama.com/api/balance) and
+  [cloud usage endpoint](https://docs.ollama.com/api/cloud-usage) — the
+  documented replacement for the retired `/api/usage` limits payload.
 - [Ollama usage spike](spikes/ollama-spike.md) — session/weekly semantics,
-  authenticated `/api/usage` evidence, and the deferred reset-metadata plan.
+  the `/api/usage` → `/api/balance` endpoint migration, and the implemented
+  reset-metadata mapping.
 - [OpenCode Go documentation](https://opencode.ai/docs/go/) — plan windows,
   dollar-weighted semantics, Go gateway endpoints, and the console link.
 - [OpenCode provider documentation](https://opencode.ai/docs/providers) —
